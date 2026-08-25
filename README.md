@@ -21,10 +21,12 @@ gone) — our own protocol on top of a compatible base, and room to add features
   itself over USB via `updat` with a pure-Rust SRAM flasher — iterate with
   `make -C rust flash`, no button pressing.
 - **M1 — real measurement: done.** INA226 over hardware I²C0 with the per-unit
-  EEPROM calibration, SysTick-paced sampling (~10 Hz publish, poll-rate
+  EEPROM calibration, TIMER5-paced sampling (~10 Hz publish, poll-rate
   independent), NTC temperature (recovered stock β-model) and D+/D− via the
   on-chip ADC, 1 Hz energy integration (RAM-only for now), all served in the
-  stock encrypted+checksummed `getva` packet. Verified live on hardware.
+  stock encrypted+checksummed `getva` packet — plus our plaintext `rawva`
+  verb with a window sequence number for fast lossless streaming
+  (`tools/rawva.py`). Verified live on hardware.
 - **Next: M2 — persistence** (real serial/run-count, energy write-back to the
   wear-leveled EEPROM journal, `gtrec` log, EEPROM writes in the I²C driver).
 - **Then: M3 — display** (ST7735 bring-up + minimal V/I/P draw layer);

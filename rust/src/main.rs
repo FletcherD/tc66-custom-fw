@@ -1,16 +1,19 @@
 //! TC66 custom firmware — M0 on the ecosystem USB stack.
 //!
 //! usb-device + usbd-serial + stm32-usbd (via the small UsbPeripheral impl in
-//! usb_bus.rs) provide CDC-ACM; we keep our own clock bring-up and the PA9 D+
-//! soft-connect choreography (board.rs), the SRAM marker debugging (markers.rs),
-//! and the polled main loop dispatching the bare-5-byte commands:
-//!   query -> "firm", getva -> 192-B static packet, updat -> Rust SRAM flasher
-//!   (flasher.rs), rotat/nextp/lastp -> silent no-ops.
+//! usb_bus.rs) provide a composite device: interface 0 = POWER-Z KM003C
+//! vendor emulation (powerz.rs, binds the mainline Linux `powerz` hwmon
+//! driver), interfaces 1+2 = CDC-ACM with the bare-5-byte commands:
+//!   query -> "firm", getva -> 192-B encrypted packet, rawva -> 46-B
+//!   plaintext, updat -> Rust SRAM flasher (flasher.rs), dev verbs,
+//!   rotat/nextp/lastp -> silent no-ops.
 //!
-//! Endpoint layout is whatever the stack allocates (expected: EP1 = interrupt IN,
-//! EP2 = bulk OUT+IN); `updat` discovers the bulk endpoint by scanning EPnR and
-//! the flasher reads its PMA buffers from the BTABLE, so nothing is hard-coded.
-//! Interrupts stay masked (startup.rs); everything runs off dev.poll().
+//! Endpoint layout: EP1 = powerz bulk pair (fixed — the kernel driver
+//! hard-codes 0x01/0x81); the CDC endpoints are whatever the stack allocates
+//! next (expected: EP2 = interrupt IN, EP3 = bulk OUT+IN). `updat` discovers
+//! the CDC bulk endpoint by scanning EPnR (skipping EP1) and the flasher
+//! reads its PMA buffers from the BTABLE. Interrupts stay masked
+//! (startup.rs); everything runs off dev.poll().
 
 #![no_std]
 #![no_main]
@@ -23,6 +26,7 @@ mod getva;
 mod i2c;
 mod ina;
 mod markers;
+mod powerz;
 mod startup;
 mod tft;
 mod ui;
@@ -33,10 +37,10 @@ use gd32f1::gd32f150 as pac;
 use markers::*;
 use usb_device::device::{StringDescriptors, UsbDeviceBuilder, UsbRev, UsbVidPid};
 use usb_device::prelude::*;
-use usbd_serial::{SerialPort, USB_CLASS_CDC};
+use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 23;
+const BUILD_ID: u32 = 36;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 type Serial<'a> = SerialPort<'a, usb_bus::UsbBus>;
@@ -52,7 +56,6 @@ fn main() -> ! {
     mk(MK_WINDOWS, 0);
 
     let p = pac::Peripherals::take().unwrap();
-    let cp = cortex_m::Peripherals::take().unwrap();
     board::clock_init(&p.rcu);
 
     /* Force a fresh enumeration of THIS app: the bootloader handed off with D+
@@ -62,15 +65,20 @@ fn main() -> ! {
     board::pa9_low(&p.gpioa);
     board::delay_ms(120);
 
+    /* Composite device wearing the POWER-Z KM003C identity so the mainline
+     * Linux `powerz` hwmon driver binds: the vendor class MUST be constructed
+     * first — the driver hard-codes bulk EPs 0x01/0x81 on interface 00 — and
+     * CDC-ACM (our protocol + updat reflash) follows on interfaces 1+2. */
     let usb_alloc = usb_bus::UsbBus::new(usb_bus::Gd32Usb);
+    let mut pz = powerz::PowerZ::new(&usb_alloc);
     let mut serial = SerialPort::new(&usb_alloc);
-    let mut dev = UsbDeviceBuilder::new(&usb_alloc, UsbVidPid(0x28E9, 0x018A))
+    let mut dev = UsbDeviceBuilder::new(&usb_alloc, UsbVidPid(0x5FC9, 0x0063))
         .strings(&[StringDescriptors::default()
-            .manufacturer("RuiDeng")
-            .product("TC66 USB Type-C Meter")
+            .manufacturer("ChargerLAB")
+            .product("POWER-Z KM003C")
             .serial_number("TC66")])
         .unwrap()
-        .device_class(USB_CLASS_CDC)
+        .composite_with_iads()
         .device_release(0x0100)
         .usb_rev(UsbRev::Usb200)
         .max_packet_size_0(64)
@@ -85,14 +93,19 @@ fn main() -> ! {
 
     board::pa9_high(&p.gpioa);
 
-    /* SysTick paces the sampler at 250 Hz (48 MHz / 192000), polled — no IRQ.
-     * One I2C read per tick; a 24-read window publishes at ~10 Hz, so readings
-     * are fresh regardless of how fast (or whether) the host polls getva. */
-    let mut syst = cp.SYST;
-    syst.set_clock_source(cortex_m::peripheral::syst::SystClkSource::Core);
-    syst.set_reload(192_000 - 1);
-    syst.clear_current();
-    syst.enable_counter();
+    /* TIMER5 (basic timer, no pins) free-runs at 10 kHz as the sampler
+     * timebase: 40 counts = one 4 ms tick, 250 ticks/s. Elapsed ticks accrue
+     * from CNT deltas each loop pass, so time spent blocked (a getva reply is
+     * ~21 ms of AES) is caught up, never lost — SysTick's COUNTFLAG latched a
+     * single wrap and dropped the rest, stalling sampler + energy clock under
+     * fast host polling. 16-bit @ 10 kHz wraps at 6.55 s, far beyond the
+     * longest blocking path (write_all's absent-host budget, ~0.5 s). */
+    p.rcu.apb1en().modify(|_, w| w.timer5en().enabled());
+    p.timer5.psc().write(|w| w.psc().bits(4799)); /* 48 MHz -> 10 kHz */
+    p.timer5.car().write(|w| w.car().bits(0xFFFF));
+    p.timer5.swevg().write(|w| w.upg().set_bit()); /* latch PSC now */
+    p.timer5.ctl0().modify(|_, w| w.cen().enabled());
+    getva::init(); /* AES key schedule now, while the stack is shallow */
     let mut sampler = ina::Sampler::new();
 
     /* 1 Hz energy integration (RAM only, starts at 0; persistence is M2):
@@ -107,9 +120,15 @@ fn main() -> ! {
     let mut ui_ticks: u32 = 0;
 
     let mut buf = [0u8; 64];
+    let mut prev_cnt = p.timer5.cnt().read().cnt().bits();
+    let mut tick_acc: u32 = 0;
     loop {
         mk(MK_HEART, mk_get(MK_HEART) + 1);
-        if syst.has_wrapped() {
+        let cnt = p.timer5.cnt().read().cnt().bits();
+        tick_acc += cnt.wrapping_sub(prev_cnt) as u32;
+        prev_cnt = cnt;
+        while tick_acc >= 40 {
+            tick_acc -= 40;
             if let Some(rd) = sampler.tick() {
                 unsafe {
                     let m = &mut *PUBLISHED.0.get();
@@ -120,9 +139,27 @@ fn main() -> ! {
                     m.temp_c = rd.temp_c;
                 }
             }
+            if let Some((iv, ii)) = sampler.instant() {
+                unsafe {
+                    let m = &mut *PUBLISHED.0.get();
+                    m.inst_v_1e4 = iv;
+                    m.inst_i_1e5 = ii;
+                }
+            }
+            /* refresh the pre-built powerz reply each tick (calm context) */
+            pz.set_payload(&powerz_payload());
             sec_ticks += 1;
             if sec_ticks >= 250 {
                 sec_ticks = 0;
+                if let Some(avg) = sampler.drain_second() {
+                    unsafe {
+                        let m = &mut *PUBLISHED.0.get();
+                        m.avg_v_1e4 = avg.v_1e4;
+                        m.avg_i_1e5 = avg.i_1e5;
+                        m.ori_uv = avg.ori_uv;
+                        m.ori_ua = avg.ori_ua;
+                    }
+                }
                 unsafe {
                     let m = &mut *PUBLISHED.0.get();
                     let (p, _) = ina::derive(m.v_1e4, m.i_1e5);
@@ -135,6 +172,9 @@ fn main() -> ! {
             ui_ticks += 1;
             if ui_ticks >= 125 && tft_alive {
                 ui_ticks = 0;
+                /* re-arm before the draw: it's the longest tick-body path,
+                 * and an unarmed IN during it risks the powerz 5 ms deadline */
+                pz.arm();
                 let m = unsafe { *PUBLISHED.0.get() };
                 let (pw, _) = ina::derive(m.v_1e4, m.i_1e5);
                 /* a failed draw disables the refresh for this boot (a wedged
@@ -142,12 +182,17 @@ fn main() -> ! {
                 tft_alive = ui::draw(m.v_1e4, m.i_1e5, pw).is_ok();
             }
         }
-        if !dev.poll(&mut [&mut serial]) {
+        /* every pass, not only on USB events: a reply consumed while the
+         * loop was busy in tick work must be re-armed at the first
+         * opportunity, before the host's next request starts NAK-polling */
+        pz.arm();
+        if !dev.poll(&mut [&mut pz, &mut serial]) {
             continue;
         }
         if dev.state() == UsbDeviceState::Configured && mk_get(MK_STAGE) < STAGE_CONFIG {
             mk(MK_STAGE, STAGE_CONFIG);
         }
+        pz.poll_cmd();
         if let Ok(n) = serial.read(&mut buf) {
             if n > 0 {
                 on_packet(&mut dev, &mut serial, &buf[..n]);
@@ -178,21 +223,14 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
         write_all(dev, serial, b"firm");
         mk(MK_STAGE, STAGE_QUERY);
     } else if match5(buf, b"getva") {
-        let m = unsafe { *PUBLISHED.0.get() };
-        let (p, r) = ina::derive(m.v_1e4, m.i_1e5);
-        let fields = getva::Fields {
-            v: m.v_1e4,
-            i: m.i_1e5,
-            p,
-            r,
-            mah: m.mah,
-            mwh: m.mwh,
-            temp_c: m.temp_c,
-            dp: m.dp_1e2,
-            dm: m.dm_1e2,
-        };
         let mut reply = [0u8; 192];
-        getva::build(&mut reply, &fields);
+        getva::build(&mut reply, &live_fields());
+        write_all(dev, serial, &reply);
+    } else if match5(buf, b"rawva") {
+        /* dev verb: same fields as getva, plaintext + CRC16, no AES — for
+         * fast host streaming (layout in getva.rs; tools/rawva.py) */
+        let mut reply = [0u8; getva::RAW_LEN];
+        getva::build_raw(&mut reply, &live_fields());
         write_all(dev, serial, &reply);
     } else if match5(buf, b"i2crd") {
         /* dev/bring-up verb (ours, not stock):
@@ -255,6 +293,26 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
     /* rotat / nextp / lastp / unknown -> silent */
 }
 
+/// Snapshot the published measurements + derived values + window seq for a
+/// getva/rawva reply.
+#[inline(never)]
+fn live_fields() -> getva::Fields {
+    let m = unsafe { *PUBLISHED.0.get() };
+    let (p, r) = ina::derive(m.v_1e4, m.i_1e5);
+    getva::Fields {
+        v: m.v_1e4,
+        i: m.i_1e5,
+        p,
+        r,
+        mah: m.mah,
+        mwh: m.mwh,
+        temp_c: m.temp_c,
+        dp: m.dp_1e2,
+        dm: m.dm_1e2,
+        seq: mk_get(MK_WINDOWS),
+    }
+}
+
 /* Latest published measurement set from the timer-paced sampler + 1 Hz energy
  * integrator; zeros until first window. Single-core, IRQs masked -> Racy ok. */
 struct Racy<T>(core::cell::UnsafeCell<T>);
@@ -269,6 +327,14 @@ struct Meas {
     temp_c: i32,
     mah: u32,
     mwh: u32,
+    /* powerz fields: latest single conversion, 1 s calibrated average,
+     * 1 s nominal-scale ("original") average */
+    inst_v_1e4: u32,
+    inst_i_1e5: i32,
+    avg_v_1e4: u32,
+    avg_i_1e5: i32,
+    ori_uv: u32,
+    ori_ua: i32,
 }
 static PUBLISHED: Racy<Meas> = Racy(core::cell::UnsafeCell::new(Meas {
     v_1e4: 0,
@@ -278,7 +344,40 @@ static PUBLISHED: Racy<Meas> = Racy(core::cell::UnsafeCell::new(Meas {
     temp_c: 0,
     mah: 0,
     mwh: 0,
+    inst_v_1e4: 0,
+    inst_i_1e5: 0,
+    avg_v_1e4: 0,
+    avg_i_1e5: 0,
+    ori_uv: 0,
+    ori_ua: 0,
 }));
+
+/// Build the 44-byte powerz ADC payload (layout: powerz.rs / HARDWARE.md).
+/// All uV/uA are our wire units scaled up (1e-4 V -> x100 uV, 1e-5 A ->
+/// x10 uA); Vcc1/Vcc2/Vdd are 0 until the FUSB302 is brought up (M4); temp
+/// is clamped at 0 (the kernel driver's byte pair can't encode sub-zero).
+#[inline(never)]
+fn powerz_payload() -> [u8; powerz::ADC_PAYLOAD_LEN] {
+    let m = unsafe { *PUBLISHED.0.get() };
+    let mut p = [0u8; powerz::ADC_PAYLOAD_LEN];
+    let mut put = |off: usize, v: i32| p[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    put(0, m.inst_v_1e4 as i32 * 100);
+    put(4, m.inst_i_1e5 * 10);
+    put(8, m.avg_v_1e4 as i32 * 100);
+    put(12, m.avg_i_1e5 * 10);
+    put(16, m.ori_uv as i32);
+    put(20, m.ori_ua);
+    let t = if m.temp_c < 0 { 0 } else { m.temp_c as u32 };
+    p[24] = ((t % 2) * 128) as u8; /* 1/128 degC units */
+    p[25] = (t / 2) as u8; /* 2 degC units */
+    let mut put16 = |off: usize, v: u32| {
+        let c = if v > 0xFFFF { 0xFFFF } else { v as u16 };
+        p[off..off + 2].copy_from_slice(&c.to_le_bytes());
+    };
+    put16(30, m.dp_1e2 * 100); /* 1e-2 V -> 0.1 mV units */
+    put16(32, m.dm_1e2 * 100);
+    p
+}
 
 #[inline(never)]
 fn reply_ok_er(dev: &mut Dev, serial: &mut Serial, r: Result<(), u8>) {
@@ -350,12 +449,14 @@ fn write_all(dev: &mut Dev, serial: &mut Serial, data: &[u8]) {
 
 /// Find the CDC bulk data endpoint: the EPnCS whose type (EP_CTL) is BULK (00)
 /// with its RX side enabled (RX_STA != disabled). Unconfigured EPnCS read 0
-/// (RX disabled), EP0 is CONTROL, the notification endpoint is INTERRUPT — so
-/// this is unambiguous. Read-only peek at registers the USB stack owns.
+/// (RX disabled), EP0 is CONTROL, the notification endpoint is INTERRUPT.
+/// EP1 is skipped: it is the powerz vendor bulk pair (fixed by that protocol),
+/// not the CDC data endpoint updat streams through. Read-only peek at
+/// registers the USB stack owns.
 #[inline(never)]
 fn find_bulk_ep() -> Option<u32> {
     let usbd = unsafe { &*pac::Usbd::ptr() };
-    for n in 1..8u32 {
+    for n in 2..8u32 {
         let cs = match n {
             1 => usbd.ep1cs().read().bits(),
             2 => usbd.ep2cs().read().bits(),

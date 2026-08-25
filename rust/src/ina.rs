@@ -98,24 +98,48 @@ pub fn configure() -> bool {
     i2c::transact(INA_ADDR, &[REG_CONFIG, 0x41, 0x27], &mut []).is_ok()
 }
 
-/// Apply the calibration formulas to raw sums.
-pub fn calibrate(cal: &Cal, bus_sum8: u32, shunt_sum16: u32) -> Reading {
-    let v = ((bus_sum8 as u64 * cal.gain_v as u64 + cal.off_v as u64) / 20000) as u32;
-    let (mag, reverse) = if shunt_sum16 >= cal.refz {
-        (shunt_sum16 - cal.refz, false)
+/// Calibrated V from a sum of `n` bus raws. The EEPROM constants bake in the
+/// stock sum depth of 8, so the sum is rescaled to that domain (multiply
+/// before divide: exact for n = 1/2/4/8, <1 LSB/16 truncation otherwise).
+pub fn cal_v(cal: &Cal, bus_sum: u64, n: u64) -> u32 {
+    ((bus_sum * 8 * cal.gain_v as u64 / n + cal.off_v as u64) / 20000) as u32
+}
+
+/// Calibrated signed I (1e-5 A) from a sum of `n` biased shunt raws
+/// (constants bake in sum depth 16; same rescaling as cal_v).
+pub fn cal_i(cal: &Cal, shunt_sum: u64, n: u64) -> i32 {
+    let scaled = shunt_sum * 16 / n;
+    let refz = cal.refz as u64;
+    if scaled >= refz {
+        ((scaled - refz) * cal.gain_cp as u64 / 40000) as i32
     } else {
-        (cal.refz - shunt_sum16, true)
-    };
-    let gain = if reverse { cal.gain_cn } else { cal.gain_cp };
-    let i = ((mag as u64 * gain as u64 / 10000) / 4) as u32;
+        -(((refz - scaled) * cal.gain_cn as u64 / 40000) as i32)
+    }
+}
+
+/// Apply the calibration formulas to stock-depth raw sums (8 bus, 16 shunt).
+pub fn calibrate(cal: &Cal, bus_sum8: u32, shunt_sum16: u32) -> Reading {
+    let i = cal_i(cal, shunt_sum16 as u64, 16);
     Reading {
-        v_1e4: v,
-        i_1e5: i,
-        reverse,
+        v_1e4: cal_v(cal, bus_sum8 as u64, 8),
+        i_1e5: i.unsigned_abs(),
+        reverse: i < 0,
         dp_1e2: 0,
         dm_1e2: 0,
         temp_c: 0,
     }
+}
+
+/// Uncalibrated ("original") values from raw sums using the nominal design
+/// constants instead of the per-unit EEPROM trim: bus 1.25 mV/LSB; shunt
+/// 2.5 uV/LSB across the 15 mOhm design shunt = 500/3 uA/LSB. (This unit's
+/// trims sit within 0.3% of these nominals — HARDWARE.md.)
+pub fn ori_uv(bus_sum: u64, n: u64) -> u32 {
+    (bus_sum * 1250 / n) as u32
+}
+pub fn ori_ua(shunt_sum: u64, n: u64) -> i32 {
+    let scaled = (shunt_sum * 16 / n) as i64 - 16 * 0x8000;
+    (scaled * 500 / (3 * 16)) as i32
 }
 
 /// Timer-paced sampler: one I2C read per tick (8 bus + 16 shunt per window),
@@ -127,6 +151,25 @@ pub struct Sampler {
     bus_sum: u32,
     shunt_sum: u32,
     retry: u8,
+    /* latest single conversions (biased for shunt) for the instantaneous
+     * powerz values, and 1 s raw accumulators for the averaged ones */
+    last_bus: u16,
+    last_shunt: u16,
+    have_bus: bool,
+    have_shunt: bool,
+    sec_bus_sum: u32,
+    sec_bus_n: u32,
+    sec_shunt_sum: u32,
+    sec_shunt_n: u32,
+}
+
+/// One second of accumulated raws, calibrated + nominal-scaled (powerz avg
+/// and ori_avg fields).
+pub struct SecondAvg {
+    pub v_1e4: u32,
+    pub i_1e5: i32,
+    pub ori_uv: u32,
+    pub ori_ua: i32,
 }
 
 impl Sampler {
@@ -137,7 +180,49 @@ impl Sampler {
             bus_sum: 0,
             shunt_sum: 0,
             retry: 0,
+            last_bus: 0,
+            last_shunt: 0,
+            have_bus: false,
+            have_shunt: false,
+            sec_bus_sum: 0,
+            sec_bus_n: 0,
+            sec_shunt_sum: 0,
+            sec_shunt_n: 0,
         }
+    }
+
+    /// Latest single-conversion calibrated values (v_1e4, signed i_1e5);
+    /// None until one of each conversion and the cal exist.
+    pub fn instant(&self) -> Option<(u32, i32)> {
+        let cal = self.cal.as_ref()?;
+        if !(self.have_bus && self.have_shunt) {
+            return None;
+        }
+        Some((
+            cal_v(cal, self.last_bus as u64, 1),
+            cal_i(cal, self.last_shunt as u64, 1),
+        ))
+    }
+
+    /// Drain the 1 s raw accumulators into averaged values; None if the
+    /// second had no successful reads (or no cal yet).
+    pub fn drain_second(&mut self) -> Option<SecondAvg> {
+        let (bs, bn) = (self.sec_bus_sum as u64, self.sec_bus_n as u64);
+        let (ss, sn) = (self.sec_shunt_sum as u64, self.sec_shunt_n as u64);
+        self.sec_bus_sum = 0;
+        self.sec_bus_n = 0;
+        self.sec_shunt_sum = 0;
+        self.sec_shunt_n = 0;
+        let cal = self.cal.as_ref()?;
+        if bn == 0 || sn == 0 {
+            return None;
+        }
+        Some(SecondAvg {
+            v_1e4: cal_v(cal, bs, bn),
+            i_1e5: cal_i(cal, ss, sn),
+            ori_uv: ori_uv(bs, bn),
+            ori_ua: ori_ua(ss, sn),
+        })
     }
 
     fn reset_window(&mut self) {
@@ -172,6 +257,10 @@ impl Sampler {
             match ina_read(REG_BUS) {
                 Some(r) => {
                     self.bus_sum += r as u32;
+                    self.last_bus = r;
+                    self.have_bus = true;
+                    self.sec_bus_sum += r as u32;
+                    self.sec_bus_n += 1;
                     true
                 }
                 None => false,
@@ -179,7 +268,12 @@ impl Sampler {
         } else {
             match ina_read(REG_SHUNT) {
                 Some(r) => {
-                    self.shunt_sum += (r ^ 0x8000) as u32;
+                    let biased = r ^ 0x8000;
+                    self.shunt_sum += biased as u32;
+                    self.last_shunt = biased;
+                    self.have_shunt = true;
+                    self.sec_shunt_sum += biased as u32;
+                    self.sec_shunt_n += 1;
                     true
                 }
                 None => false,

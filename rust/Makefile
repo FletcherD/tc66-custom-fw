@@ -21,7 +21,13 @@ bad = {n: hex(v) for n,v in syms.items() if not 0x20000000 <= v <= 0x20000E40}; 
 assert len(syms)==4 and not bad, 'init symbols outside RAM: %s' % (bad or syms); \
 print('init-gate ok: data/bss init bounded to %s..%s' % (hex(min(syms.values())), hex(max(syms.values()))))"
 
-tc66fw.bin: build flasher-gate init-gate
+# Static worst-case stack depth vs the fenced RAM budget. Build 35 shipped a
+# silent boot-path stack overflow (hardfault before the D+ pull-up = invisible
+# dead board, K1 recovery); this catches that class at build time.
+stack-gate: build
+	@python3 ../tools/stack_gate.py $(ELF)
+
+tc66fw.bin: build flasher-gate init-gate stack-gate
 	arm-none-eabi-objcopy -O binary $(ELF) tc66fw.bin
 	@python3 -c "import struct; d = open('tc66fw.bin','rb').read(); \
 sp, rst = struct.unpack('<II', d[:8]); \
@@ -63,4 +69,4 @@ clean:
 	cargo clean
 	rm -f tc66fw.bin tc66fw.pad.bin tc66fw.enc.bin
 
-.PHONY: all build flasher-gate init-gate flash recover markers clean
+.PHONY: all build flasher-gate init-gate stack-gate flash recover markers clean

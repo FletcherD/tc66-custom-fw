@@ -20,7 +20,11 @@ except ImportError:
     termios = None
 
 HUB_TOOL     = os.path.expanduser("~/.claude/skills/usb-hub-power/hub_power.py")
-METER_VIDPID = "28e9:018a"   # RuiDeng TC66 USB vid:pid (bootloader and app both)
+# Bootloader enumerates as stock RuiDeng; the custom app wears the POWER-Z
+# KM003C identity (5fc9:0063) so the mainline `powerz` hwmon driver binds its
+# vendor interface. Both are "the meter".
+METER_VIDPIDS = ("28e9:018a", "5fc9:0063")
+METER_VIDPID  = METER_VIDPIDS[0]  # kept for old imports
 
 
 def find_meter_hub_port(hub_tool=HUB_TOOL):
@@ -35,9 +39,10 @@ def find_meter_hub_port(hub_tool=HUB_TOOL):
     except Exception:
         return None
     for line in out.splitlines():
-        # cmd_status prints: "  b2  on   28e9:018a  RuiDeng TC66 USB Type-C Meter TC66"
+        # cmd_status prints: "  b2  on   5fc9:0063  ChargerLAB POWER-Z KM003C TC66"
         m = re.match(r"\s*([a-z]\d+)\s+(?:on|OFF)\s+(.*)", line)
-        if m and (METER_VIDPID in m.group(2) or "RuiDeng" in m.group(2)):
+        if m and (any(v in m.group(2) for v in METER_VIDPIDS)
+                  or "RuiDeng" in m.group(2) or "POWER-Z" in m.group(2)):
             return m.group(1)
     return None
 
@@ -62,7 +67,13 @@ REPO_ROOT    = os.path.dirname(os.path.abspath(__file__))
 FIRMWARE_DIR = os.path.join(REPO_ROOT, "firmware")
 V118         = os.path.join(FIRMWARE_DIR, "V118.bin")
 
-METER_BYID = "/dev/serial/by-id/usb-RuiDeng_TC66_USB_Type-C_Meter_TC66-if00"
+METER_BYIDS = (
+    # custom app (CDC is interfaces 1+2 of the powerz composite)
+    "/dev/serial/by-id/usb-ChargerLAB_POWER-Z_KM003C_TC66-if01",
+    # stock bootloader (recovery / first flash)
+    "/dev/serial/by-id/usb-RuiDeng_TC66_USB_Type-C_Meter_TC66-if00",
+)
+METER_BYID = METER_BYIDS[1]  # kept for old imports
 PICO_BYID  = "/dev/serial/by-id/usb-Raspberry_Pi_Pico_5303284748AA549C-if00"
 
 
@@ -70,8 +81,9 @@ def meter_candidates():
     """Serial ports that might be the meter — stable by-id first, then ttyACM*,
     skipping the Pico-trigger and ChipWhisperer CDC devices."""
     cands = []
-    if os.path.exists(METER_BYID):
-        cands.append(os.path.realpath(METER_BYID))
+    for byid in METER_BYIDS:
+        if os.path.exists(byid):
+            cands.append(os.path.realpath(byid))
     skip = {os.path.realpath(l) for l in glob.glob("/dev/serial/by-id/*")
             if "Pico" in l or "ChipWhisperer" in l}
     for p in sorted(glob.glob("/dev/ttyACM*")):

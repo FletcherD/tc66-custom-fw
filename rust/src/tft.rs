@@ -178,7 +178,9 @@ fn ensure_init() -> Result<(), u8> {
     }
 
     unsafe { *INITED.0.get() = true };
-    fill_rect(0, 0, WIDTH - 1, HEIGHT - 1, 0x0000)?; /* clear to black */
+    /* raw variant: fill_rect's ensure_init guard would recurse into this
+     * function, which the static stack-gate (correctly) refuses to bound */
+    fill_rect_raw(0, 0, WIDTH - 1, HEIGHT - 1, 0x0000)?; /* clear to black */
     backlight_init();
     Ok(())
 }
@@ -199,6 +201,11 @@ fn set_window(x0: u16, y0: u16, x1: u16, y1: u16) -> Result<(), u8> {
 #[inline(never)]
 pub fn fill_rect(x0: u16, y0: u16, x1: u16, y1: u16, color: u16) -> Result<(), u8> {
     ensure_init()?;
+    fill_rect_raw(x0, y0, x1, y1, color)
+}
+
+#[inline(never)]
+fn fill_rect_raw(x0: u16, y0: u16, x1: u16, y1: u16, color: u16) -> Result<(), u8> {
     set_window(x0, y0, x1, y1)?;
     let n = (x1 - x0 + 1) as u32 * (y1 - y0 + 1) as u32;
     let gpioa = unsafe { &*pac::Gpioa::ptr() };

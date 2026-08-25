@@ -5,7 +5,7 @@ build/flash/debug workflow. Read `HARDWARE.md` first for the board facts
 (memory map, pins, peripherals, command protocol, calibration model).
 
 The firmware is fully polled — interrupts stay masked from reset onward.
-Everything runs off the main loop: USB servicing, the SysTick-paced sampler,
+Everything runs off the main loop: USB servicing, the TIMER5-paced sampler,
 and command dispatch.
 
 ## Module map (`rust/src/`)
@@ -93,7 +93,10 @@ not exist here).
 Build profile stays `opt-level = 1`, `lto = false`, `codegen-units = 1`: the
 original C reference had an unexplained post-enumeration lockup when the USB
 path was aggressively inlined at `-Os`; revisit optimization only as an
-isolated, revertable change.
+isolated, revertable change. One such change exists:
+`[profile.release.package.aes] opt-level = 3` — pure-compute crypto with no
+USB-path code; at opt-level 1 the fixsliced AES made every getva reply cost
+~64 ms of main-loop blocking (bench-measured; see Measurement below).
 
 ## `updat` self-flasher
 
@@ -127,6 +130,27 @@ come *before* link.x's `PROVIDE` to suppress it under rust-lld — hence
 memory.x, not flasher.x), and **`make init-gate`** asserts
 `__sdata/__edata/__sbss/__ebss` all lie inside real RAM on every build.
 
+**Stack budget (`make stack-gate`, tools/stack_gate.py).** The stack is small
+and main()'s frame alone is ~2 KB, and a boot-path overflow hardfaults
+*before* the D+ pull-up — an invisible dead board needing K1 recovery (this
+shipped once, as build 35). The gate computes a conservative static
+worst-case stack depth (disassembly call graph; multi-path frames and tail
+calls overestimated; `blx rN` trait dispatch charged the max UsbClass-impl
+subtree; recursion is a hard error) and fails the build unless worst + one
+exception frame + 192 B margin fits `STACK_TOP − __ebss`. Two related
+subtleties, both load-bearing:
+- **The runtime stack top (0x20001000) is raised in `__pre_init`**
+  (startup.rs), not in the linker: the flash header's initial SP must stay
+  at the bootloader-proven `0x20000E40` (the bootloader faults on some SP
+  values — 0x20002000 known bad, predicate unknown). `STACK_TOP` in
+  stack_gate.py must match the asm constant.
+- **Deep one-shot work runs at boot, not under the deepest chain**: the AES
+  key schedule (~1.1 KB of chain) runs once from `getva::init()` before the
+  main loop; `build()` only reads the cached cipher. Keep new expensive
+  init work on that pattern, and never put a call cycle in the graph (the
+  tft `fill_rect`/`ensure_init` cycle was broken with `fill_rect_raw` for
+  exactly this).
+
 ## Measurement (M1)
 
 - `i2c.rs`: polled I2C0 master (PB6/PB7 AF1, 100 kHz, the F1-style IP's AN2824
@@ -134,17 +158,35 @@ memory.x, not flasher.x), and **`make init-gate`** asserts
   SRESET + reconfigure per transaction (stateless, self-healing).
 - `ina.rs`: INA226 register reads (big-endian), EEPROM calibration constants
   (LE u32 at 0x2004/44/08/0c/58), the calibration formulas from HARDWARE.md,
-  and `Sampler` — one I2C read per SysTick tick (250 Hz, polled), 8 bus + 16
-  shunt reads per window, then one ADC tick (NTC + D+ + D−) → publish at
-  ~10 Hz. Failures bump MK_I2CERR and restart the window; cal load retries.
+  and `Sampler` — one I2C read per 4 ms tick, 8 bus + 16 shunt reads per
+  window, then one ADC tick (NTC + D+ + D−) → publish at ~10.4 Hz (250/24).
+  Failures bump MK_I2CERR and restart the window; cal load retries.
+  **The tick timebase is TIMER5** free-running at 10 kHz (no pins, no IRQ):
+  the main loop accrues elapsed ticks from CNT deltas (40 counts = 1 tick),
+  so time spent blocked — a getva reply is ~20 ms of soft AES — is caught up
+  with back-to-back ticks instead of lost. (SysTick's COUNTFLAG latches only
+  one wrap: with it, hammering getva stalled the sampler to ~0.65 Hz and
+  slowed the energy clock ~16×. Verified fixed on the bench: flat-out getva
+  polling now costs 0% window rate.) The 16-bit counter wraps at 6.55 s,
+  far beyond the longest blocking path (write_all's absent-host budget).
   **The explicit INA226 config write (0x4127) at sampler start is
   load-bearing** — the chip returns 0 for bus voltage until (re)configured.
 - `adc.rs`: polled on-chip ADC — **enable IRC14M first** (the ADC's dedicated
   clock, off at reset; calibration hangs without it), ADCON set alone, CLB
   calibration, SWRCST software trigger, 239.5-cycle sampling. NTC uses the
   recovered stock β-model on ch1 (this unit); channels + model in HARDWARE.md.
-- Energy: 1 Hz integration in the main loop off the same SysTick — RAM-only,
-  zeroed at boot, both getva groups publish the same value. Persistence = M2.
+- Energy: 1 Hz integration in the main loop off the same tick stream (250
+  ticks = 1 s) — RAM-only, zeroed at boot, both getva groups publish the same
+  value. Persistence = M2.
+- `getva.rs`: template + live-field patch + CRC16/MODBUS + AES-256-ECB.
+  Stamps the sampler window counter (MK_WINDOWS) at offset 132 (pac3+4, a
+  stock-unused field). The AES key schedule is cached in a static after the
+  first reply and blocks are encrypted as one batch (the fixsliced core works
+  on block pairs) — with the per-crate `opt-level = 3` on `aes` (Cargo.toml)
+  this takes a reply from ~64 ms to ~20 ms. Also builds the **`rawva`** dev
+  verb reply (`build_raw`): the same fields plaintext + CRC16, 46 B, ~1 ms —
+  the streaming endpoint. Host recipe + layout: HARDWARE.md, `tools/rawva.py`
+  (bench-verified: 700 polls/s, zero missed windows, sampler unaffected).
 - `tft.rs`: the recovered stock ST7735S path (TFT_FINDINGS.md in the RE repo)
   on hardware SPI0 at 24 MHz — init sequence verbatim, CASET/RASET with the
   panel's +1/+26 GRAM offset, `fill_rect` streaming straight into GRAM (no

@@ -93,6 +93,7 @@ Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the firs
 | `rotat` / `nextp` / `lastp` | none | rotate / cycle on-device screen |
 | `gtrec` | N×8 B + `reck` | dump the on-device ~1 Hz V/I log |
 | `updat` | `uprdy`, then per-chunk `OK` | our app self-update |
+| `rawva` | 46 B plaintext | our dev verb: getva fields + window seq, no AES — use for streaming (tools/rawva.py) |
 | `i2crd` | `OK`+data / `ER`+diag | our dev verb: raw I²C read (tools/i2cread.py) |
 | `adcrd` | `OK`+u32 / `ER`+stage | our dev verb: ADC sum-of-16 (tools/adcread.py) |
 | `tftfl` | `OK` / `ER`+stage | our dev verb: TFT test pattern (no args) or solid fill (RGB565 LE u16) (tools/tft.py) |
@@ -121,9 +122,19 @@ Decrypt, then read little-endian `uint32` fields:
 | 80/84 | group1 mAh / mWh | uint32 |
 | 88/92 | temp sign / temp | °C |
 | 96/100 | D+ / D− | /100 → V |
-| 128 | `"pac3"` marker | (unused) |
+| 128 | `"pac3"` marker | — |
+| 132 | window sequence (**our firmware only**; stock sends 0) | uint32, +1 per sampler window (~96 ms) |
 
 Last 4 bytes of each 64-byte block are a checksum.
+
+To stream samples losslessly: poll at ≥2× the window rate (25 Hz is plenty),
+keep a reply only when the sequence advances, and treat a sequence jump as a
+missed window. **Prefer `rawva` for this** — same live fields, plaintext, no
+AES: ~1 ms per reply vs ~25 ms for `getva` (soft AES-256 is that expensive on
+this core even optimized). Reply layout in `rust/src/getva.rs` (46 B: `"raw1"`,
+ten LE u32 fields, CRC16/MODBUS tail); client + deduping stream generator in
+`tools/rawva.py`. Verified on the bench: 700 polls/s costs the sampler nothing
+(the firmware catches up blocked ticks; see FIRMWARE.md), zero missed windows.
 
 ## Peripherals & pins
 

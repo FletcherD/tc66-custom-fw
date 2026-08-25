@@ -12,7 +12,18 @@
 
 use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockEncrypt, KeyInit};
-use aes::Aes256;
+use aes::Aes256Enc;
+
+/* single-core, IRQs masked — same pattern as PUBLISHED in main.rs */
+struct RacyCell<T>(core::cell::UnsafeCell<T>);
+unsafe impl<T> Sync for RacyCell<T> {}
+/* MaybeUninit + ready flag instead of Option: lets init() construct the
+ * 480-B key schedule straight into the static (sret) instead of via a
+ * stack temporary — that temporary put the boot-time init chain over the
+ * stack budget (stack-gate). */
+static CIPHER: RacyCell<core::mem::MaybeUninit<Aes256Enc>> =
+    RacyCell(core::cell::UnsafeCell::new(core::mem::MaybeUninit::uninit()));
+static CIPHER_OK: RacyCell<bool> = RacyCell(core::cell::UnsafeCell::new(false));
 
 const KEY: [u8; 32] = [
     0x58, 0x21, 0xfa, 0x56, 0x01, 0xb2, 0xf0, 0x26, 0x87, 0xff, 0x12, 0x04,
@@ -38,6 +49,17 @@ const TEMPLATE: [u8; 192] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x28, 0x05, 0x00, 0x00,
 ];
+
+/// Compute the AES key schedule once, at boot, while the stack is shallow
+/// (called from main before the loop; ~550 B of fixsliced key-schedule frame
+/// must not sit under the deepest runtime chain).
+#[inline(never)]
+pub fn init() {
+    unsafe {
+        (*CIPHER.0.get()).write(Aes256Enc::new(GenericArray::from_slice(&KEY)));
+        *CIPHER_OK.0.get() = true;
+    }
+}
 
 fn crc16_modbus(data: &[u8]) -> u16 {
     let mut crc: u16 = 0xFFFF;
@@ -66,6 +88,31 @@ pub struct Fields {
     pub temp_c: i32,
     pub dp: u32,
     pub dm: u32,
+    /// sampler window counter (our extension, pac3+4; stock apps ignore pac3)
+    pub seq: u32,
+}
+
+/// `rawva` reply: the same live fields as getva, plaintext, no AES — a getva
+/// reply costs ~20 ms of soft AES even optimized, which is the whole reply
+/// budget; this one is microseconds. All LE u32 unless noted:
+///   0 magic "raw1", 4 seq, 8 v_1e4, 12 i_1e5, 16 p_1e4, 20 r_1e1,
+///   24 mah, 28 mwh, 32 temp_c (i32), 36 dp_1e2, 40 dm_1e2,
+///   44 CRC16/MODBUS of bytes 0..44 (LE u16). 46 B total.
+pub const RAW_LEN: usize = 46;
+
+#[inline(never)]
+pub fn build_raw(out: &mut [u8; RAW_LEN], f: &Fields) {
+    out[..4].copy_from_slice(b"raw1");
+    for (i, v) in [
+        f.seq, f.v, f.i, f.p, f.r, f.mah, f.mwh, f.temp_c as u32, f.dp, f.dm,
+    ]
+    .iter()
+    .enumerate()
+    {
+        out[4 + 4 * i..8 + 4 * i].copy_from_slice(&v.to_le_bytes());
+    }
+    let crc = crc16_modbus(&out[..44]);
+    out[44..46].copy_from_slice(&crc.to_le_bytes());
 }
 
 /// Fill the template with live values, checksum, encrypt.
@@ -86,13 +133,23 @@ pub fn build(out: &mut [u8; 192], f: &Fields) {
     put_u32(out, 92, f.temp_c.unsigned_abs());
     put_u32(out, 96, f.dp);
     put_u32(out, 100, f.dm);
+    put_u32(out, 132, f.seq);
     for b in 0..3 {
         let crc = crc16_modbus(&out[b * 64..b * 64 + 60]) as u32;
         let bytes = crc.to_le_bytes();
         out[b * 64 + 60..b * 64 + 64].copy_from_slice(&bytes);
     }
-    let cipher = Aes256::new(GenericArray::from_slice(&KEY));
-    for blk in out.chunks_exact_mut(16) {
-        cipher.encrypt_block(GenericArray::from_mut_slice(blk));
+    /* The cipher comes from init() (boot-time, shallow stack): the fixsliced
+     * key schedule needs ~550 B of stack, and running it here would put it
+     * under the deepest chain in the program — the stack-gate flagged
+     * exactly that. init() always ran by the time a host can talk to us,
+     * so the None arm is dead in practice. Blocks encrypted as one batch so
+     * the fixsliced core works on block pairs. */
+    if unsafe { *CIPHER_OK.0.get() } {
+        let cipher = unsafe { (*CIPHER.0.get()).assume_init_ref() };
+        /* GenericArray<u8, U16> is layout-identical to [u8; 16] (documented) */
+        let blocks: &mut [aes::Block] =
+            unsafe { core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut aes::Block, 12) };
+        cipher.encrypt_blocks(blocks);
     }
 }
