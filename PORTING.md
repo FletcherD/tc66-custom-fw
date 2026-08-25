@@ -183,10 +183,16 @@ lie inside real RAM on every build.
   ~10 Hz publish into `PUBLISHED`; failures counted in MK_I2CERR and retried.
   The explicit config write (0x4127) at sampler start is **load-bearing**: the
   INA226 was seen returning 0 for bus voltage until (re)configured.
-- `getva.rs`: patches live V/I/P/R into the decrypted known-good template,
-  recomputes **CRC16/MODBUS over bytes 0..60 of each 64-B block** (stored LE at
-  60..64 — algorithm verified against the stock packet), AES-256-ECB encrypts
-  on-device (`aes` crate). Energy groups/temp/D± still template values.
+- `adc.rs`: polled on-chip ADC — **enable IRC14M first** (the ADC's dedicated
+  clock, off at reset; without it calibration hangs), ADCON set alone, CLB
+  calibration, SWRCST software trigger, 239.5-cycle sampling. Behind the
+  `adcrd` dev verb too. Channels + the (experimental) NTC model: HARDWARE.md.
+- Energy: 1 Hz integration in the main loop off the same SysTick (RAM-only,
+  zeroed at boot; both getva groups publish the same value). Persistence = M2.
+- `getva.rs`: patches all live fields (V/I/P/R, mAh/mWh, temp+sign, D±) into
+  the decrypted known-good template, recomputes **CRC16/MODBUS over bytes
+  0..60 of each 64-B block** (stored LE at 60..64 — verified against the stock
+  packet), AES-256-ECB encrypts on-device (`aes` crate).
 
 ## After M0: the roadmap (see README + HARDWARE.md)
 - **M1 — measurement + real `getva`:** hardware I²C0 (PB6/PB7) monitor read +

@@ -34,6 +34,36 @@ pub struct Reading {
     /// current direction (getva publishes magnitude; kept for the display/M3)
     #[allow(dead_code)]
     pub reverse: bool,
+    pub dp_1e2: u32, // D+ in 1e-2 V
+    pub dm_1e2: u32, // D- in 1e-2 V
+    pub temp_c: i32, // NTC temperature, whole deg C
+}
+
+/* ADC channels, identified empirically via `adcrd` scans (see HARDWARE.md):
+ * ch8/ch9 = PB0/PB1 = D+/D- (direct, USB idle J-state signature);
+ * ch1 = PA1 = NTC divider (stable across scans; ch0 drifts = floating).
+ * Cross-checked against the internal die sensor (ch16 ~41 C). */
+const CH_NTC: u8 = 1;
+const CH_DP: u8 = 8;
+const CH_DM: u8 = 9;
+
+/// D± wire value per HARDWARE.md: sum-of-16 * 330 / 65520 -> 1e-2 V.
+fn d_line_1e2(sum16: u32) -> u32 {
+    sum16 * 330 / 65520
+}
+
+/// NTC temperature — EXPERIMENTAL model: 10k B=3950 NTC low-side with a 22k
+/// pull-up to 3.3 V. Chosen because it lands ~2 C below the die sensor on a
+/// warm board (consistent); divider values are a fit, not traced — refine by
+/// comparing against the stock display at a couple of temperatures. Whole C.
+fn ntc_temp_c(sum16: u32) -> i32 {
+    let v = sum16 as f32 * 3.3 / 65520.0;
+    if v <= 0.01 || v >= 3.29 {
+        return 0; /* open/shorted divider — don't feed ln() garbage */
+    }
+    let r = 22_000.0 * v / (3.3 - v);
+    let inv_t = 1.0 / 298.15 + libm::logf(r / 10_000.0) / 3950.0;
+    (1.0 / inv_t - 273.15) as i32
 }
 
 fn eeprom_u32(off: u16) -> Option<u32> {
@@ -75,7 +105,14 @@ pub fn calibrate(cal: &Cal, bus_sum8: u32, shunt_sum16: u32) -> Reading {
     };
     let gain = if reverse { cal.gain_cn } else { cal.gain_cp };
     let i = ((mag as u64 * gain as u64 / 10000) / 4) as u32;
-    Reading { v_1e4: v, i_1e5: i, reverse }
+    Reading {
+        v_1e4: v,
+        i_1e5: i,
+        reverse,
+        dp_1e2: 0,
+        dm_1e2: 0,
+        temp_c: 0,
+    }
 }
 
 /// Timer-paced sampler: one I2C read per tick (8 bus + 16 shunt per window),
@@ -152,10 +189,21 @@ impl Sampler {
         }
         self.step += 1;
         if self.step == 24 {
-            let rd = self
-                .cal
-                .as_ref()
-                .map(|c| calibrate(c, self.bus_sum, self.shunt_sum));
+            /* final tick of the window: ADC block (3 x 16 fast conversions,
+             * well under a tick) + calibrate + publish */
+            let ntc = crate::adc::read_sum16(CH_NTC);
+            let dp = crate::adc::read_sum16(CH_DP);
+            let dm = crate::adc::read_sum16(CH_DM);
+            if ntc.is_err() || dp.is_err() || dm.is_err() {
+                self.bump_err();
+            }
+            let rd = self.cal.as_ref().map(|c| {
+                let mut rd = calibrate(c, self.bus_sum, self.shunt_sum);
+                rd.dp_1e2 = dp.map(d_line_1e2).unwrap_or(0);
+                rd.dm_1e2 = dm.map(d_line_1e2).unwrap_or(0);
+                rd.temp_c = ntc.map(ntc_temp_c).unwrap_or(0);
+                rd
+            });
             self.reset_window();
             mk(MK_WINDOWS, mk_get(MK_WINDOWS) + 1);
             return rd;

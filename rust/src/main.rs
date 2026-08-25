@@ -15,6 +15,7 @@
 #![no_std]
 #![no_main]
 
+mod adc;
 mod board;
 mod flasher;
 mod getva;
@@ -32,7 +33,7 @@ use usb_device::prelude::*;
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 11;
+const BUILD_ID: u32 = 16;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 type Serial<'a> = SerialPort<'a, usb_bus::UsbBus>;
@@ -85,12 +86,38 @@ fn main() -> ! {
     syst.enable_counter();
     let mut sampler = ina::Sampler::new();
 
+    /* 1 Hz energy integration (RAM only, starts at 0; persistence is M2):
+     * every 250 ticks accumulate published I and P for one second.
+     * mAh = sum(I_1e5 * 1s) / 360000, mWh = sum(P_1e4 * 1s) / 36000. */
+    let mut sec_ticks: u32 = 0;
+    let mut acc_i_1e5s: u64 = 0;
+    let mut acc_p_1e4s: u64 = 0;
+
     let mut buf = [0u8; 64];
     loop {
         mk(MK_HEART, mk_get(MK_HEART) + 1);
         if syst.has_wrapped() {
             if let Some(rd) = sampler.tick() {
-                unsafe { *PUBLISHED.0.get() = (rd.v_1e4, rd.i_1e5) };
+                unsafe {
+                    let m = &mut *PUBLISHED.0.get();
+                    m.v_1e4 = rd.v_1e4;
+                    m.i_1e5 = rd.i_1e5;
+                    m.dp_1e2 = rd.dp_1e2;
+                    m.dm_1e2 = rd.dm_1e2;
+                    m.temp_c = rd.temp_c;
+                }
+            }
+            sec_ticks += 1;
+            if sec_ticks >= 250 {
+                sec_ticks = 0;
+                unsafe {
+                    let m = &mut *PUBLISHED.0.get();
+                    let (p, _) = ina::derive(m.v_1e4, m.i_1e5);
+                    acc_i_1e5s += m.i_1e5 as u64;
+                    acc_p_1e4s += p as u64;
+                    m.mah = (acc_i_1e5s / 360_000) as u32;
+                    m.mwh = (acc_p_1e4s / 36_000) as u32;
+                }
             }
         }
         if !dev.poll(&mut [&mut serial]) {
@@ -129,10 +156,21 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
         write_all(dev, serial, b"firm");
         mk(MK_STAGE, STAGE_QUERY);
     } else if match5(buf, b"getva") {
-        let (v, i) = read_meas();
-        let (p, r) = ina::derive(v, i);
+        let m = unsafe { *PUBLISHED.0.get() };
+        let (p, r) = ina::derive(m.v_1e4, m.i_1e5);
+        let fields = getva::Fields {
+            v: m.v_1e4,
+            i: m.i_1e5,
+            p,
+            r,
+            mah: m.mah,
+            mwh: m.mwh,
+            temp_c: m.temp_c,
+            dp: m.dp_1e2,
+            dm: m.dm_1e2,
+        };
         let mut reply = [0u8; 192];
-        getva::build(&mut reply, v, i, p, r);
+        getva::build(&mut reply, &fields);
         write_all(dev, serial, &reply);
     } else if match5(buf, b"i2crd") {
         /* dev/bring-up verb (ours, not stock):
@@ -140,6 +178,28 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
          * -> "OK" + rlen bytes, or "ER" + [stage, stat0.lo, stat0.hi, stat1.lo] */
         let mut reply = [0u8; 34];
         let n = i2c_command(buf, &mut reply);
+        write_all(dev, serial, &reply[..n]);
+    } else if match5(buf, b"adcrd") {
+        /* dev verb: adcrd <ch> -> "OK" + u32 LE sum-of-16, or "ER" + stage */
+        let mut reply = [0u8; 6];
+        let n = if buf.len() >= 6 {
+            match adc::read_sum16(buf[5]) {
+                Ok(sum) => {
+                    reply[..2].copy_from_slice(b"OK");
+                    reply[2..6].copy_from_slice(&sum.to_le_bytes());
+                    6
+                }
+                Err(stage) => {
+                    reply[..2].copy_from_slice(b"ER");
+                    reply[2] = stage;
+                    3
+                }
+            }
+        } else {
+            reply[..2].copy_from_slice(b"ER");
+            reply[2] = 0x0F;
+            3
+        };
         write_all(dev, serial, &reply[..n]);
     } else if match5(buf, b"updat") {
         if let Some(ep) = find_bulk_ep() {
@@ -150,16 +210,30 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
     /* rotat / nextp / lastp / unknown -> silent */
 }
 
-/* Latest published (V 1e-4, I 1e-5) from the timer-paced sampler; zeros until
- * the first window completes. Single-core, IRQs masked -> Racy ok. */
+/* Latest published measurement set from the timer-paced sampler + 1 Hz energy
+ * integrator; zeros until first window. Single-core, IRQs masked -> Racy ok. */
 struct Racy<T>(core::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for Racy<T> {}
-static PUBLISHED: Racy<(u32, u32)> = Racy(core::cell::UnsafeCell::new((0, 0)));
 
-#[inline(never)]
-fn read_meas() -> (u32, u32) {
-    unsafe { *PUBLISHED.0.get() }
+#[derive(Clone, Copy)]
+struct Meas {
+    v_1e4: u32,
+    i_1e5: u32,
+    dp_1e2: u32,
+    dm_1e2: u32,
+    temp_c: i32,
+    mah: u32,
+    mwh: u32,
 }
+static PUBLISHED: Racy<Meas> = Racy(core::cell::UnsafeCell::new(Meas {
+    v_1e4: 0,
+    i_1e5: 0,
+    dp_1e2: 0,
+    dm_1e2: 0,
+    temp_c: 0,
+    mah: 0,
+    mwh: 0,
+}));
 
 /// Parse + run an `i2crd` packet; fill `reply`, return its length.
 #[inline(never)]

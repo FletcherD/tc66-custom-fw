@@ -54,15 +54,38 @@ fn put_u32(buf: &mut [u8; 192], off: usize, v: u32) {
     buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
 }
 
-/// Fill the template with live values, checksum, encrypt. Units are the wire
-/// units: v = 1e-4 V, i = 1e-5 A, p = 1e-4 W, r = 1e-1 ohm.
+/// Live fields in wire units: v = 1e-4 V, i = 1e-5 A, p = 1e-4 W,
+/// r = 1e-1 ohm, energy in whole mAh/mWh, temp in deg C, d± in 1e-2 V.
+pub struct Fields {
+    pub v: u32,
+    pub i: u32,
+    pub p: u32,
+    pub r: u32,
+    pub mah: u32,
+    pub mwh: u32,
+    pub temp_c: i32,
+    pub dp: u32,
+    pub dm: u32,
+}
+
+/// Fill the template with live values, checksum, encrypt.
 #[inline(never)]
-pub fn build(out: &mut [u8; 192], v: u32, i: u32, p: u32, r: u32) {
+pub fn build(out: &mut [u8; 192], f: &Fields) {
     *out = TEMPLATE;
-    put_u32(out, 48, v);
-    put_u32(out, 52, i);
-    put_u32(out, 56, p);
-    put_u32(out, 68, r);
+    put_u32(out, 48, f.v);
+    put_u32(out, 52, f.i);
+    put_u32(out, 56, f.p);
+    put_u32(out, 68, f.r);
+    /* both energy groups carry the same since-boot integration (no per-group
+     * UI yet; persistence is M2) */
+    put_u32(out, 72, f.mah);
+    put_u32(out, 76, f.mwh);
+    put_u32(out, 80, f.mah);
+    put_u32(out, 84, f.mwh);
+    put_u32(out, 88, if f.temp_c < 0 { 1 } else { 0 }); /* temp sign */
+    put_u32(out, 92, f.temp_c.unsigned_abs());
+    put_u32(out, 96, f.dp);
+    put_u32(out, 100, f.dm);
     for b in 0..3 {
         let crc = crc16_modbus(&out[b * 64..b * 64 + 60]) as u32;
         let bytes = crc.to_le_bytes();

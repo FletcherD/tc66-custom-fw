@@ -93,12 +93,12 @@ bad app never bricks the board — the bootloader is never written.
 ## Roadmap
 
 - **M0 — self-hosting:** boot + USB CDC + `query` + `updat`. **Done (Rust + C reference).**
-- **M1 — measurement + real `getva`** (core done): hardware I²C0 (`i2c.rs`) ✓,
-  INA226 + EEPROM calibration (`ina.rs`) ✓, real encrypted `getva` with
-  CRC16/MODBUS block checksums (`getva.rs`) ✓, SysTick-paced sampler (250 Hz
-  ticks → ~10 Hz publish, poll-rate-independent; MK_WINDOWS/MK_I2CERR telemetry)
-  ✓ — verified live on hardware. Remaining for M1: energy integration
-  (mAh/mWh groups), temperature + D+/D− (on-chip ADC).
+- **M1 — measurement + real `getva`: done.** Hardware I²C0 (`i2c.rs`), INA226 +
+  EEPROM calibration + SysTick-paced sampler (`ina.rs`; 250 Hz ticks → ~10 Hz
+  publish, poll-rate-independent), on-chip ADC for temperature (NTC, model is
+  an experimental fit) and D+/D− (`adc.rs`), 1 Hz energy integration (RAM-only,
+  zeroed at boot — persistence is M2), real encrypted `getva` with CRC16/MODBUS
+  checksums (`getva.rs`). All verified live on hardware.
 - **M2 — persistence:** EEPROM (cal/serial/energy) + `gtrec` log.
 - **M3 — display:** ST7735 bring-up + a minimal V/I/P draw layer.
 - **M4 — stretch:** BLE mirror; USB-PD / QC trigger.

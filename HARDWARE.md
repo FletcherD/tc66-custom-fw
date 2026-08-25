@@ -94,6 +94,7 @@ Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the firs
 | `gtrec` | N×8 B + `reck` | dump the on-device ~1 Hz V/I log |
 | `updat` | `uprdy`, then per-chunk `OK` | our app self-update |
 | `i2crd` | `OK`+data / `ER`+diag | our dev verb: raw I²C read (tools/i2cread.py) |
+| `adcrd` | `OK`+u32 / `ER`+stage | our dev verb: ADC sum-of-16 (tools/adcread.py) |
 
 Keeping `getva` byte-compatible (same reply) lets existing host tools work unchanged.
 
@@ -201,8 +202,21 @@ without rescaling. Drive the sampler from a **hardware timer** so the measuremen
 is independent of host polling (this is the whole point of M1). Power = V·I computed in
 software for the `getva` reply (offset 56).
 
-Temperature (on-chip ADC + NTC, Steinhart curve) and D+/D− (on-chip ADC dividers,
-`D± = sum_of_16 · 330 / 65520` → 1e-2 V) come from the GD32's own ADC, DMA'd.
+Temperature (on-chip ADC + NTC, Steinhart curve) and D+/D− (on-chip ADC,
+`D± = sum_of_16 · 330 / 65520` → 1e-2 V) come from the GD32's own ADC.
+
+#### On-chip ADC (verified on hardware)
+- **The ADC clock is IRC14M** (CFG2.ADCSEL reset default), a dedicated 14 MHz RC
+  that is OFF at reset — enable `RCU_CTL1.IRC14MEN` first or calibration
+  (RSTCLB/CLB) hangs forever. This cost a debug cycle.
+- Channel map (identified empirically, `adcrd` verb / tools/adcread.py):
+  **ch1 = PA1 = NTC divider** (stable across scans; ch0 = PA0 floats/drifts),
+  **ch8 = PB0 = D+**, **ch9 = PB1 = D−** (direct connection — USB idle reads
+  3.30 V / 0.00 V), ch2 = PA2 = BLE UART TX (idles 3.3 V), ch16 = internal die
+  temp (~1.38 V ≈ 41 °C warm), ch17 = Vrefint (1.18 V sanity check).
+- NTC model in firmware is a FIT, not traced: 10k B=3950 low-side with 22k
+  pull-up to 3.3 V — lands ~2 °C below the die sensor. Refine against the stock
+  display when convenient.
 
 ### USB Power Delivery (FUSB302, I²C 0x22)
 The device at I²C **0x22** (write `0x44` / read `0x45`) is a **FUSB302** USB Type-C /
