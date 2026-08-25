@@ -12,7 +12,9 @@ usbd-serial = "0.2"
 # set-vtor is deliberately OFF: VTOR is set inside __pre_init AFTER cpsid i, so a
 # bootloader-armed pending IRQ can never land in our spinning DefaultHandler.
 cortex-m-rt = { version = "0.7.6", features = ["set-sp"] }
-gd32f1 = { version = "0.9.2", features = ["gd32f150", "critical-section"] }
+# rt: the PAC provides the device vector table (enables cortex-m-rt/device) so
+# #[interrupt] fn USBD_LP() lands in slot 37. All other IRQs stay masked.
+gd32f1 = { version = "0.9.2", features = ["gd32f150", "critical-section", "rt"] }
 aes = "0.8"
 libm = "0.2"
 

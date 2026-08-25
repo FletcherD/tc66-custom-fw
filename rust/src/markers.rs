@@ -7,7 +7,7 @@
 pub const MK_BOOT: usize = 0x2000_1000; // 0xB007B007 once main() runs
 pub const MK_STAGE: usize = 0x2000_1004; // furthest milestone (STAGE_*)
 // 0x20001008..0x2000101c: HardFault capture window (startup.rs)
-pub const MK_HEART: usize = 0x2000_1020; // usb::poll() heartbeat
+pub const MK_HEART: usize = 0x2000_1020; // main-loop pass heartbeat
 pub const MK_CTR: usize = 0x2000_1024; // CTR (transfer-complete) count
 pub const MK_RESET: usize = 0x2000_1028; // USB bus-reset count
 pub const MK_SETUP: usize = 0x2000_102c; // last SETUP: bmReqType<<8|bReq
@@ -32,8 +32,25 @@ pub const MK_WINDOWS: usize = 0x2000_1068; // completed sample windows (~10 Hz)
  * (covers 0x1000..0x1100). Only ever write via mk() (volatile).
  * The window ends at 0x20001400 (flasher); 0x1100..0x1400 is free. */
 
-/* USB interrupt-path block (usb refactor) */
-pub const MK_USB_BASE: usize = 0x2000_1070; // +0 state, +4 irq count, +8 status
+/* USB interrupt-path block: the USBD_LP ISR + command ring (main.rs).
+ * All words are single-writer (ISR, or thread mode under interrupt::free
+ * for FULL/CMDS — contexts that are mutually exclusive), so the
+ * read-modify-write bumps never race. */
+pub const MK_USB_BASE: usize = 0x2000_1070;
+pub const MK_USB_STATE: usize = MK_USB_BASE; // ISR phase: 0 idle/exited, 1 entered,
+                                             // 2 dev.poll done, 3 powerz serviced,
+                                             // 4 CDC drained. Frozen nonzero = the
+                                             // ISR wedged in that phase.
+pub const MK_USB_IRQS: usize = MK_USB_BASE + 0x04; // total USBD_LP entries
+pub const MK_USB_ISTR: usize = MK_USB_BASE + 0x08; // USBD_INTF (ISTR) at last ISR entry
+pub const MK_USB_FULL: usize = MK_USB_BASE + 0x0c; // command-ring-full deferrals
+                                                   // (backpressure, not data loss)
+pub const MK_USB_CMDS: usize = MK_USB_BASE + 0x10; // CDC packets moved into the ring
+pub const MK_USB_SPUR: usize = MK_USB_BASE + 0x14; // ISR entries before the USB
+                                                   // pointers were published (must
+                                                   // stay 0 — nonzero means the IRQ
+                                                   // was unmasked too early)
+// +0x18..+0x2c reserved for the USB block
 /* sampler interrupt-path block (sampler refactor) */
 pub const MK_SMP_BASE: usize = 0x2000_10a0; // +0 state, +4 irq count, +8 status
 /* display/DMA block (spi-dma refactor) */
