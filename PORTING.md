@@ -173,6 +173,21 @@ after `.uninit`, where our section pushes it — note a definition must come
 flasher.x), and **`make init-gate`** asserts `__sdata/__edata/__sbss/__ebss` all
 lie inside real RAM on every build.
 
+## M1 measurement path (as implemented)
+
+- `i2c.rs`: polled I2C0 master (PB6/PB7 AF1, 100 kHz, AN2824 sequences), bounded
+  waits, SRESET per transaction; also behind the `i2crd` dev verb.
+- `ina.rs`: INA226 reads (BE registers), EEPROM cal constants (LE u32 at
+  0x2004/44/08/0c/58), the docs' calibration formulas, and `Sampler` — one I2C
+  read per SysTick tick (250 Hz polled, no IRQ), 8 bus + 16 shunt per window →
+  ~10 Hz publish into `PUBLISHED`; failures counted in MK_I2CERR and retried.
+  The explicit config write (0x4127) at sampler start is **load-bearing**: the
+  INA226 was seen returning 0 for bus voltage until (re)configured.
+- `getva.rs`: patches live V/I/P/R into the decrypted known-good template,
+  recomputes **CRC16/MODBUS over bytes 0..60 of each 64-B block** (stored LE at
+  60..64 — algorithm verified against the stock packet), AES-256-ECB encrypts
+  on-device (`aes` crate). Energy groups/temp/D± still template values.
+
 ## After M0: the roadmap (see README + HARDWARE.md)
 - **M1 — measurement + real `getva`:** hardware I²C0 (PB6/PB7) monitor read +
   calibration (HARDWARE.md formulas + EEPROM constants) + a timer-paced sampler +

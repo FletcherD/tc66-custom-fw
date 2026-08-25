@@ -147,12 +147,24 @@ Last 4 bytes of each 64-byte block are a checksum.
 - EEPROM (256 Kbit) at 7-bit address **0x50** (0xA0 in 8-bit form) on the same
   bus, **2-byte addressing** — per-unit calibration constants (verified readable
   at the offsets below), energy accumulators, serial number.
-- Bus scan also ACKs **0x58** (likely the EEPROM's ID page) and **0x22**
-  (unidentified — to be investigated).
-- INA226 read model: write the 1-byte register pointer, read 16-bit big-endian.
-  At power-on it sits at config default 0x4127 with CAL (reg 5) unset — the
-  firmware must configure it. Registers: 0 config, 1 shunt V, 2 bus V, 3 power,
-  4 current, 5 calibration.
+- Bus scan also ACKs **0x58** (the BL24C256 EEPROM's ID/serial page) and **0x22**
+  (a **FUSB302 USB-PD controller** — see "USB Power Delivery" below).
+- INA226 registers: 0 config, 1 shunt V, 2 bus V, 3 power, 4 current, 5 calibration.
+  Read model: write the 1-byte register pointer, read 16-bit big-endian. Power-on
+  default config is 0x4127 with CAL (reg 5) unset.
+- **Stock config: `write reg 0x00 = 0x41A7`, and nothing else** (no CAL write).
+  Decoded: **AVG=1** (no internal averaging), **VSHCT=1.1 ms** (shunt/current),
+  **VBUSCT=4.156 ms** (bus/voltage), **MODE=111** (shunt+bus, continuous). So the
+  part is used as a **raw dual ΔΣ ADC**: the firmware reads shunt (reg 1) + bus
+  (reg 2) and does all averaging + calibration in software.
+- **Recommended for M1: do the same — raw ADC + software cal, NOT the INA226
+  current/power engine.** The per-unit factory calibration in EEPROM (below) is
+  expressed for this software path (specific sum depths, a per-unit zero-current
+  offset `ref`, separate forward/reverse gains). The INA226 engine's single `CAL`
+  register can't reproduce the per-unit offset/gains, so using it would **discard
+  the factory calibration** and force a re-cal against lab references. Keep config
+  `0x41A7`, read raw, and **pace the reads on a hardware timer** — that gives the
+  poll-rate-independent sampling without needing the chip's hardware averaging.
 - Bench note: powering the meter via its PC-comms port does NOT power the
   measurement path — bus voltage/shunt read 0 until the IN port is fed.
 
@@ -177,8 +189,54 @@ Constants (read from EEPROM at boot; working copy + factory backup):
 All divisions are unsigned/truncating. The published integers are the `getva`
 integers directly. Constants are per-unit — read them, don't hard-code.
 
+**Read sequence per published value** (INA226 at config `0x41A7`, continuous):
+- **Voltage:** sum **8** reads of bus-voltage reg 2, then `V = (Σ8·gainV + offV)/20000`.
+- **Current:** sum **16** reads of shunt reg 1, each `raw XOR 0x8000` (offset-binary),
+  then subtract the per-unit `ref` and apply `gainCp` (forward) / `gainCn` (reverse,
+  negated). Result is `/40000` overall (the `/4` in the formula).
+
+The gains bake in those exact sum depths (**8** for V, **16** for I) — change how many
+samples you sum, or enable INA226 hardware averaging, and the constants no longer apply
+without rescaling. Drive the sampler from a **hardware timer** so the measurement rate
+is independent of host polling (this is the whole point of M1). Power = V·I computed in
+software for the `getva` reply (offset 56).
+
 Temperature (on-chip ADC + NTC, Steinhart curve) and D+/D− (on-chip ADC dividers,
 `D± = sum_of_16 · 330 / 65520` → 1e-2 V) come from the GD32's own ADC, DMA'd.
+
+### USB Power Delivery (FUSB302, I²C 0x22)
+The device at I²C **0x22** (write `0x44` / read `0x45`) is a **FUSB302** USB Type-C /
+Power-Delivery PHY on the CC lines — the hardware behind the meter's **PD / PPS
+trigger** (requesting a voltage from a PD source). It provides:
+- **Type-C attach + orientation detection** and CC-line voltage measurement
+  (comparator vs programmable thresholds — the `Measure` register).
+- **The USB-PD BMC PHY:** transmit/receive PD messages over CC with hardware CRC,
+  automatic GoodCRC replies (`AUTO_CRC`), and retries. The firmware streams PD
+  packets through the **FIFOs register `0x43`** (variable length) and runs the PD
+  Policy/Protocol state machine on the MCU.
+- **VCONN switching** and Rp/Rd pull control (`Switches0/1`), plus maskable interrupts.
+
+The FUSB302 is the PHY + link layer; the PD protocol logic is firmware. To trigger a
+voltage: act as a PD **Sink**, receive the source's `Source_Capabilities` (its offered
+PDOs, including PPS/APDO ranges), send a `Request` selecting a PDO (or PPS setpoint),
+and complete the `Accept`/`PS_RDY` handshake — after which the source switches to the
+requested voltage, which passes through to the output leg.
+
+Register map (matches the stock init) and stock boot sequence:
+| Reg | Name | Reg | Name |
+|---|---|---|---|
+| 0x01 | Device ID | 0x0B | Power |
+| 0x02 / 0x03 | Switches0 / Switches1 | 0x0C | Reset |
+| 0x04 | Measure | 0x0A/0x0E/0x0F | Mask / Mask_a / Mask_b |
+| 0x06 / 0x09 | Control0 / Control3 | 0x3C–0x42 | Status0/1, Interrupt, … |
+| 0x05/0x07/0x08 | Slice / Control1/2 | **0x43** | **FIFOs (TX/RX PD messages)** |
+
+Stock boot init (`0x22`): `Reset=3` → `Power=0x0F` → `Switches0=0x04` →
+`Switches1=0x20` (AUTO_CRC) → `Control3=0` → `Mask=0xEF` → `Mask_a=0xFF` →
+`Mask_b=0x01` → `Reset=2` (PD_RESET) → `Control0=0` → `Power=0x0F`, then read
+Status regs 0x3E/0x3F/0x42. It's a well-documented part (open driver references:
+Chromium EC `fusb302`, various USB-PD stacks), so **M4 PD trigger is tractable** —
+reuse this init and add a minimal Sink policy engine.
 
 ### Display (SPI TFT)
 - **ST7735S** controller, **160×80 RGB565**, memory offset **(col +1, row +26)**, inversion on.

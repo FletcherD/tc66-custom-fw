@@ -19,6 +19,7 @@ mod board;
 mod flasher;
 mod getva;
 mod i2c;
+mod ina;
 mod markers;
 mod startup;
 mod usb_bus;
@@ -31,7 +32,7 @@ use usb_device::prelude::*;
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 8;
+const BUILD_ID: u32 = 11;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 type Serial<'a> = SerialPort<'a, usb_bus::UsbBus>;
@@ -43,8 +44,11 @@ fn main() -> ! {
     mk(MK_HEART, 0);
     mk(MK_CMDCNT, 0);
     mk(MK_ENUM, 0);
+    mk(MK_I2CERR, 0);
+    mk(MK_WINDOWS, 0);
 
     let p = pac::Peripherals::take().unwrap();
+    let cp = cortex_m::Peripherals::take().unwrap();
     board::clock_init(&p.rcu);
 
     /* Force a fresh enumeration of THIS app: the bootloader handed off with D+
@@ -71,9 +75,24 @@ fn main() -> ! {
     mk(MK_STAGE, STAGE_USB_INIT);
     board::pa9_high(&p.gpioa);
 
+    /* SysTick paces the sampler at 250 Hz (48 MHz / 192000), polled — no IRQ.
+     * One I2C read per tick; a 24-read window publishes at ~10 Hz, so readings
+     * are fresh regardless of how fast (or whether) the host polls getva. */
+    let mut syst = cp.SYST;
+    syst.set_clock_source(cortex_m::peripheral::syst::SystClkSource::Core);
+    syst.set_reload(192_000 - 1);
+    syst.clear_current();
+    syst.enable_counter();
+    let mut sampler = ina::Sampler::new();
+
     let mut buf = [0u8; 64];
     loop {
         mk(MK_HEART, mk_get(MK_HEART) + 1);
+        if syst.has_wrapped() {
+            if let Some(rd) = sampler.tick() {
+                unsafe { *PUBLISHED.0.get() = (rd.v_1e4, rd.i_1e5) };
+            }
+        }
         if !dev.poll(&mut [&mut serial]) {
             continue;
         }
@@ -110,7 +129,11 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
         write_all(dev, serial, b"firm");
         mk(MK_STAGE, STAGE_QUERY);
     } else if match5(buf, b"getva") {
-        write_all(dev, serial, &getva::GETVA_REPLY);
+        let (v, i) = read_meas();
+        let (p, r) = ina::derive(v, i);
+        let mut reply = [0u8; 192];
+        getva::build(&mut reply, v, i, p, r);
+        write_all(dev, serial, &reply);
     } else if match5(buf, b"i2crd") {
         /* dev/bring-up verb (ours, not stock):
          *   i2crd <addr7> <wlen 0..=2> <w0> <w1> <rlen 0..=32>
@@ -125,6 +148,17 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
         mk(MK_PROBE, 0xBAD_EB); /* no bulk endpoint found — refuse, host times out */
     }
     /* rotat / nextp / lastp / unknown -> silent */
+}
+
+/* Latest published (V 1e-4, I 1e-5) from the timer-paced sampler; zeros until
+ * the first window completes. Single-core, IRQs masked -> Racy ok. */
+struct Racy<T>(core::cell::UnsafeCell<T>);
+unsafe impl<T> Sync for Racy<T> {}
+static PUBLISHED: Racy<(u32, u32)> = Racy(core::cell::UnsafeCell::new((0, 0)));
+
+#[inline(never)]
+fn read_meas() -> (u32, u32) {
+    unsafe { *PUBLISHED.0.get() }
 }
 
 /// Parse + run an `i2crd` packet; fill `reply`, return its length.

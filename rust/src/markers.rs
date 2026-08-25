@@ -22,6 +22,8 @@ pub const MK_SPEXIT: usize = 0x2000_1048; // SP at usb::poll exit
 pub const MK_PANIC: usize = 0x2000_1058; // 0xDEADC0DE on Rust panic
 pub const MK_PANIC_LINE: usize = 0x2000_105c; // panicking source line
 pub const MK_BUILD: usize = 0x2000_1060; // build id (self-hosting proof)
+pub const MK_I2CERR: usize = 0x2000_1064; // sampler I2C error count
+pub const MK_WINDOWS: usize = 0x2000_1068; // completed sample windows (~10 Hz)
 
 pub const STAGE_CLOCK: u32 = 1; // 48 MHz clock + USB clock configured
 pub const STAGE_USB_INIT: u32 = 2; // USB peripheral powered + connected
