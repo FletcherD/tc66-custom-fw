@@ -21,6 +21,7 @@ and command dispatch.
 | `ina.rs` | INA226 reads, EEPROM calibration, timer-paced `Sampler`, NTC/D± conversion |
 | `adc.rs` | polled on-chip ADC (NTC, D+/D−), `adcrd` dev verb backend |
 | `getva.rs` | real `getva` packet builder (template + CRC16/MODBUS + AES-256-ECB) |
+| `tft.rs` | ST7735S display driver (SPI0, stock init/window/fill path) + TIMER1 backlight PWM, `tftfl`/`tftbl` dev verb backends |
 | `markers.rs` | SRAM debug marker map + helpers |
 
 ## Startup / linker
@@ -142,6 +143,16 @@ memory.x, not flasher.x), and **`make init-gate`** asserts
   recovered stock β-model on ch1 (this unit); channels + model in HARDWARE.md.
 - Energy: 1 Hz integration in the main loop off the same SysTick — RAM-only,
   zeroed at boot, both getva groups publish the same value. Persistence = M2.
+- `tft.rs`: the recovered stock ST7735S path (TFT_FINDINGS.md in the RE repo)
+  on hardware SPI0 at 24 MHz — init sequence verbatim, CASET/RASET with the
+  panel's +1/+26 GRAM offset, `fill_rect` streaming straight into GRAM (no
+  framebuffer). **MADCTL is `0xA8`** — stock's "180° flip" variant is right-side
+  up on this unit; `0x68` is upside-down (verified by webcam). DC is only
+  flipped after `TRANS` reads idle (TBE alone means the shifter may still be
+  busy). Backlight: PA9 enable is already high (it doubles as the USB D+
+  soft-connect), brightness = TIMER1 CH1 PWM on PB3 (1 kHz, compare 0..=999,
+  init 499). Verbs: `tftfl` = test pattern / solid fill, `tftbl` = brightness
+  (host side: `tools/tft.py`). Init is lazy on first verb — nothing at boot yet.
 - `getva.rs`: patches all live fields (V/I/P/R, mAh/mWh, temp+sign, D±) into
   the decrypted known-good template, recomputes **CRC16/MODBUS over bytes
   0..60 of each 64-B block** (stored LE at 60..64), AES-256-ECB encrypts

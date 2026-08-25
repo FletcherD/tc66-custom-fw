@@ -2,8 +2,10 @@
 
 Custom Rust firmware for the RuiDeng TC66/TC66C USB-C power meter, developed
 against real hardware on the bench. M0 (self-hosting USB + self-reflash) and
-M1 (real calibrated measurement) are done; next is M2 (persistence), then M3
-(display). See README.md for status/roadmap.
+M1 (real calibrated measurement) are done; the M3 display driver (rust/src/
+tft.rs, `tftfl`/`tftbl` dev verbs, tools/tft.py) is hardware-verified but not
+yet in the always-on path. Next is M2 (persistence), then the M3 UI on top of
+the driver. See README.md for status/roadmap.
 
 ## Read these before working
 

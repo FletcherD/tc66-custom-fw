@@ -95,6 +95,8 @@ Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the firs
 | `updat` | `uprdy`, then per-chunk `OK` | our app self-update |
 | `i2crd` | `OK`+data / `ER`+diag | our dev verb: raw I²C read (tools/i2cread.py) |
 | `adcrd` | `OK`+u32 / `ER`+stage | our dev verb: ADC sum-of-16 (tools/adcread.py) |
+| `tftfl` | `OK` / `ER`+stage | our dev verb: TFT test pattern (no args) or solid fill (RGB565 LE u16) (tools/tft.py) |
+| `tftbl` | `OK` / `ER`+stage | our dev verb: backlight PWM compare, LE u16 0..=999 (tools/tft.py) |
 
 Keeping `getva` byte-compatible (same reply) lets existing host tools work unchanged.
 
@@ -286,7 +288,9 @@ reuse this init and add a minimal Sink policy engine.
 - **SPI0** (base `0x40013000`), master, mode 0, 8-bit, MSB-first, ~half-PCLK.
 - Pins: **SCK=PA5, MOSI=PA7** (no MISO), **DC=PA4** (0=cmd/1=data), **RST=PA3** (active low), CS tied low.
 - **Backlight: PA9 = enable** (high = on), **PB3 = PWM brightness** (TIMER1 channel, ~1.5 kHz).
-- Bring-up: hardware RST pulse → SLPOUT(0x11)+100 ms → INVON(0x21) → frame/power/VCOM config (0xB1–0xC7) → MADCTL(0x36)=0x68 → COLMOD(0x3A)=0x55 → 32 bytes gamma → +100 ms → DISPON(0x29). Draw with CASET(0x2A)/RASET(0x2B) (apply the +1/+26 offset) → RAMWR(0x2C) → pixel stream. No RAM framebuffer (8 KB can't hold a frame) — draw straight to GRAM.
+- Bring-up: hardware RST pulse → SLPOUT(0x11)+100 ms → INVON(0x21) → frame/power/VCOM config (0xB1–0xC7) → MADCTL(0x36) → COLMOD(0x3A)=0x55 → 32 bytes gamma → +100 ms → DISPON(0x29). Draw with CASET(0x2A)/RASET(0x2B) (apply the +1/+26 offset) → RAMWR(0x2C) → pixel stream. No RAM framebuffer (8 KB can't hold a frame) — draw straight to GRAM.
+- **MADCTL on this unit: `0xA8`** (stock's "180°" variant) is right-side up; `0x68` renders upside-down (webcam-verified). Colors are correct with the BGR bit as stock sets it.
+- **PA9 (backlight enable) is shared with the USB D+ soft-connect** — the firmware already holds it high after enumeration, so backlight brightness is controlled purely by the PB3 PWM (compare 0 = dark).
 
 ### Buttons
 - **K1 = PF0, K2 = PF1** (GPIOF), read via EXTI or polled.

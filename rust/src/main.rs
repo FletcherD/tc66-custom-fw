@@ -23,6 +23,7 @@ mod i2c;
 mod ina;
 mod markers;
 mod startup;
+mod tft;
 mod usb_bus;
 
 use cortex_m_rt::entry;
@@ -33,7 +34,7 @@ use usb_device::prelude::*;
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 17;
+const BUILD_ID: u32 = 21;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 type Serial<'a> = SerialPort<'a, usb_bus::UsbBus>;
@@ -201,6 +202,24 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
             3
         };
         write_all(dev, serial, &reply[..n]);
+    } else if match5(buf, b"tftfl") {
+        /* dev verb: tftfl -> test pattern; tftfl <lo> <hi> -> solid RGB565 fill
+         * -> "OK", or "ER" + stage (1 SPI TBE timeout, 2 shift-idle timeout) */
+        let r = if buf.len() >= 7 {
+            let color = buf[5] as u16 | (buf[6] as u16) << 8;
+            tft::fill_rect(0, 0, tft::WIDTH - 1, tft::HEIGHT - 1, color)
+        } else {
+            tft::test_pattern()
+        };
+        reply_ok_er(dev, serial, r);
+    } else if match5(buf, b"tftbl") {
+        /* dev verb: tftbl <lo> <hi> -> backlight PWM compare 0..=999 */
+        let r = if buf.len() >= 7 {
+            tft::backlight_set(buf[5] as u16 | (buf[6] as u16) << 8)
+        } else {
+            Err(0x0F)
+        };
+        reply_ok_er(dev, serial, r);
     } else if match5(buf, b"updat") {
         if let Some(ep) = find_bulk_ep() {
             flasher::launch(ep); /* does not return */
@@ -234,6 +253,14 @@ static PUBLISHED: Racy<Meas> = Racy(core::cell::UnsafeCell::new(Meas {
     mah: 0,
     mwh: 0,
 }));
+
+#[inline(never)]
+fn reply_ok_er(dev: &mut Dev, serial: &mut Serial, r: Result<(), u8>) {
+    match r {
+        Ok(()) => write_all(dev, serial, b"OK"),
+        Err(stage) => write_all(dev, serial, &[b'E', b'R', stage]),
+    }
+}
 
 /// Parse + run an `i2crd` packet; fill `reply`, return its length.
 #[inline(never)]
