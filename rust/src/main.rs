@@ -18,12 +18,14 @@
 mod adc;
 mod board;
 mod flasher;
+mod font;
 mod getva;
 mod i2c;
 mod ina;
 mod markers;
 mod startup;
 mod tft;
+mod ui;
 mod usb_bus;
 
 use cortex_m_rt::entry;
@@ -34,7 +36,7 @@ use usb_device::prelude::*;
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 21;
+const BUILD_ID: u32 = 23;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 type Serial<'a> = SerialPort<'a, usb_bus::UsbBus>;
@@ -75,6 +77,12 @@ fn main() -> ! {
         .unwrap()
         .build(); /* build() enables the peripheral (CNTR power-up, BTABLE=0) */
     mk(MK_STAGE, STAGE_USB_INIT);
+
+    /* TFT init + first frame now, while D+ is still low — the init sequence
+     * has ~400 ms of fixed delays that must not stall enumeration. On error
+     * the display is left off for this boot (verbs can still retry it). */
+    let mut tft_alive = ui::draw(0, 0, 0).is_ok();
+
     board::pa9_high(&p.gpioa);
 
     /* SysTick paces the sampler at 250 Hz (48 MHz / 192000), polled — no IRQ.
@@ -93,6 +101,10 @@ fn main() -> ! {
     let mut sec_ticks: u32 = 0;
     let mut acc_i_1e5s: u64 = 0;
     let mut acc_p_1e4s: u64 = 0;
+
+    /* screen refresh every 125 ticks (0.5 s); only changed cells are drawn
+     * (ui.rs dirty tracking), so an idle refresh costs nothing */
+    let mut ui_ticks: u32 = 0;
 
     let mut buf = [0u8; 64];
     loop {
@@ -119,6 +131,15 @@ fn main() -> ! {
                     m.mah = (acc_i_1e5s / 360_000) as u32;
                     m.mwh = (acc_p_1e4s / 36_000) as u32;
                 }
+            }
+            ui_ticks += 1;
+            if ui_ticks >= 125 && tft_alive {
+                ui_ticks = 0;
+                let m = unsafe { *PUBLISHED.0.get() };
+                let (pw, _) = ina::derive(m.v_1e4, m.i_1e5);
+                /* a failed draw disables the refresh for this boot (a wedged
+                 * SPI wait would otherwise slow every 0.5 s cycle) */
+                tft_alive = ui::draw(m.v_1e4, m.i_1e5, pw).is_ok();
             }
         }
         if !dev.poll(&mut [&mut serial]) {
@@ -212,6 +233,11 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
             tft::test_pattern()
         };
         reply_ok_er(dev, serial, r);
+    } else if match5(buf, b"tftui") {
+        /* dev verb: draw/refresh the main screen from published values */
+        let m = unsafe { *PUBLISHED.0.get() };
+        let (p, _) = ina::derive(m.v_1e4, m.i_1e5);
+        reply_ok_er(dev, serial, ui::draw(m.v_1e4, m.i_1e5, p));
     } else if match5(buf, b"tftbl") {
         /* dev verb: tftbl <lo> <hi> -> backlight PWM compare 0..=999 */
         let r = if buf.len() >= 7 {

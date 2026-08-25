@@ -4,6 +4,7 @@
   tft.py pattern            white border + R/G/B bands test pattern
   tft.py fill <rgb565>      solid fill, e.g. 0xF800 (red) 0x07E0 (green)
   tft.py bl <0..999>        backlight PWM compare (0 = dark, 999 = full)
+  tft.py ui                 draw/refresh the main screen (V/I/P lines)
 """
 import sys
 
@@ -46,6 +47,8 @@ def main():
     elif op == "fill":
         c = int(sys.argv[2], 0)
         verb(s, b"tftfl" + c.to_bytes(2, "little"))
+    elif op == "ui":
+        verb(s, b"tftui")
     elif op == "bl":
         v = int(sys.argv[2], 0)
         verb(s, b"tftbl" + v.to_bytes(2, "little"))
