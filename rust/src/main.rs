@@ -33,7 +33,7 @@ use usb_device::prelude::*;
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 16;
+const BUILD_ID: u32 = 17;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 type Serial<'a> = SerialPort<'a, usb_bus::UsbBus>;

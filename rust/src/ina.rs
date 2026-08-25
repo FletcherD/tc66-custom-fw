@@ -41,8 +41,9 @@ pub struct Reading {
 
 /* ADC channels, identified empirically via `adcrd` scans (see HARDWARE.md):
  * ch8/ch9 = PB0/PB1 = D+/D- (direct, USB idle J-state signature);
- * ch1 = PA1 = NTC divider (stable across scans; ch0 drifts = floating).
- * Cross-checked against the internal die sensor (ch16 ~41 C). */
+ * ch1 = PA1 = NTC divider on this unit (rock-stable, reads room temp on a
+ * cool board with the stock constants; ch0 and ch3 drift = floating, even
+ * though the stock firmware reads ch3 on the hardware rev it targets). */
 const CH_NTC: u8 = 1;
 const CH_DP: u8 = 8;
 const CH_DM: u8 = 9;
@@ -52,17 +53,19 @@ fn d_line_1e2(sum16: u32) -> u32 {
     sum16 * 330 / 65520
 }
 
-/// NTC temperature — EXPERIMENTAL model: 10k B=3950 NTC low-side with a 22k
-/// pull-up to 3.3 V. Chosen because it lands ~2 C below the die sensor on a
-/// warm board (consistent); divider values are a fit, not traced — refine by
-/// comparing against the stock display at a couple of temperatures. Whole C.
+/// NTC temperature — the STOCK model, recovered exactly from the stock
+/// firmware (HARDWARE.md "Temperature (NTC) & D±"): 10k @ 25 C, beta = 3450,
+/// on the bottom of an 11.5k divider:
+///   R = avg * 11500 / (4095 - avg);  T = 1/(1/298.15 + ln(R/10000)/3450)
+/// (Stock reads ch3 on the rev it targets; on THIS unit the divider is
+/// measurably on ch1 — ch3 floats. Verified: reads room temp on a cool board.)
 fn ntc_temp_c(sum16: u32) -> i32 {
-    let v = sum16 as f32 * 3.3 / 65520.0;
-    if v <= 0.01 || v >= 3.29 {
+    let avg = sum16 as f32 / 16.0;
+    if avg < 1.0 || avg > 4094.0 {
         return 0; /* open/shorted divider — don't feed ln() garbage */
     }
-    let r = 22_000.0 * v / (3.3 - v);
-    let inv_t = 1.0 / 298.15 + libm::logf(r / 10_000.0) / 3950.0;
+    let r = avg * 11500.0 / (4095.0 - avg);
+    let inv_t = 1.0 / 298.15 + libm::logf(r / 10_000.0) / 3450.0;
     (1.0 / inv_t - 273.15) as i32
 }
 

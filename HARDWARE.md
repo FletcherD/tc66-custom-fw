@@ -202,8 +202,32 @@ without rescaling. Drive the sampler from a **hardware timer** so the measuremen
 is independent of host polling (this is the whole point of M1). Power = V·I computed in
 software for the `getva` reply (offset 56).
 
-Temperature (on-chip ADC + NTC, Steinhart curve) and D+/D− (on-chip ADC,
-`D± = sum_of_16 · 330 / 65520` → 1e-2 V) come from the GD32's own ADC.
+### Temperature (NTC) & D±
+Both come from the **GD32 on-chip 12-bit ADC** (DMA'd, 16-sample sums).
+
+**D+ / D−:** `D± = (Σ16 of the divider channel) · 330 / 65520` → 1e-2 V (getva 96/100).
+
+**Temperature (NTC):** the stock firmware reads an NTC on ADC **ch3** (on the
+hardware rev it targets — **on our unit the divider measurably sits on ch1**:
+ch1 is rock-stable and reads room temp on a cool board, while ch3/ch0 float
+and drift; see the ADC section below) and converts with a **β-equation**
+(floating point). Recovered exactly from the firmware:
+```
+avg  = (Σ16 of ch3) / 16                          # 0..4095, 12-bit
+R    = avg * 11500 / (4095 - avg)                 # ohms
+T_K  = 1 / ( 1/298.15 + ln(R / 10000) / 3450 )    # β equation, natural log
+T_°C = T_K - 273.15                               # display °F = °C*1.8 + 32
+```
+Sensor: a **10 kΩ @ 25 °C, β = 3450** NTC on the bottom of an **11.5 kΩ** divider.
+Constants (flash literals): R_series `0x2cec` = 11500, R0 `0x461c4000` = 10000.0f,
+β `…0x40aaf400` = 3450, `1/T0` `0x3f6b79e1:dcb5db83` = 0.0033540164 (T0 = 298.15 K),
+273.15, and 1.8 / 32 for °F. The getva `temp` field carries the magnitude; the
+separate `temp sign` field (offset 88) marks sub-zero.
+
+The getva temperature is a single `ln()` per second — trivial, but if you want to
+avoid pulling in `libm` you can use a small NTC lookup table instead. (Older hardware,
+`CFG+0x48 ≤ 0x144`, uses an integer piecewise-linear curve on a different channel;
+not present on current units.)
 
 #### On-chip ADC (verified on hardware)
 - **The ADC clock is IRC14M** (CFG2.ADCSEL reset default), a dedicated 14 MHz RC
@@ -214,9 +238,11 @@ Temperature (on-chip ADC + NTC, Steinhart curve) and D+/D− (on-chip ADC,
   **ch8 = PB0 = D+**, **ch9 = PB1 = D−** (direct connection — USB idle reads
   3.30 V / 0.00 V), ch2 = PA2 = BLE UART TX (idles 3.3 V), ch16 = internal die
   temp (~1.38 V ≈ 41 °C warm), ch17 = Vrefint (1.18 V sanity check).
-- NTC model in firmware is a FIT, not traced: 10k B=3950 low-side with 22k
-  pull-up to 3.3 V — lands ~2 °C below the die sensor. Refine against the stock
-  display when convenient.
+- The firmware (rust/src/ina.rs) uses the recovered stock NTC model above on
+  **ch1**. Verified: 25 °C at room temp on a cool board; ~60 °C after hours
+  powered in the enclosure. (The internal die sensor is a poor cross-check —
+  the MCU self-heats to ambient +~15 °C within minutes regardless of board
+  temperature, and its V25/slope constants are uncalibrated per part.)
 
 ### USB Power Delivery (FUSB302, I²C 0x22)
 The device at I²C **0x22** (write `0x44` / read `0x45`) is a **FUSB302** USB Type-C /
