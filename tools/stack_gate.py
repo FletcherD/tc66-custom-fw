@@ -15,11 +15,21 @@ cross-function b/b.w tail branches, treated as calls = overestimate), and
 DFS-memoize the deepest chain from Reset. Indirect calls (blx rN — the
 usb-device trait-object dispatch in dev.poll) are charged the max subtree
 depth over every UsbClass impl method, floored at INDIRECT_FLOOR. Recursion
-in the direct graph is a hard error. +32 B for one hardware exception frame
-(IRQs are masked but faults still stack).
+in the direct graph is a hard error.
 
-The stack budget is _stack_start - __ebss from nm. The gate requires
-worst_case + EXC_FRAME + MARGIN <= budget.
+Interrupt/exception charges: the gate reads the ELF .vector_table and
+resolves every populated slot to its handler function. Device IRQs (slots
+16+) can preempt any thread-mode chain, so the worst case charges one
+hardware exception frame (32 B) + the DEEPEST device-IRQ handler subtree on
+top of the thread worst case. ASSUMPTION (do not break it): all enabled IRQs
+share one NVIC priority, so device IRQs never nest — the gate charges the
+max handler chain, not the sum. System-exception slots (2..15 — faults; they
+spin and never return) are charged the same way on top of everything.
+A populated vector that doesn't resolve to a disassembled .text function is
+a hard error — never silently uncharged.
+
+The stack budget is STACK_TOP - __ebss from nm. The gate requires
+worst_case + irq_charge + fault_charge + MARGIN <= budget.
 
 Usage: stack_gate.py <elf> [--margin N]
 """
@@ -29,6 +39,7 @@ import sys
 
 INDIRECT_FLOOR = 192  # min charge for a blx rN if UsbClass scan finds less
 EXC_FRAME = 32        # one hardware exception stacking (r0-r3,r12,lr,pc,xpsr)
+VECTORS = 16 + 52     # 16 system slots + the GD32F150's 52 device IRQ slots
 DEFAULT_MARGIN = 192  # required headroom beyond the computed worst case
 
 # The RUNTIME stack top: __pre_init raises MSP here (startup.rs), just below
@@ -118,6 +129,40 @@ def worst_depth(funcs, indirect_cost):
     return depth
 
 
+def vector_handlers(elf, funcs):
+    """Resolve .vector_table slots to handler names.
+
+    Returns (sys_handlers, irq_handlers): names for populated system-
+    exception slots (2..15) and device-IRQ slots (16..). Reset (slot 1) is
+    the graph entry, not a preemptor. A populated slot that doesn't map to a
+    disassembled .text symbol is fatal — it would go uncharged otherwise.
+    """
+    dump = subprocess.run(["arm-none-eabi-objdump", "-s", "-j", ".vector_table",
+                           elf], capture_output=True, text=True, check=True).stdout
+    data = bytearray()
+    for line in dump.splitlines():
+        m = re.match(r"^ [0-9a-f]+ ((?:[0-9a-f]{2,8} ?){1,4})", line)
+        if m:
+            data += bytes.fromhex(m.group(1).replace(" ", ""))
+    words = [int.from_bytes(data[i:i + 4], "little")
+             for i in range(0, len(data), 4)]
+    if len(words) < VECTORS:
+        sys.exit(f"stack-gate: .vector_table has {len(words)} slots, "
+                 f"expected {VECTORS}")
+    addr2name = {f["addr"]: n for n, f in funcs.items()}
+
+    def resolve(slot, w):
+        name = addr2name.get(w & ~1)
+        if name is None:
+            sys.exit(f"stack-gate: vector slot {slot} -> {w:#x} does not "
+                     "resolve to a .text function; extend the gate")
+        return name
+
+    sys_h = {resolve(i, w) for i, w in enumerate(words[2:16], 2) if w}
+    irq_h = {resolve(i, w) for i, w in enumerate(words[16:VECTORS], 16) if w}
+    return sys_h, irq_h
+
+
 def main():
     elf = sys.argv[1]
     margin = DEFAULT_MARGIN
@@ -150,6 +195,17 @@ def main():
         sys.exit("stack-gate: no Reset/main symbol found")
     worst, chain = depth(entry)
 
+    # Preemption charges from the real vector table (see module docstring):
+    # deepest device-IRQ handler can land on the thread worst case; a fault
+    # (spins, never returns) can then land on top of that.
+    sys_handlers, irq_handlers = vector_handlers(elf, funcs)
+    irq_worst, irq_name = max(((depth(h)[0], h) for h in irq_handlers),
+                              default=(0, "-"))
+    fault_worst, fault_name = max(((depth(h)[0], h) for h in sys_handlers),
+                                  default=(0, "-"))
+    irq_charge = (EXC_FRAME + irq_worst) if irq_handlers else 0
+    fault_charge = EXC_FRAME + fault_worst
+
     if "--top" in sys.argv:
         tot = sorted(((depth(n)[0], n) for n in funcs), reverse=True)
         for d, n in tot[:15]:
@@ -157,20 +213,30 @@ def main():
         print("worst chain from", entry)
         for hop in chain[:12]:
             print("  " + hop)
+        print(f"irq handlers: {sorted(irq_handlers)}")
+        if irq_handlers:
+            print(f"deepest irq chain ({irq_name}):")
+            for hop in depth(irq_name)[1][:8]:
+                print("  " + hop)
         return
-    need = worst + EXC_FRAME + margin
+    need = worst + irq_charge + fault_charge + margin
 
-    print(f"stack-gate: worst {worst} B + {EXC_FRAME} exc + {margin} margin"
-          f" = {need} B of {budget} B "
-          f"({budget - worst - EXC_FRAME} B headroom)"
-          f" [indirect charge {indirect_cost} B]")
+    print(f"stack-gate: worst {worst} B + irq {irq_charge} B "
+          f"({EXC_FRAME} frame + {irq_worst} {irq_name.split('_RN')[0] or 'chain'})"
+          f" + fault {fault_charge} B + {margin} margin = {need} B of "
+          f"{budget} B ({budget - need + margin} B headroom) "
+          f"[indirect charge {indirect_cost} B]")
     if need > budget:
         print("worst chain:")
         for hop in chain[:12]:
             print("  " + hop)
+        if irq_handlers:
+            print(f"deepest irq chain ({irq_name}):")
+            for hop in depth(irq_name)[1][:8]:
+                print("  " + hop)
         sys.exit(f"stack-gate FAIL: need {need} B > budget {budget} B "
-                 f"(STACK_TOP-__ebss). Shrink deep-chain frames (or shallow "
-                 f"boot-time init); see FIRMWARE.md.")
+                 f"(STACK_TOP-__ebss). Shrink deep-chain or handler frames "
+                 f"(or shallow boot-time init); see FIRMWARE.md.")
     print("stack-gate ok")
 
 
