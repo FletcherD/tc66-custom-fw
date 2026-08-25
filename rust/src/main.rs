@@ -1,38 +1,88 @@
-//! TC66 custom firmware, Milestone 0 — Rust port of reference-c/.
+//! TC66 custom firmware — M0 on the ecosystem USB stack.
 //!
-//! Brings up the 48 MHz clock + USB CDC-ACM (usb.rs) and runs a polled main loop
-//! dispatching the bare-5-byte serial commands:
-//!   query -> "firm"      (proves the app is running; host tools gate on this)
-//!   getva -> 192-B static AES packet
-//!   updat -> copy the SRAM streaming flasher to 0x20001400 and jump (no K1)
-//!   rotat/nextp/lastp -> silent no-ops (no display in M0)
+//! usb-device + usbd-serial + stm32-usbd (via the small UsbPeripheral impl in
+//! usb_bus.rs) provide CDC-ACM; we keep our own clock bring-up and the PA9 D+
+//! soft-connect choreography (board.rs), the SRAM marker debugging (markers.rs),
+//! and the polled main loop dispatching the bare-5-byte commands:
+//!   query -> "firm", getva -> 192-B static packet, updat -> Rust SRAM flasher
+//!   (flasher.rs), rotat/nextp/lastp -> silent no-ops.
 //!
-//! Interrupts stay masked the whole time (startup.rs __pre_init does cpsid i);
-//! USB is polled. Debugging is SRAM markers only — see markers.rs.
+//! Endpoint layout is whatever the stack allocates (expected: EP1 = interrupt IN,
+//! EP2 = bulk OUT+IN); `updat` discovers the bulk endpoint by scanning EPnR and
+//! the flasher reads its PMA buffers from the BTABLE, so nothing is hard-coded.
+//! Interrupts stay masked (startup.rs); everything runs off dev.poll().
 
 #![no_std]
 #![no_main]
 
+mod board;
 mod flasher;
 mod getva;
 mod markers;
 mod regs;
 mod startup;
-mod usb;
+mod usb_bus;
 
 use cortex_m_rt::entry;
 use markers::*;
+use usb_device::device::{StringDescriptors, UsbDeviceBuilder, UsbRev, UsbVidPid};
+use usb_device::prelude::*;
+use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 2;
+const BUILD_ID: u32 = 4;
+
+type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
+type Serial<'a> = SerialPort<'a, usb_bus::UsbBus>;
 
 #[entry]
 fn main() -> ! {
     mk(MK_BOOT, 0xB007_B007);
     mk(MK_BUILD, BUILD_ID);
-    usb::init();
+    mk(MK_HEART, 0);
+    mk(MK_CMDCNT, 0);
+    mk(MK_ENUM, 0);
+
+    board::clock_init();
+
+    /* Force a fresh enumeration of THIS app: the bootloader handed off with D+
+     * still pulled up and the host bound to the bootloader. Disconnect, bring
+     * the stack up, reconnect. */
+    board::pa9_config_output();
+    board::pa9_low();
+    board::delay_ms(120);
+
+    let usb_alloc = usb_bus::UsbBus::new(usb_bus::Gd32Usb);
+    let mut serial = SerialPort::new(&usb_alloc);
+    let mut dev = UsbDeviceBuilder::new(&usb_alloc, UsbVidPid(0x28E9, 0x018A))
+        .strings(&[StringDescriptors::default()
+            .manufacturer("RuiDeng")
+            .product("TC66 USB Type-C Meter")
+            .serial_number("TC66")])
+        .unwrap()
+        .device_class(USB_CLASS_CDC)
+        .device_release(0x0100)
+        .usb_rev(UsbRev::Usb200)
+        .max_packet_size_0(64)
+        .unwrap()
+        .build(); /* build() enables the peripheral (CNTR power-up, BTABLE=0) */
+    mk(MK_STAGE, STAGE_USB_INIT);
+    board::pa9_high();
+
+    let mut buf = [0u8; 64];
     loop {
-        usb::poll();
+        mk(MK_HEART, mk_get(MK_HEART) + 1);
+        if !dev.poll(&mut [&mut serial]) {
+            continue;
+        }
+        if dev.state() == UsbDeviceState::Configured && mk_get(MK_STAGE) < STAGE_CONFIG {
+            mk(MK_STAGE, STAGE_CONFIG);
+        }
+        if let Ok(n) = serial.read(&mut buf) {
+            if n > 0 {
+                on_packet(&mut dev, &mut serial, &buf[..n]);
+            }
+        }
     }
 }
 
@@ -41,24 +91,68 @@ fn match5(b: &[u8], cmd: &[u8; 5]) -> bool {
     b.len() >= 5 && b[..5] == cmd[..]
 }
 
-/// Called by usb::handle_ep3 with the received CDC OUT packet.
-/// Returns true iff it was `updat` (caller must then NOT re-arm EP3).
 #[inline(never)]
-pub fn on_packet(buf: &[u8]) -> bool {
+fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
+    if buf.len() >= 4 {
+        mk(
+            MK_CMD,
+            buf[0] as u32 | (buf[1] as u32) << 8 | (buf[2] as u32) << 16 | (buf[3] as u32) << 24,
+        );
+    }
+    mk(MK_CMDCNT, mk_get(MK_CMDCNT) + 1);
+    if mk_get(MK_STAGE) < STAGE_CMD {
+        mk(MK_STAGE, STAGE_CMD);
+    }
+
     if match5(buf, b"query") {
-        usb::cdc_send(b"firm");
+        write_all(dev, serial, b"firm");
         mk(MK_STAGE, STAGE_QUERY);
-        return false;
-    }
-    if match5(buf, b"getva") {
-        usb::cdc_send(&getva::GETVA_REPLY[0..64]); /* pac1 */
-        usb::cdc_send(&getva::GETVA_REPLY[64..128]); /* pac2 */
-        usb::cdc_send(&getva::GETVA_REPLY[128..192]); /* pac3 */
-        return false;
-    }
-    if match5(buf, b"updat") {
-        flasher::launch(); /* does not return */
+    } else if match5(buf, b"getva") {
+        write_all(dev, serial, &getva::GETVA_REPLY);
+    } else if match5(buf, b"updat") {
+        if let Some(ep) = find_bulk_ep() {
+            flasher::launch(ep); /* does not return */
+        }
+        mk(MK_PROBE, 0xBAD_EB); /* no bulk endpoint found — refuse, host times out */
     }
     /* rotat / nextp / lastp / unknown -> silent */
-    false
+}
+
+/// Blocking-ish write with an absent-host bound (the C had the same bounded wait):
+/// push bytes into usbd-serial's buffer and keep polling until it drains.
+#[inline(never)]
+fn write_all(dev: &mut Dev, serial: &mut Serial, data: &[u8]) {
+    let mut rest = data;
+    let mut budget = 200_000u32;
+    while budget > 0 {
+        budget -= 1;
+        if !rest.is_empty() {
+            match serial.write(rest) {
+                Ok(n) => rest = &rest[n..],
+                Err(UsbError::WouldBlock) => {}
+                Err(_) => return,
+            }
+        } else {
+            match serial.flush() {
+                Ok(()) => return,
+                Err(UsbError::WouldBlock) => {}
+                Err(_) => return,
+            }
+        }
+        dev.poll(&mut [serial]);
+    }
+}
+
+/// Find the CDC bulk data endpoint: the EPnR whose type field is BULK (00) with
+/// its RX side enabled. Unconfigured EPnRs read 0 (STAT_RX disabled), EP0 is
+/// CONTROL, the notification endpoint is INTERRUPT — so this is unambiguous.
+#[inline(never)]
+fn find_bulk_ep() -> Option<u32> {
+    for n in 1..8u32 {
+        let epr = regs::rd(regs::usb_epr(n));
+        if epr & 0x0600 == 0x0000 && epr & 0x3000 != 0 {
+            return Some(n);
+        }
+    }
+    None
 }

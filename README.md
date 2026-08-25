@@ -8,11 +8,14 @@ with existing host tools (enumerates as the same USB serial device).
 ## Status
 
 - **Milestone 0 — done & working on hardware, in Rust** (`rust/`). The Rust firmware
-  boots from the stock bootloader, brings up USB CDC-ACM from the register level,
+  boots from the stock bootloader, runs USB CDC-ACM on the ecosystem stack
+  (`usb-device` + `usbd-serial` + `stm32-usbd` over a small `UsbPeripheral` impl),
   **enumerates as the meter's CDC serial device, answers `query`→`firm`, serves the
   static `getva`, and reflashes itself over USB via `updat` (no button press)** —
-  self-hosting, iterated hands-free with `make -C rust flash`. Verified end-to-end:
-  a build flashed a newer build of itself via its own `updat` (`MK_BUILD` bumped).
+  self-hosting, iterated hands-free with `make -C rust flash`. The self-flasher is
+  pure Rust (a `.flasher` section copied to SRAM) that discovers its endpoint/PMA
+  layout at runtime. Verified end-to-end: a build flashed a newer build of itself
+  via its own `updat` (`MK_BUILD` round-trip).
 - `reference-c/` is the original C implementation of M0, kept as the line-for-line
   reference and as a known-good recovery image. The Rust tree is the daily driver.
 - **Next: M1** (real measurement + `getva`). See the roadmap below.
@@ -32,10 +35,13 @@ HARDWARE.md      board reference: memory map, pins, USB registers, flash + debug
                  mechanics, command protocol + getva format, calibration, display
 PORTING.md       the hard-won gotchas + how the Rust port maps onto the C reference
 rust/            the firmware (Rust, no_std, cortex-m-rt) — see rust/src/:
-                 main.rs (entry + command dispatch), usb.rs (polled CDC-ACM),
+                 main.rs (entry, poll loop, command dispatch),
+                 usb_bus.rs (UsbPeripheral impl for stm32-usbd; CDC via
+                 usb-device + usbd-serial), board.rs (clock + PA9 soft-connect),
                  startup.rs (__pre_init/fault capture), regs.rs, markers.rs,
-                 flasher.rs (+ committed flasher.bin blob), getva.rs;
-                 memory.x, Makefile (build/flash/recover/markers targets)
+                 flasher.rs (Rust SRAM self-flasher, linked at 0x20001400 via
+                 flasher.x), getva.rs; memory.x, Makefile (build/flash/recover/
+                 markers targets + a gate proving the flasher is self-contained)
 reference-c/     the original M0 firmware in C — line-for-line reference + recovery
                  image source (startup.s, linker.ld, usb.c/.h, main.c, flasher.s, ...)
 tools/           encrypt.py (raw -> AES image for the bootloader path)

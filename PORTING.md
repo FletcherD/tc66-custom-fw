@@ -1,11 +1,11 @@
 # The Rust firmware and its C reference
 
 Milestone 0 (self-hosting: USB CDC + `updat`) is **done and working in Rust**
-(`rust/`), ported line-for-line from the C in `reference-c/`. The C stays as the
-byte-level reference (every register value, descriptor byte, and control-transfer
-step is known-good on hardware) and as the recovery image source. This doc covers
-the firmware structure, the hard-won gotchas, and how the Rust maps onto the C —
-what you need before extending it (M1+).
+(`rust/`), on the ecosystem USB stack (usb-device/usbd-serial/stm32-usbd) with a
+pure-Rust SRAM self-flasher. The C in `reference-c/` stays as the register-level
+reference (clock/PA9/flash sequences known-good on hardware) and as the recovery
+image source. This doc covers the firmware structure, the hard-won gotchas, and
+how the Rust relates to the C — what you need before extending it (M1+).
 
 Read `HARDWARE.md` first for the board facts (memory map, pins, USB registers,
 flash + debug mechanics, command protocol, calibration).
@@ -88,13 +88,13 @@ All wrapped in `rust/Makefile`:
 - `make markers` — non-halting SRAM marker read via openocd.
 - Recovery always: K1 + flash any known-good encrypted image over the bootloader.
 
-Two operational quirks seen on hardware (host-side, not firmware bugs):
+Operational quirks seen on hardware:
 - Even a background `mdw` marker read can leave the core halted — if serial goes
   quiet after `make markers`, power-cycle the meter's hub port and it comes back.
-- `getva`'s 3×64-B reply has no short-packet terminator, so Linux cdc_acm holds the
-  last 64 B in a half-filled URB until more data arrives (the C behaves the same).
-  A stale block like that makes `app_update.py`'s `query`→`firm` prefix gate fail —
-  drain the port (send `query`, read everything) and retry `make flash`.
+- (C reference only) its `getva` reply has no short-packet terminator, so Linux
+  cdc_acm holds the last 64 B until more data arrives; a stale block makes
+  `app_update.py`'s `query`→`firm` gate fail — drain the port (send `query`, read
+  everything) and retry. The Rust firmware doesn't have this quirk.
 
 ## How the Rust is built (as implemented in `rust/`)
 
@@ -125,25 +125,36 @@ switch to the community `gd32f1` PAC (has a `gd32f150x8` feature) is an option o
 things are stable.
 
 ### USB
-Hand-rolled (`src/usb.rs`), function-for-function from `usb.c`: same descriptors,
-EP numbering (EP1 IN / EP3 OUT), PMA layout, and toggle-safe EPnR masks. This was
-chosen over `usb-device`+`stm32-usbd` because the SRAM flasher blob hard-codes the
-EP/PMA layout (EP1 TX @0xC0, EP3 RX @0x100) and an ecosystem allocator wouldn't
-reproduce it. A later migration to `stm32-usbd` is feasible (its `UsbPeripheral`
-trait takes raw pointers; `MemoryAccess::Word16x1` is exactly this doubled-PMA
-model) but would require adapting the flasher's constants.
-**Every usb.rs function is `#[inline(never)]` and the profile is `opt-level=1`,
-`lto=false`**: the C had to be built `-O0` (at `-Os`, GCC inlining the whole USB
-path caused a post-enumeration INVSTATE lockup, root cause never found), so the
-Rust keeps per-function frames — which also keeps MK_PROBE pointing at real frames.
-Only experiment with more optimization as an isolated, revertable change.
+The **ecosystem stack**: `usb-device` 0.3 + `usbd-serial` 0.2 + `stm32-usbd` 0.8.
+`src/usb_bus.rs` implements stm32-usbd's `UsbPeripheral` with raw pointers
+(registers `0x40005C00`, PMA `0x40006000`, 512 B, `MemoryAccess::Word16x1` = the
+doubled-PMA model; `DP_PULL_UP_FEATURE = false`). `src/board.rs` keeps our proven
+clock bring-up and the PA9 low → build() → PA9 high choreography — no USB stack
+does the soft-connect for you. Device identity (VID/PID/strings/bcdDevice) is set
+via `UsbDeviceBuilder`; endpoint layout is whatever the stack allocates (today:
+EP1 = interrupt IN 0x81, EP2 = bulk OUT 0x02 + bulk IN 0x82 — differs from the
+stock EP map, which no host tool cares about since they bind the CDC class).
+A pleasant side effect: usbd-serial terminates transfers properly, so the 192-B
+`getva` arrives in one read (the C/stock firmware's stuck-last-block quirk on
+Linux cdc_acm — 3×64 B with no short packet — is gone).
+Profile stays `opt-level=1`, `lto=false` (the C's unexplained `-Os` lockup story;
+revisit optimization only as an isolated, revertable change).
 
-### `updat` self-flasher
-The **proven blob**: `reference-c/flasher.s` assembled once
-(`make -C reference-c flasher.bin`, 316 B, linked at `0x20001400`) and committed as
-`rust/flasher.bin` (a `.gitignore` exception covers it). `src/flasher.rs`
-`include_bytes!`s it, volatile-copies it to `0x20001400`, `dsb; isb; cpsid i`,
-jumps to `0x20001401`. Protocol unchanged, so `tools/app_update.py` works as-is.
+### `updat` self-flasher (pure Rust)
+`src/flasher.rs`: `flasher_main` lives in a dedicated `.flasher` section **linked
+to run at `0x20001400`** (VMA in `FLASHER_RAM`, see `memory.x` + `flasher.x`) with
+its load image in flash; `launch()` copies it to SRAM and calls it via a forced
+register-indirect jump. Being linked at its run address means no
+position-independence tricks. It discovers the bulk endpoint's PMA buffers **from
+the BTABLE at runtime** (the EP index is found by scanning EPnR for the bulk type),
+so it tracks whatever stm32-usbd allocated. Constraints inside `.flasher`, since
+it erases the app region it was loaded from: raw pointers only, no panicking ops
+(`MaybeUninit` buffer — a zeroed array could emit a memclr call into flash), its
+own `asm!` for cpsid/dsb, bootloader routines called through `transmute`d fn
+pointers (`blx reg`). **`make flasher-gate`** (part of every build) disassembles
+the section and fails if any literal references app flash or any call leaves the
+section. Protocol unchanged: erase → `uprdy` → 810 × (64 B → program → `OK`) →
+AIRCR reset; `tools/app_update.py` works as-is.
 
 ## After M0: the roadmap (see README + HARDWARE.md)
 - **M1 — measurement + real `getva`:** hardware I²C0 (PB6/PB7) monitor read +

@@ -10,7 +10,7 @@ build:
 	cargo build --release
 	arm-none-eabi-size $(ELF)
 
-tc66fw.bin: build
+tc66fw.bin: build flasher-gate
 	arm-none-eabi-objcopy -O binary $(ELF) tc66fw.bin
 	@python3 -c "import struct; d = open('tc66fw.bin','rb').read(); \
 sp, rst = struct.unpack('<II', d[:8]); \
@@ -33,6 +33,17 @@ tc66fw.enc.bin: tc66fw.bin
 recover: tc66fw.enc.bin
 	python3 ../tools/flash_image.py tc66fw.enc.bin
 
+# The .flasher section erases app flash while running from SRAM: prove it never
+# references app flash (literal pools) and makes no PC-relative calls out of the
+# section (bootloader routines must be blx-reg only).
+flasher-gate: build
+	@arm-none-eabi-objdump -d -j .flasher $(ELF) | python3 -c "import re,sys; \
+dis = sys.stdin.read(); \
+bad  = [hex(v) for v in (int(m,16) for m in re.findall(r'\.word\s+0x([0-9a-f]{8})', dis)) if 0x08002c00 <= v < 0x08010000]; \
+bad += [t for t in re.findall(r'\b(?:bl|b\.w|blx)\s+([0-9a-f]+)\b', dis) if not 0x20001400 <= int(t,16) < 0x20001c00]; \
+assert not bad, 'flasher references app flash: %s' % bad; \
+print('flasher-gate ok: .flasher is self-contained')"
+
 # Non-halting SRAM marker read (see src/markers.rs for the map)
 markers:
 	openocd -f ../reference-c/openocd.cfg -c "mdw 0x20001000 26" -c shutdown
@@ -41,4 +52,4 @@ clean:
 	cargo clean
 	rm -f tc66fw.bin tc66fw.pad.bin tc66fw.enc.bin
 
-.PHONY: all build flash recover markers clean
+.PHONY: all build flasher-gate flash recover markers clean

@@ -8,6 +8,10 @@ MEMORY
      initial SP is top-of-RAM 0x20002000, and this fences statics + stack below the
      SRAM marker window (0x20001000+) and the flasher (0x20001400+). */
   RAM : ORIGIN = 0x20000000, LENGTH = 0xE40
+  /* The self-flasher's execution home: .flasher is linked to RUN here (VMA) but
+     is stored in FLASH (LMA) and copied over by flasher::launch() at updat time.
+     Sits above the marker window (0x20001000..0x2000106x). */
+  FLASHER_RAM : ORIGIN = 0x20001400, LENGTH = 0x800
 }
 
 /* = 0x20000e40, the known-good initial SP (cortex-m-rt "set-sp" loads it). */

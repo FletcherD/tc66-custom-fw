@@ -5,6 +5,9 @@ edition = "2021"
 
 [dependencies]
 cortex-m = "0.7.9"
+stm32-usbd = "0.8"
+usb-device = "0.3"
+usbd-serial = "0.2"
 # set-sp: Reset loads MSP from _stack_start (0x20000e40) before anything else.
 # set-vtor is deliberately OFF: VTOR is set inside __pre_init AFTER cpsid i, so a
 # bootloader-armed pending IRQ can never land in our spinning DefaultHandler.
