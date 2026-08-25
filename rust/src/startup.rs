@@ -1,4 +1,4 @@
-//! Early startup + fault capture, transcribed from reference-c/startup.s.
+//! Early startup + fault capture.
 //!
 //! cortex-m-rt owns the vector table (240 IRQ entries, all DefaultHandler) and
 //! .data/.bss init; we hook the two PROVIDE'd symbols it leaves open:

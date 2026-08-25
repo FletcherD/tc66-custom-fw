@@ -1,0 +1,58 @@
+# CLAUDE.md
+
+Custom Rust firmware for the RuiDeng TC66/TC66C USB-C power meter, developed
+against real hardware on the bench. M0 (self-hosting USB + self-reflash) and
+M1 (real calibrated measurement) are done; next is M2 (persistence), then M3
+(display). See README.md for status/roadmap.
+
+## Read these before working
+
+- **HARDWARE.md** — board facts: memory map, bootloader contract, peripherals
+  (INA226 @I²C 0x4A, EEPROM @0x50, FUSB302 @0x22, ADC channels/NTC model),
+  command protocol, getva wire format, calibration formulas.
+- **FIRMWARE.md** — firmware internals: module map, boot-path gotchas, the
+  `.flasher` section mechanics, measurement pipeline, build gates, debug
+  workflow. The gotchas there cost real debugging time — do not rediscover them.
+
+## The development loop
+
+```
+cd rust && make flash      # build -> gates -> hands-free flash via updat (~1 s)
+```
+Then verify over serial: `query` → `firm`; `getva` → 192-B encrypted packet
+(decrypt/parse snippets: HARDWARE.md). Bump `BUILD_ID` in `rust/src/main.rs`
+each flash and read it back at marker 0x20001060 to prove the new image runs.
+The board is on the bench hub, port **b2** — power-cycle it with the
+`usb-hub-power` skill when needed. Host tools live in `tools/`.
+
+## Hard rules
+
+- **Never** write flash below `0x08002c00` or the config page at `0x0800fc00`.
+  A bad app is always recoverable (K1 + `make recover` — needs the user to
+  hold the physical button), but the bootloader/config must stay intact.
+- **Never** use SWD `halt`/`reset`/`step` — the chip is readout-protected and
+  halting wedges the core. Even `make markers` (background SRAM read) often
+  leaves it halted: always follow with a serial liveness check, and
+  power-cycle b2 if quiet. `probe-rs`/`defmt`/RTT do not work here.
+- **EEPROM writes** (not implemented yet): the factory calibration lives
+  there. `eeprom-backup.bin` (repo root) is this unit's verified factory
+  image — keep it usable as a restore point.
+- Bring up new hardware behind a **host-triggered dev verb** first (like
+  `i2crd`/`adcrd`): nothing at boot, bounded waits, staged error replies.
+  Move it into the always-on path only once proven. This keeps every failure
+  recoverable by power-cycle instead of K1.
+- Interrupts stay masked; everything is polled from the main loop. Keep the
+  build profile conservative (`opt-level = 1`, no LTO) — see FIRMWARE.md.
+- The `.flasher` section must stay self-contained (no calls/literals into app
+  flash); the `flasher-gate`/`init-gate` Makefile gates enforce this and run
+  on every build — never bypass them.
+
+## Bench notes
+
+- The meter is powered and reached via hub port b2; its measurement path
+  (IN→OUT) is only live when something actually feeds the IN port — bus
+  voltage/current legitimately read 0 otherwise.
+- SWD (for `make markers`) is a Pico debugprobe; config is `openocd.cfg` at
+  the repo root. Wiring in HARDWARE.md.
+- Update the docs (README/HARDWARE/FIRMWARE) after functional changes — they
+  describe the current state only; history lives in git.

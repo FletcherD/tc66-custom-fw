@@ -57,7 +57,7 @@ print('flasher-gate ok: .flasher is self-contained')"
 
 # Non-halting SRAM marker read (see src/markers.rs for the map)
 markers:
-	openocd -f ../reference-c/openocd.cfg -c "mdw 0x20001000 28" -c shutdown
+	openocd -f ../openocd.cfg -c "mdw 0x20001000 28" -c shutdown
 
 clean:
 	cargo clean

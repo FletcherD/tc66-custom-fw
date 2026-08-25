@@ -1,0 +1,185 @@
+# Firmware internals
+
+How the firmware (`rust/`) is put together, the hard-won gotchas, and the
+build/flash/debug workflow. Read `HARDWARE.md` first for the board facts
+(memory map, pins, peripherals, command protocol, calibration model).
+
+The firmware is fully polled — interrupts stay masked from reset onward.
+Everything runs off the main loop: USB servicing, the SysTick-paced sampler,
+and command dispatch.
+
+## Module map (`rust/src/`)
+
+| Module | Role |
+|---|---|
+| `main.rs` | entry, USB device setup, poll loop, command dispatch, 1 Hz energy integration, published-measurement state |
+| `startup.rs` | `__pre_init` (cpsid/VTOR/NVIC-clear), asm `DefaultHandler` + `HardFault` SRAM capture, panic handler |
+| `board.rs` | 48 MHz clock bring-up, PA9 D+ soft-connect choreography |
+| `usb_bus.rs` | stm32-usbd `UsbPeripheral` impl for the GD32 USBD |
+| `flasher.rs` | `updat` self-flasher (`.flasher` section, runs from SRAM) |
+| `i2c.rs` | polled I2C0 master (INA226 + EEPROM bus), `i2crd` dev verb backend |
+| `ina.rs` | INA226 reads, EEPROM calibration, timer-paced `Sampler`, NTC/D± conversion |
+| `adc.rs` | polled on-chip ADC (NTC, D+/D−), `adcrd` dev verb backend |
+| `getva.rs` | real `getva` packet builder (template + CRC16/MODBUS + AES-256-ECB) |
+| `markers.rs` | SRAM debug marker map + helpers |
+
+## Startup / linker
+
+**`cortex-m-rt` 0.7** provides the vector table (240 IRQ entries, all
+`DefaultHandler` — no PAC `device` feature needed), `.data`/`.bss` init, and the
+reset handler. Board specifics:
+
+- `memory.x`: `FLASH ORIGIN 0x08002C00 LENGTH 51840` (the exact flashable image
+  size, so the linker fails before the pad step would) and `RAM LENGTH 0xE40` —
+  RAM deliberately *ends* at `0x20000e40`, which both makes `_stack_start` the
+  known-good SP (top-of-RAM faults the bootloader hand-off) and fences
+  statics/stack below the marker window (0x20001000+) and flasher SRAM
+  (0x20001400+) by construction.
+- The **`set-sp` cargo feature** loads MSP from `_stack_start` first thing;
+  **`set-vtor` stays OFF** on purpose: VTOR is set inside our own `global_asm!`
+  **`__pre_init`** (`startup.rs`) *after* `cpsid i` — with interrupts still
+  live, a bootloader-armed pending IRQ must vector through the bootloader's
+  valid table, not into our spinning DefaultHandler. `__pre_init` also
+  masks+clears all NVIC IRQs (ICER0/1, ICPR0/1; the bootloader can leave the
+  USBD IRQ enabled+pending). The `#[pre_init]` attribute is deprecated; a
+  strong `__pre_init` asm symbol is the sanctioned hook.
+- `DefaultHandler` is overridden in `global_asm!` (not `#[exception]`) so the
+  stacked-PC capture reads the hardware frame at MSP; `HardFault` uses
+  `#[exception]` + `ExceptionFrame`. Both write fixed SRAM capture windows —
+  `markers.rs` has the full map.
+
+### Boot-path gotchas (cost real debugging time — do not rediscover)
+
+1. **Initial SP must be `0x20000e40`**, not top-of-RAM `0x20002000` — the exact
+   top faults the bootloader's hand-off (BFAR reads `0x20002000`).
+2. **Set `VTOR = 0x08002c00` early** — the bootloader jumps to the app without
+   setting it.
+3. **PA9 is the USB D+ soft-connect** (no internal pull-up on this USBD; PA9
+   drives D+ through a resistor). The bootloader hands off with the bus still
+   connected, so the app must drive **PA9 low → bring USB up → PA9 high** or
+   the host never re-enumerates it (device inits fine, ISTR/FNR stay 0).
+4. **Complete vector table + clear NVIC at reset** — an unhandled IRQ vectors
+   into `.text` → wild branch → lockup. cortex-m-rt supplies the table;
+   `__pre_init` clears NVIC.
+
+## Register access
+
+The **`gd32f1` PAC** (gd32-rust project; features `gd32f150` +
+`critical-section`), GD32-native field names. `Peripherals::take()` in main
+(cortex-m `critical-section-single-core`); the static contexts with no
+peripheral handle (`UsbPeripheral::enable()`, the `updat` EP scan) use
+`pac::X::ptr()` like the STM32 HALs do. Two places stay raw-pointer on purpose:
+`markers.rs` (fixed SRAM addresses, not a peripheral) and the `.flasher`
+section (must stay self-contained, below).
+
+## USB
+
+The ecosystem stack: **`usb-device` 0.3 + `usbd-serial` 0.2 + `stm32-usbd`
+0.8**. `usb_bus.rs` implements `UsbPeripheral` with raw pointers (registers
+`0x40005C00`, PMA `0x40006000`, 512 B, `MemoryAccess::Word16x1` = the
+doubled-PMA model; `DP_PULL_UP_FEATURE = false`). `board.rs` does the PA9
+low → `build()` → PA9 high choreography — no USB stack does the soft-connect
+for you. Device identity (VID/PID/strings/bcdDevice) is set via
+`UsbDeviceBuilder`; endpoint layout is whatever the stack allocates (today:
+EP1 = interrupt IN 0x81, EP2 = bulk OUT 0x02 + bulk IN 0x82 — differs from the
+stock EP map, which no host tool cares about since they bind the CDC class).
+usbd-serial terminates transfers with a short packet, so the 192-B `getva`
+arrives in one read (the stock firmware's stuck-last-block cdc_acm quirk does
+not exist here).
+
+Build profile stays `opt-level = 1`, `lto = false`, `codegen-units = 1`: the
+original C reference had an unexplained post-enumeration lockup when the USB
+path was aggressively inlined at `-Os`; revisit optimization only as an
+isolated, revertable change.
+
+## `updat` self-flasher
+
+`flasher.rs`: `flasher_main` lives in a dedicated `.flasher` section **linked
+to run at `0x20001400`** (VMA in `FLASHER_RAM`, see `memory.x` + `flasher.x`)
+with its load image in flash; `launch()` copies it to SRAM and calls it via a
+forced register-indirect jump. Being linked at its run address means no
+position-independence tricks. It discovers the bulk endpoint's PMA buffers
+**from the BTABLE at runtime** (the EP index is found by scanning EPnR for the
+bulk type), so it tracks whatever the USB stack allocated.
+
+Constraints inside `.flasher` — it erases the app region it was loaded from,
+so after the erase any reference into app flash is fatal: raw pointers only,
+no panicking ops (`MaybeUninit` buffer — a zeroed array could emit a memclr
+call into flash), its own `asm!` for cpsid/dsb, bootloader flash routines
+called through `transmute`d fn pointers (`blx reg`; addresses in HARDWARE.md).
+**`make flasher-gate`** (part of every build) disassembles the section and
+fails if any literal references app flash or any call leaves the section.
+
+Protocol: erase → `uprdy` → 810 × (recv 64 B → program → `OK`) → AIRCR reset;
+`tools/app_update.py` is the host side.
+
+**Linker-script trap (cost one K1 recovery):** the section is injected with
+`INSERT AFTER .uninit` — NOT `.data`. cortex-m-rt deliberately extends its
+`__sdata..__edata` Reset-copy range around sections inserted after `.data` (a
+documented mechanism that assumes a *contiguous* VMA); with our disjoint VMA
+that made Reset smear ~6 KB of flash over all of low RAM every boot — invisible
+with zero statics, fatal the day the PAC's `DEVICE_PERIPHERALS` flag appeared.
+Two guards now exist: `memory.x` pins `_stack_end`/`__sheap` (a definition must
+come *before* link.x's `PROVIDE` to suppress it under rust-lld — hence
+memory.x, not flasher.x), and **`make init-gate`** asserts
+`__sdata/__edata/__sbss/__ebss` all lie inside real RAM on every build.
+
+## Measurement (M1)
+
+- `i2c.rs`: polled I2C0 master (PB6/PB7 AF1, 100 kHz, the F1-style IP's AN2824
+  receive sequences), bounded waits with stage+STAT0/STAT1 error snapshots,
+  SRESET + reconfigure per transaction (stateless, self-healing).
+- `ina.rs`: INA226 register reads (big-endian), EEPROM calibration constants
+  (LE u32 at 0x2004/44/08/0c/58), the calibration formulas from HARDWARE.md,
+  and `Sampler` — one I2C read per SysTick tick (250 Hz, polled), 8 bus + 16
+  shunt reads per window, then one ADC tick (NTC + D+ + D−) → publish at
+  ~10 Hz. Failures bump MK_I2CERR and restart the window; cal load retries.
+  **The explicit INA226 config write (0x4127) at sampler start is
+  load-bearing** — the chip returns 0 for bus voltage until (re)configured.
+- `adc.rs`: polled on-chip ADC — **enable IRC14M first** (the ADC's dedicated
+  clock, off at reset; calibration hangs without it), ADCON set alone, CLB
+  calibration, SWRCST software trigger, 239.5-cycle sampling. NTC uses the
+  recovered stock β-model on ch1 (this unit); channels + model in HARDWARE.md.
+- Energy: 1 Hz integration in the main loop off the same SysTick — RAM-only,
+  zeroed at boot, both getva groups publish the same value. Persistence = M2.
+- `getva.rs`: patches all live fields (V/I/P/R, mAh/mWh, temp+sign, D±) into
+  the decrypted known-good template, recomputes **CRC16/MODBUS over bytes
+  0..60 of each 64-B block** (stored LE at 60..64), AES-256-ECB encrypts
+  on-device (`aes` crate). Serial/run-count still carry template values (M2).
+
+## Build / flash / debug workflow
+
+All wrapped in `rust/Makefile`:
+
+- `make flash` — build → gates (below) → objcopy → pad to 51840 B → hands-free
+  flash via the running app's `updat` (`tools/app_update.py`).
+- `make recover` — AES image + `tools/flash_image.py` (hold K1 while plugging
+  in first). Recovery always works: the bootloader is never written.
+- `make markers` — non-halting SRAM marker read via openocd (`openocd.cfg` at
+  the repo root; Pico debugprobe wiring in HARDWARE.md).
+- Build gates, run on every build: **flasher-gate** (`.flasher` is
+  self-contained), **init-gate** (data/bss init symbols inside real RAM),
+  **header gate** (SP = 0x20000e40, reset vector Thumb + in-slot, size fits).
+
+Bump `BUILD_ID` in `main.rs` when flashing; reading `MK_BUILD` (0x20001060)
+back proves the new image is actually running.
+
+### The debug reality (the chip is readout-protected)
+
+- **SWD `halt`/`reset`/`step` lock the core up**, and even a background `mdw`
+  read often leaves it halted — a "frozen" SRAM value does NOT mean the app is
+  dead. **Verify liveness over serial** (`query`→`firm`), no debugger attached.
+- Background SRAM reads work while the core runs: debug via the **SRAM marker
+  map** (`markers.rs`) + `make markers`.
+- If serial goes quiet after a markers read, **power-cycle the meter's hub
+  port** (the `usb-hub-power` skill; the meter is on port b2) and it comes back.
+- `probe-rs`/`defmt`/RTT are **not usable** (they need halt). Flash via
+  `updat`/bootloader, debug via markers + serial + the `i2crd`/`adcrd` dev verbs.
+
+### Dev-verb pattern for new peripherals
+
+Bring up new hardware behind a host-triggered dev verb first (`i2crd`,
+`adcrd`): nothing runs at boot, every wait is bounded, errors return staged
+diagnostics to the host. A fault is then always recoverable by power-cycle,
+and the boot/updat path stays safe. Only move the feature into the always-on
+path (timer/sampler) once it's proven.

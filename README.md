@@ -1,113 +1,104 @@
 # TC66 custom firmware
 
-A from-scratch replacement application for the RuiDeng TC66 / TC66C USB-C power
-meter (GigaDevice GD32F150G8, Cortex-M3). It flashes into the board's 52 KB app
-slot, keeps the stock bootloader (so recovery always works), and is wire-compatible
-with existing host tools (enumerates as the same USB serial device).
+A from-scratch replacement firmware (Rust, `no_std`) for the RuiDeng TC66 /
+TC66C USB-C power meter (GigaDevice GD32F150G8, Cortex-M3). It flashes into the
+board's 52 KB app slot, keeps the stock bootloader (so recovery always works),
+and is wire-compatible with existing host tools: it enumerates as the same USB
+serial device, answers the stock command set, and serves real, calibrated
+measurements in the stock encrypted `getva` format.
+
+## Why
+
+A clean, fully-understood firmware we control end to end: measurement paced by
+a hardware timer — so instantaneous readings don't depend on how fast the host
+polls (the stock firmware's "poll faster → fewer fresh samples" coupling is
+gone) — our own protocol on top of a compatible base, and room to add features.
 
 ## Status
 
-- **Milestone 0 — done & working on hardware, in Rust** (`rust/`). The Rust firmware
-  boots from the stock bootloader, runs USB CDC-ACM on the ecosystem stack
-  (`usb-device` + `usbd-serial` + `stm32-usbd` over a small `UsbPeripheral` impl),
-  **enumerates as the meter's CDC serial device, answers `query`→`firm`, serves the
-  static `getva`, and reflashes itself over USB via `updat` (no button press)** —
-  self-hosting, iterated hands-free with `make -C rust flash`. The self-flasher is
-  pure Rust (a `.flasher` section copied to SRAM) that discovers its endpoint/PMA
-  layout at runtime. Verified end-to-end: a build flashed a newer build of itself
-  via its own `updat` (`MK_BUILD` round-trip).
-- `reference-c/` is the original C implementation of M0, kept as the line-for-line
-  reference and as a known-good recovery image. The Rust tree is the daily driver.
-- **Next: M1** (real measurement + `getva`). See the roadmap below.
-
-## Goal
-
-A clean, fully-understood firmware we control end to end: measurement paced by a
-hardware timer (so instantaneous readings don't depend on how fast the host polls),
-our own protocol on top of a compatible base, and room to add features. It also
-removes the "poll faster → fewer fresh samples" coupling of the original firmware.
+- **M0 — self-hosting: done.** Boots from the stock bootloader, USB CDC-ACM on
+  the ecosystem stack (`usb-device`/`usbd-serial`/`stm32-usbd`), reflashes
+  itself over USB via `updat` with a pure-Rust SRAM flasher — iterate with
+  `make -C rust flash`, no button pressing.
+- **M1 — real measurement: done.** INA226 over hardware I²C0 with the per-unit
+  EEPROM calibration, SysTick-paced sampling (~10 Hz publish, poll-rate
+  independent), NTC temperature (recovered stock β-model) and D+/D− via the
+  on-chip ADC, 1 Hz energy integration (RAM-only for now), all served in the
+  stock encrypted+checksummed `getva` packet. Verified live on hardware.
+- **Next: M2 — persistence** (real serial/run-count, energy write-back to the
+  wear-leveled EEPROM journal, `gtrec` log, EEPROM writes in the I²C driver).
+- **Then: M3 — display** (ST7735 bring-up + minimal V/I/P draw layer);
+  **M4 — stretch** (BLE mirror; USB-PD / QC trigger via the on-board FUSB302).
 
 ## Layout
 
 ```
-README.md        this file
-HARDWARE.md      board reference: memory map, pins, USB registers, flash + debug
-                 mechanics, command protocol + getva format, calibration, display
-PORTING.md       the hard-won gotchas + how the Rust port maps onto the C reference
-rust/            the firmware (Rust, no_std, cortex-m-rt, gd32f1 PAC) — rust/src/:
-                 main.rs (entry, poll loop, command dispatch),
-                 usb_bus.rs (UsbPeripheral impl for stm32-usbd; CDC via
-                 usb-device + usbd-serial), board.rs (clock + PA9 soft-connect),
-                 startup.rs (__pre_init/fault capture), markers.rs,
-                 flasher.rs (Rust SRAM self-flasher, linked at 0x20001400 via
-                 flasher.x), getva.rs; memory.x, Makefile (build/flash/recover/
-                 markers targets + gates: flasher self-containment, init-symbol
-                 bounds, image header)
-reference-c/     the original M0 firmware in C — line-for-line reference + recovery
-                 image source (startup.s, linker.ld, usb.c/.h, main.c, flasher.s, ...)
-tools/           encrypt.py (raw -> AES image for the bootloader path)
-                 flash_image.py (flash over bootloader, needs K1)
-                 app_update.py (flash over the app's own 'updat', no K1)
-                 tc66lib.py (serial helpers)
+README.md           this file
+HARDWARE.md         board reference: memory map, pins, peripherals (INA226,
+                    EEPROM, ADC/NTC, FUSB302), flash + debug mechanics,
+                    command protocol + getva format, calibration model
+FIRMWARE.md         firmware internals: module map, boot path, USB, the
+                    self-flasher, measurement, build gates, debug workflow
+CLAUDE.md           orientation + working rules for agent sessions
+rust/               the firmware — see FIRMWARE.md for the module map;
+                    Makefile targets: flash / recover / markers / build gates
+tools/              app_update.py (hands-free flash via updat)
+                    flash_image.py + encrypt.py (K1 bootloader recovery path)
+                    i2cread.py, adcread.py (dev verbs), tc66lib.py (helpers)
+openocd.cfg         non-halting SRAM reads via a Pico debugprobe (CMSIS-DAP)
+eeprom-backup.bin   this unit's factory EEPROM image (32 KB, double-read
+                    verified) — restore point for calibration/journal data
 ```
+
+The original C implementation of M0 (the porting reference) lived in
+`reference-c/` and is retired; it remains in git history.
 
 ## Quick start
 
-**Build + flash the firmware (hands-free, via the running app's `updat`):**
+**Build + flash (hands-free, via the running app's `updat`):**
 ```
-cd rust && make flash           # cargo build -> objcopy -> pad to 51840 B -> app_update.py
-```
-
-**Flash (first time / recovery — needs K1):**
-```
-cd rust && make recover         # encrypt.py + flash_image.py
-# (hold K1 while plugging in USB first, so the board enumerates as bootloader CDC)
+cd rust && make flash     # cargo build -> gates -> pad to 51840 B -> app_update.py
 ```
 
-**Read the SRAM debug markers (see rust/src/markers.rs for the map):**
+**Recovery / first flash (needs the K1 button):**
 ```
-cd rust && make markers         # background mdw — NO halt; may still wedge the core,
-                                # power-cycle the port afterwards if serial goes quiet
+cd rust && make recover   # AES image + flash_image.py
+# hold K1 while plugging in USB first -> board enumerates as bootloader CDC
+```
+A bad app can never brick the board — the bootloader is never written.
+
+**Verify it's alive (over serial, no debugger):** send `query` (5 raw bytes,
+115200 8N1), expect `firm`. Poll measurements with `getva` (192 B, AES-256-ECB;
+key + field map in HARDWARE.md).
+
+**Read the SRAM debug markers:**
+```
+cd rust && make markers   # background mdw, NO halt; if serial goes quiet
+                          # afterwards, power-cycle the meter's port
 ```
 
-**Verify it's alive (over SERIAL, no debugger — see the debug note below):**
-```
-# query -> firm  means the custom app is running and self-hosting
-```
+## Debugging — read this first (the chip is readout-protected)
 
-**Recovery:** hold K1, flash any known-good encrypted image over the bootloader. A
-bad app never bricks the board — the bootloader is never written.
+- **SWD `halt`/`reset`/`step` lock the core up**, and even a background `mdw`
+  can leave it halted — a frozen SRAM value does **not** mean the app is dead.
+- **Verify liveness over serial** (`query`→`firm`), no debugger attached.
+- Debug via **SRAM progress markers** (`rust/src/markers.rs` has the map) and
+  the host-triggered dev verbs `i2crd`/`adcrd`.
+- Clear a stuck debug-halt with a **port power-cycle** (`usb-hub-power` skill,
+  port b2).
+- `probe-rs`/`defmt`/RTT are **not usable** on this target. Full detail in
+  FIRMWARE.md.
 
-## Debugging — read this (the chip is readout-protected)
+## Key gotchas (detailed in FIRMWARE.md / HARDWARE.md)
 
-- **SWD/OpenOCD `halt`/`reset`/`step` lock the core up**, and a `mdw` read can leave
-  it halted — a "frozen" SRAM value **does not mean the app is dead**. This is the
-  single biggest debugging trap on this target.
-- **Verify liveness over serial** (`query`→`firm`) with **no debugger attached**.
-- **Background SRAM reads work** while the core runs — debug with **SRAM progress
-  markers** and `openocd -f reference-c/openocd.cfg -c "mdw 0x20001000 8" -c shutdown`.
-- Clear a stuck debug-halt with a **port power-cycle** (`usb-hub-power cycle b2`).
-- This means the usual Rust flow (`probe-rs`/`defmt`/RTT) is **not** usable — flash
-  via the bootloader and debug via markers + serial. Full detail in PORTING.md.
-
-## Roadmap
-
-- **M0 — self-hosting:** boot + USB CDC + `query` + `updat`. **Done (Rust + C reference).**
-- **M1 — measurement + real `getva`: done.** Hardware I²C0 (`i2c.rs`), INA226 +
-  EEPROM calibration + SysTick-paced sampler (`ina.rs`; 250 Hz ticks → ~10 Hz
-  publish, poll-rate-independent), on-chip ADC for temperature (NTC, model is
-  an experimental fit) and D+/D− (`adc.rs`), 1 Hz energy integration (RAM-only,
-  zeroed at boot — persistence is M2), real encrypted `getva` with CRC16/MODBUS
-  checksums (`getva.rs`). All verified live on hardware.
-- **M2 — persistence:** EEPROM (cal/serial/energy) + `gtrec` log.
-- **M3 — display:** ST7735 bring-up + a minimal V/I/P draw layer.
-- **M4 — stretch:** BLE mirror; USB-PD / QC trigger.
-
-## Key gotchas (all detailed in PORTING.md)
-
-- **`_estack` = `0x20000e40`**, not top-of-RAM `0x20002000` (which faults the bootloader hand-off).
-- **Set `VTOR = 0x08002c00`** early — the bootloader doesn't.
-- **Drive PA9 (USB D+ soft-connect) low→init→high** or the host never enumerates the app.
-- **Complete vector table + clear NVIC** at reset (a stray IRQ = wild branch = lockup).
-- **Debug via SRAM markers + serial liveness**, never `halt`/`reset`/`step`.
-- Keep the app **≤ 52 KB**; never write below `0x08002c00` or into the config page at `0x0800fc00`.
+- **Initial SP = `0x20000e40`**, not top-of-RAM `0x20002000` (faults the
+  bootloader hand-off).
+- **Set `VTOR = 0x08002c00` early** — the bootloader doesn't.
+- **Drive PA9 (USB D+ soft-connect) low → init → high** or the host never
+  enumerates the app.
+- **Complete vector table + clear NVIC at reset** (a stray IRQ = wild branch).
+- Keep the app **≤ 52 KB**; never write below `0x08002c00` or into the config
+  page at `0x0800fc00`.
+- **The ADC clock (IRC14M) is off at reset** — enable it or ADC calibration
+  hangs forever.
+- The `.flasher` section must stay self-contained — the build gates enforce it.

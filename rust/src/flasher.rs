@@ -1,4 +1,4 @@
-//! `updat` self-flasher, in Rust (replaces the assembled blob from reference-c).
+//! `updat` self-flasher: streams a new app image over USB and programs it.
 //!
 //! flasher_main lives in the `.flasher` section: linked to RUN at 0x20001400
 //! (FLASHER_RAM in memory.x / flasher.x) but stored in flash; launch() copies it

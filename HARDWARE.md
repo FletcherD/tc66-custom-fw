@@ -71,14 +71,14 @@ touch the bootloader or the config page.
 
 - SWD pads on the board → an SWD probe. A Raspberry Pi Pico running **debugprobe**
   (CMSIS-DAP) works with OpenOCD; wire **SWCLK=GP2, SWDIO=GP3, GND** common
-  (debugprobe requires SWCLK/SWDIO on adjacent GPIOs). `src/openocd.cfg` is ready.
+  (debugprobe requires SWCLK/SWDIO on adjacent GPIOs). `openocd.cfg` (repo root) is ready.
 - **The chip is readout-protected, which constrains debugging:**
   - **Flash reads over SWD fail** — you cannot read the flashed image back.
   - **`halt` / `reset` / `step` lock the core up** — do not use them.
   - **Background SRAM reads DO work** while the core runs.
 - **Therefore: debug with SRAM progress markers.** Have the firmware write a
   progress code to a fixed SRAM address at each stage, and read it with:
-  `openocd -f src/openocd.cfg -c "mdw 0x20001000 8" -c shutdown` (no halt).
+  `openocd -f openocd.cfg -c "mdw 0x20001000 8" -c shutdown` (no halt).
   This is the primary debug loop — see README.
 
 ## Host command protocol (USB CDC)
@@ -126,8 +126,11 @@ Last 4 bytes of each 64-byte block are a checksum.
 
 ### USB (device, CDC-ACM)
 - GD32 USB device peripheral, registers base **`0x40005c00`**.
-- **EP1 IN** = CDC data in (`EP1R = 0x40005c04`, TX packet-memory `0x40006180`).
-- **EP3 OUT** = CDC data out (`EP3R = 0x40005c0c`, RX packet-memory `0x40006200`).
+- Stock firmware's endpoint map: **EP1 IN** = CDC data in (`EP1R = 0x40005c04`,
+  TX packet-memory `0x40006180`), **EP3 OUT** = CDC data out (`EP3R =
+  0x40005c0c`, RX packet-memory `0x40006200`). (The custom firmware lets its
+  USB stack allocate — currently EP1 = interrupt IN, EP2 = bulk OUT+IN — and
+  discovers the layout at runtime where it matters; see FIRMWARE.md.)
 - Packet memory (PMA) at **`0x40006000`, doubled-addressed** — each 16-bit PMA slot occupies 4 CPU-address bytes.
 - USB vid:pid `28e9:018a`. Needs the 48 MHz USB clock enabled.
 - This is the STM32F0/F1-style USB device IP (BTABLE + EPnR + PMA model).

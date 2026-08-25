@@ -1,6 +1,6 @@
 //! Clock bring-up + PA9 D+ soft-connect choreography, on the gd32f1 PAC.
-//! The register sequence is 1:1 with the proven one in reference-c/usb.c
-//! (each modify() below corresponds to one RMW step of the C).
+//! The register sequence is 1:1 with the hardware-proven one from the original
+//! C reference (git history) — one modify() per RMW step, order preserved.
 
 use gd32f1::gd32f150 as pac;
 

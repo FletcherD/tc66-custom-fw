@@ -1,7 +1,6 @@
-//! SRAM progress markers — the only debug channel on this readout-protected chip.
-//! Read (NO halt) with: openocd -f ../reference-c/openocd.cfg -c "mdw 0x20001000 24" -c shutdown
-//! Map is identical to reference-c/usb.h except: MK_RA dropped (no stable-Rust
-//! return-address intrinsic), MK_PANIC/MK_PANIC_LINE added.
+//! SRAM progress markers — the only debug channel on this readout-protected
+//! chip (halting via SWD wedges the core; background SRAM reads work).
+//! Read with `make markers` (a no-halt openocd mdw of this window).
 
 #![allow(dead_code)]
 
