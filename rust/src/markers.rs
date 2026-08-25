@@ -24,6 +24,21 @@ pub const MK_BUILD: usize = 0x2000_1060; // build id (self-hosting proof)
 pub const MK_I2CERR: usize = 0x2000_1064; // sampler I2C error count
 pub const MK_WINDOWS: usize = 0x2000_1068; // completed sample windows (~10 Hz)
 
+/* ---- Per-subsystem diagnostic blocks (12 words each) ----
+ * Convention: word 0 = state/heartbeat (bump it in your service path so a
+ * frozen value locates a wedge), word 1 = event/IRQ count, word 2 = last
+ * error/status snapshot; words 3..11 subsystem-defined — DOCUMENT every
+ * slot you claim here, next to its constant. Read with `make markers`
+ * (covers 0x1000..0x1100). Only ever write via mk() (volatile).
+ * The window ends at 0x20001400 (flasher); 0x1100..0x1400 is free. */
+
+/* USB interrupt-path block (usb refactor) */
+pub const MK_USB_BASE: usize = 0x2000_1070; // +0 state, +4 irq count, +8 status
+/* sampler interrupt-path block (sampler refactor) */
+pub const MK_SMP_BASE: usize = 0x2000_10a0; // +0 state, +4 irq count, +8 status
+/* display/DMA block (spi-dma refactor) */
+pub const MK_DSP_BASE: usize = 0x2000_10d0; // +0 state, +4 evt count, +8 status
+
 pub const STAGE_CLOCK: u32 = 1; // 48 MHz clock + USB clock configured
 pub const STAGE_USB_INIT: u32 = 2; // USB peripheral powered + connected
 pub const STAGE_RESET: u32 = 3; // first USB bus reset serviced

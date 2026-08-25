@@ -61,9 +61,10 @@ bad += [t for t in re.findall(r'\b(?:bl|b\.w|blx)\s+([0-9a-f]+)\b', dis) if not 
 assert not bad, 'flasher references app flash: %s' % bad; \
 print('flasher-gate ok: .flasher is self-contained')"
 
-# Non-halting SRAM marker read (see src/markers.rs for the map)
+# Non-halting SRAM marker read (see src/markers.rs for the map,
+# incl. the per-subsystem diagnostic blocks at 0x1070/0x10a0/0x10d0)
 markers:
-	openocd -f ../openocd.cfg -c "mdw 0x20001000 28" -c shutdown
+	openocd -f ../openocd.cfg -c "mdw 0x20001000 64" -c shutdown
 
 clean:
 	cargo clean
