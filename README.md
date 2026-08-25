@@ -7,13 +7,15 @@ with existing host tools (enumerates as the same USB serial device).
 
 ## Status
 
-- **Milestone 0 — done & working on hardware, in C** (`reference-c/`). The firmware
-  boots our own vector table, brings up USB CDC-ACM from the register level,
-  **enumerates as the meter's CDC serial device, answers `query`→`firm`, and
-  reflashes itself over USB via `updat` (no button press)** — i.e. it is
-  self-hosting and can be iterated hands-free.
-- **Next: reimplement M0 in Rust** in this directory, using the C as the reference,
-  then extend (measurement, display, etc.). See **PORTING.md**.
+- **Milestone 0 — done & working on hardware, in Rust** (`rust/`). The Rust firmware
+  boots from the stock bootloader, brings up USB CDC-ACM from the register level,
+  **enumerates as the meter's CDC serial device, answers `query`→`firm`, serves the
+  static `getva`, and reflashes itself over USB via `updat` (no button press)** —
+  self-hosting, iterated hands-free with `make -C rust flash`. Verified end-to-end:
+  a build flashed a newer build of itself via its own `updat` (`MK_BUILD` bumped).
+- `reference-c/` is the original C implementation of M0, kept as the line-for-line
+  reference and as a known-good recovery image. The Rust tree is the daily driver.
+- **Next: M1** (real measurement + `getva`). See the roadmap below.
 
 ## Goal
 
@@ -28,33 +30,37 @@ removes the "poll faster → fewer fresh samples" coupling of the original firmw
 README.md        this file
 HARDWARE.md      board reference: memory map, pins, USB registers, flash + debug
                  mechanics, command protocol + getva format, calibration, display
-PORTING.md       M0 walkthrough, the hard-won gotchas, and the Rust porting plan
-reference-c/     the working M0 firmware in C — the authoritative reference
-                 (startup.s, linker.ld, usb.c/.h, main.c, flasher.s, Makefile, ...)
+PORTING.md       the hard-won gotchas + how the Rust port maps onto the C reference
+rust/            the firmware (Rust, no_std, cortex-m-rt) — see rust/src/:
+                 main.rs (entry + command dispatch), usb.rs (polled CDC-ACM),
+                 startup.rs (__pre_init/fault capture), regs.rs, markers.rs,
+                 flasher.rs (+ committed flasher.bin blob), getva.rs;
+                 memory.x, Makefile (build/flash/recover/markers targets)
+reference-c/     the original M0 firmware in C — line-for-line reference + recovery
+                 image source (startup.s, linker.ld, usb.c/.h, main.c, flasher.s, ...)
 tools/           encrypt.py (raw -> AES image for the bootloader path)
                  flash_image.py (flash over bootloader, needs K1)
                  app_update.py (flash over the app's own 'updat', no K1)
                  tc66lib.py (serial helpers)
-rust/            (to be created — the Rust reimplementation)
 ```
 
 ## Quick start
 
-**Build the C reference:**
+**Build + flash the firmware (hands-free, via the running app's `updat`):**
 ```
-cd reference-c && make          # -> m0.bin (raw app), make pad -> m0_pad.bin (51840 B)
+cd rust && make flash           # cargo build -> objcopy -> pad to 51840 B -> app_update.py
 ```
 
 **Flash (first time / recovery — needs K1):**
 ```
-tools/encrypt.py reference-c/m0.bin m0.enc.bin
-# hold K1 while plugging in USB (board enumerates as bootloader CDC), then:
-tools/flash_image.py m0.enc.bin
+cd rust && make recover         # encrypt.py + flash_image.py
+# (hold K1 while plugging in USB first, so the board enumerates as bootloader CDC)
 ```
 
-**Flash hands-free once the app has `updat`:**
+**Read the SRAM debug markers (see rust/src/markers.rs for the map):**
 ```
-tools/app_update.py reference-c/m0_pad.bin      # plaintext, ~1 s, self-reflash + reset
+cd rust && make markers         # background mdw — NO halt; may still wedge the core,
+                                # power-cycle the port afterwards if serial goes quiet
 ```
 
 **Verify it's alive (over SERIAL, no debugger — see the debug note below):**
@@ -79,7 +85,7 @@ bad app never bricks the board — the bootloader is never written.
 
 ## Roadmap
 
-- **M0 — self-hosting:** boot + USB CDC + `query` + `updat`. **Done (C).** Port to Rust next.
+- **M0 — self-hosting:** boot + USB CDC + `query` + `updat`. **Done (Rust + C reference).**
 - **M1 — measurement + real `getva`:** hardware I²C0 monitor read + calibration + a
   timer-paced sampler + energy integration → correct V/I/P with no poll-rate coupling.
 - **M2 — persistence:** EEPROM (cal/serial/energy) + `gtrec` log.

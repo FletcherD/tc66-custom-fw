@@ -3,6 +3,8 @@
 *.elf
 *.bin
 *.map
+# the committed SRAM flasher blob (built once from reference-c/flasher.s)
+!rust/flasher.bin
 # Rust
 /rust/target/
 # Python
