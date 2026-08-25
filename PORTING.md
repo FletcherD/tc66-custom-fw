@@ -119,10 +119,14 @@ reset handler. Board specifics:
   (`src/markers.rs` has the map; MK_RA was dropped, MK_PANIC/MK_BUILD added).
 
 ### Register access
-Raw `write_volatile`/`read_volatile` on named address constants (`src/regs.rs`),
-matching `reference-c/usb.c` 1:1 — easiest to diff against the proven C. A future
-switch to the community `gd32f1` PAC (has a `gd32f150x8` feature) is an option once
-things are stable.
+The **`gd32f1` PAC** (gd32-rust project, features `gd32f150` + `critical-section`),
+with GD32-native register/field names (`rcu.cfg0().modify(|_, w| w.pllmf().mul12())`,
+`gpioa.bc().write(|w| w.cr9().set_bit())`, …). `Peripherals::take()` in main (via
+cortex-m's `critical-section-single-core`); the two static contexts with no
+peripheral handle — `UsbPeripheral::enable()` and the `updat` EP scan — use
+`pac::Rcu::ptr()` / `pac::Usbd::ptr()` like the STM32 HALs do. Two places stay
+raw-pointer on purpose: `markers.rs` (fixed SRAM addresses, not a peripheral) and
+the `.flasher` section (must stay self-contained, see below).
 
 ### USB
 The **ecosystem stack**: `usb-device` 0.3 + `usbd-serial` 0.2 + `stm32-usbd` 0.8.
@@ -155,6 +159,19 @@ pointers (`blx reg`). **`make flasher-gate`** (part of every build) disassembles
 the section and fails if any literal references app flash or any call leaves the
 section. Protocol unchanged: erase → `uprdy` → 810 × (64 B → program → `OK`) →
 AIRCR reset; `tools/app_update.py` works as-is.
+
+**Linker-script trap (cost one K1 recovery):** the section is injected with
+`INSERT AFTER .uninit` — NOT `.data`. cortex-m-rt deliberately extends its
+`__sdata..__edata` Reset-copy range around sections inserted after `.data`
+(a documented mechanism that assumes a *contiguous* VMA); with our disjoint VMA
+(0x20001400) that made Reset smear ~6 KB of flash over all of low RAM every boot.
+It was invisible while the firmware had zero statics, then trampled the PAC's
+`DEVICE_PERIPHERALS` flag and made `Peripherals::take()` panic. Two guards now
+exist: memory.x pins `_stack_end`/`__sheap` (link.x `PROVIDE`s them from `.`
+after `.uninit`, where our section pushes it — note a definition must come
+*before* the PROVIDE to suppress it under rust-lld, hence memory.x, not
+flasher.x), and **`make init-gate`** asserts `__sdata/__edata/__sbss/__ebss` all
+lie inside real RAM on every build.
 
 ## After M0: the roadmap (see README + HARDWARE.md)
 - **M1 — measurement + real `getva`:** hardware I²C0 (PB6/PB7) monitor read +

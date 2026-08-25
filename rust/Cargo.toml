@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-cortex-m = "0.7.9"
+cortex-m = { version = "0.7.9", features = ["critical-section-single-core"] }
 stm32-usbd = "0.8"
 usb-device = "0.3"
 usbd-serial = "0.2"
@@ -12,6 +12,7 @@ usbd-serial = "0.2"
 # set-vtor is deliberately OFF: VTOR is set inside __pre_init AFTER cpsid i, so a
 # bootloader-armed pending IRQ can never land in our spinning DefaultHandler.
 cortex-m-rt = { version = "0.7.6", features = ["set-sp"] }
+gd32f1 = { version = "0.9.2", features = ["gd32f150", "critical-section"] }
 
 # The C reference ships usb.c at -O0 because -Os inlining caused a post-enumeration
 # lockup (reference-c/Makefile). opt-level=1 + inline(never) on the USB path keeps

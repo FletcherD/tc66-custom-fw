@@ -34,14 +34,15 @@ README.md        this file
 HARDWARE.md      board reference: memory map, pins, USB registers, flash + debug
                  mechanics, command protocol + getva format, calibration, display
 PORTING.md       the hard-won gotchas + how the Rust port maps onto the C reference
-rust/            the firmware (Rust, no_std, cortex-m-rt) — see rust/src/:
+rust/            the firmware (Rust, no_std, cortex-m-rt, gd32f1 PAC) — rust/src/:
                  main.rs (entry, poll loop, command dispatch),
                  usb_bus.rs (UsbPeripheral impl for stm32-usbd; CDC via
                  usb-device + usbd-serial), board.rs (clock + PA9 soft-connect),
-                 startup.rs (__pre_init/fault capture), regs.rs, markers.rs,
+                 startup.rs (__pre_init/fault capture), markers.rs,
                  flasher.rs (Rust SRAM self-flasher, linked at 0x20001400 via
                  flasher.x), getva.rs; memory.x, Makefile (build/flash/recover/
-                 markers targets + a gate proving the flasher is self-contained)
+                 markers targets + gates: flasher self-containment, init-symbol
+                 bounds, image header)
 reference-c/     the original M0 firmware in C — line-for-line reference + recovery
                  image source (startup.s, linker.ld, usb.c/.h, main.c, flasher.s, ...)
 tools/           encrypt.py (raw -> AES image for the bootloader path)

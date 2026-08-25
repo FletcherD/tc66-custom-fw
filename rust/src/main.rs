@@ -19,18 +19,18 @@ mod board;
 mod flasher;
 mod getva;
 mod markers;
-mod regs;
 mod startup;
 mod usb_bus;
 
 use cortex_m_rt::entry;
+use gd32f1::gd32f150 as pac;
 use markers::*;
 use usb_device::device::{StringDescriptors, UsbDeviceBuilder, UsbRev, UsbVidPid};
 use usb_device::prelude::*;
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 4;
+const BUILD_ID: u32 = 7;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 type Serial<'a> = SerialPort<'a, usb_bus::UsbBus>;
@@ -43,13 +43,14 @@ fn main() -> ! {
     mk(MK_CMDCNT, 0);
     mk(MK_ENUM, 0);
 
-    board::clock_init();
+    let p = pac::Peripherals::take().unwrap();
+    board::clock_init(&p.rcu);
 
     /* Force a fresh enumeration of THIS app: the bootloader handed off with D+
      * still pulled up and the host bound to the bootloader. Disconnect, bring
      * the stack up, reconnect. */
-    board::pa9_config_output();
-    board::pa9_low();
+    board::pa9_config_output(&p.rcu, &p.gpioa);
+    board::pa9_low(&p.gpioa);
     board::delay_ms(120);
 
     let usb_alloc = usb_bus::UsbBus::new(usb_bus::Gd32Usb);
@@ -67,7 +68,7 @@ fn main() -> ! {
         .unwrap()
         .build(); /* build() enables the peripheral (CNTR power-up, BTABLE=0) */
     mk(MK_STAGE, STAGE_USB_INIT);
-    board::pa9_high();
+    board::pa9_high(&p.gpioa);
 
     let mut buf = [0u8; 64];
     loop {
@@ -143,14 +144,24 @@ fn write_all(dev: &mut Dev, serial: &mut Serial, data: &[u8]) {
     }
 }
 
-/// Find the CDC bulk data endpoint: the EPnR whose type field is BULK (00) with
-/// its RX side enabled. Unconfigured EPnRs read 0 (STAT_RX disabled), EP0 is
-/// CONTROL, the notification endpoint is INTERRUPT — so this is unambiguous.
+/// Find the CDC bulk data endpoint: the EPnCS whose type (EP_CTL) is BULK (00)
+/// with its RX side enabled (RX_STA != disabled). Unconfigured EPnCS read 0
+/// (RX disabled), EP0 is CONTROL, the notification endpoint is INTERRUPT — so
+/// this is unambiguous. Read-only peek at registers the USB stack owns.
 #[inline(never)]
 fn find_bulk_ep() -> Option<u32> {
+    let usbd = unsafe { &*pac::Usbd::ptr() };
     for n in 1..8u32 {
-        let epr = regs::rd(regs::usb_epr(n));
-        if epr & 0x0600 == 0x0000 && epr & 0x3000 != 0 {
+        let cs = match n {
+            1 => usbd.ep1cs().read().bits(),
+            2 => usbd.ep2cs().read().bits(),
+            3 => usbd.ep3cs().read().bits(),
+            4 => usbd.ep4cs().read().bits(),
+            5 => usbd.ep5cs().read().bits(),
+            6 => usbd.ep6cs().read().bits(),
+            _ => usbd.ep7cs().read().bits(),
+        };
+        if cs & 0x0600 == 0x0000 && cs & 0x3000 != 0 {
             return Some(n);
         }
     }

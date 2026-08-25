@@ -16,3 +16,9 @@ MEMORY
 
 /* = 0x20000e40, the known-good initial SP (cortex-m-rt "set-sp" loads it). */
 _stack_start = ORIGIN(RAM) + LENGTH(RAM);
+
+/* link.x PROVIDEs these from `.` after .uninit — which flasher.x's inserted
+   section pushes to 0x2000_17xx, tripping the stack-overlap assert. Defining
+   them here (before the PROVIDEs) pins them to the real end of statics. */
+_stack_end = __euninit;
+__sheap = __euninit;

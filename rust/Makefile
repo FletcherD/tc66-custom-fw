@@ -10,7 +10,18 @@ build:
 	cargo build --release
 	arm-none-eabi-size $(ELF)
 
-tc66fw.bin: build flasher-gate
+# cortex-m-rt's Reset copies __sidata -> __sdata..__edata and zeroes
+# __sbss..__ebss assuming contiguous VMAs inside RAM; a linker-script mistake
+# (e.g. INSERT AFTER .data pushing __edata to a disjoint address) turns that
+# into a boot-time RAM smear. Pin all four inside the real RAM region.
+init-gate: build
+	@arm-none-eabi-nm $(ELF) | python3 -c "import sys; \
+syms = {n: int(a,16) for a,_,n in (l.split() for l in sys.stdin) if n in ('__sdata','__edata','__sbss','__ebss')}; \
+bad = {n: hex(v) for n,v in syms.items() if not 0x20000000 <= v <= 0x20000E40}; \
+assert len(syms)==4 and not bad, 'init symbols outside RAM: %s' % (bad or syms); \
+print('init-gate ok: data/bss init bounded to %s..%s' % (hex(min(syms.values())), hex(max(syms.values()))))"
+
+tc66fw.bin: build flasher-gate init-gate
 	arm-none-eabi-objcopy -O binary $(ELF) tc66fw.bin
 	@python3 -c "import struct; d = open('tc66fw.bin','rb').read(); \
 sp, rst = struct.unpack('<II', d[:8]); \
@@ -52,4 +63,4 @@ clean:
 	cargo clean
 	rm -f tc66fw.bin tc66fw.pad.bin tc66fw.enc.bin
 
-.PHONY: all build flasher-gate flash recover markers clean
+.PHONY: all build flasher-gate init-gate flash recover markers clean

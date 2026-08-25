@@ -1,30 +1,31 @@
-//! Clock bring-up + PA9 D+ soft-connect choreography (carried over unchanged
-//! from the hand-rolled stack; sequences proven on hardware, see reference-c/usb.c).
+//! Clock bring-up + PA9 D+ soft-connect choreography, on the gd32f1 PAC.
+//! The register sequence is 1:1 with the proven one in reference-c/usb.c
+//! (each modify() below corresponds to one RMW step of the C).
+
+use gd32f1::gd32f150 as pac;
 
 use crate::markers::*;
-use crate::regs::*;
 
 #[inline(never)]
-pub fn clock_init() {
-    /* Target: PLL x12 from HSI/2 => 48 MHz, USBDPSC=/1 (48 MHz USB clock).
+pub fn clock_init(rcu: &pac::Rcu) {
+    /* Target: PLL x12 from IRC8M/2 => 48 MHz, USBDPSC=/1 (48 MHz USB clock).
      * The bootloader hands off with its OWN clock running (PLL as system clock),
-     * so switch back to HSI and disable PLL before touching PLLMF — a running
+     * so switch back to IRC8M and disable PLL before touching PLLMF — a running
      * PLL ignores config writes. Robust from any state. */
-    modify(RCU_CTL0, |v| v | 1 << 0); /* HSIEN */
-    while rd(RCU_CTL0) & (1 << 1) == 0 {} /* wait HSISTB */
-    modify(RCU_CFG0, |v| v & !0x3); /* SCS = HSI */
-    while rd(RCU_CFG0) & 0xC != 0x0 {} /* wait SCSS = HSI */
-    modify(RCU_CTL0, |v| v & !(1 << 24)); /* PLLEN = 0 (now allowed) */
-    while rd(RCU_CTL0) & (1 << 25) != 0 {} /* wait PLLSTB clear */
-    modify(RCU_CFG0, |v| v & !0x003C_0000); /* clear PLLMF[3:0] (bits 21:18) */
-    modify(RCU_CFG0, |v| v & !(1 << 27)); /* clear PLLMF[4] */
-    modify(RCU_CFG0, |v| v & !(1 << 16)); /* PLLSEL = HSI/2 */
-    modify(RCU_CFG0, |v| v | 10 << 18); /* PLLMF=10 -> x12 (=48MHz) */
-    modify(RCU_CFG0, |v| (v & !0x00C0_0000) | 0x0040_0000); /* USBDPSC = 01 (CK_PLL/1) */
-    modify(RCU_CTL0, |v| v | 1 << 24); /* PLLEN */
-    while rd(RCU_CTL0) & (1 << 25) == 0 {} /* wait PLLSTB */
-    modify(RCU_CFG0, |v| (v & !0x3) | 0x2); /* SCS = PLL */
-    while rd(RCU_CFG0) & 0xC != 0x8 {} /* wait SCSS = PLL */
+    rcu.ctl0().modify(|_, w| w.irc8men().on());
+    while rcu.ctl0().read().irc8mstb().is_not_ready() {}
+    rcu.cfg0().modify(|_, w| w.scs().irc8m());
+    while !rcu.cfg0().read().scss().is_irc8m() {}
+    rcu.ctl0().modify(|_, w| w.pllen().off());
+    while rcu.ctl0().read().pllstb().is_ready() {} /* wait PLLSTB clear */
+    rcu.cfg0().modify(|_, w| w.pllmf().mul12()); /* x12 (=48 MHz) */
+    rcu.cfg0().modify(|_, w| w.pllmf_msb().clear_bit());
+    rcu.cfg0().modify(|_, w| w.pllsel().irc8m_2());
+    rcu.cfg0().modify(|_, w| w.usbdpsc().div1()); /* USB clock = CK_PLL/1 */
+    rcu.ctl0().modify(|_, w| w.pllen().on());
+    while rcu.ctl0().read().pllstb().is_not_ready() {}
+    rcu.cfg0().modify(|_, w| w.scs().pll());
+    while !rcu.cfg0().read().scss().is_pll() {}
     mk(MK_STAGE, STAGE_CLOCK);
 }
 
@@ -34,20 +35,20 @@ pub fn delay_ms(ms: u32) {
 }
 
 #[inline(never)]
-pub fn pa9_config_output() {
-    modify(RCU_AHBEN, |v| v | 1 << 17); /* GPIOA clock (AHBEN bit17) */
-    modify(GPIOA_MODER, |v| (v & !(3 << 18)) | 1 << 18); /* PA9 = output */
-    modify(GPIOA_OTYPER, |v| v & !(1 << 9)); /* push-pull */
-    modify(GPIOA_OSPEED, |v| (v & !(3 << 18)) | 1 << 18); /* medium speed */
-    modify(GPIOA_PUPDR, |v| v & !(3 << 18)); /* no pull */
+pub fn pa9_config_output(rcu: &pac::Rcu, gpioa: &pac::Gpioa) {
+    rcu.ahben().modify(|_, w| w.paen().enabled()); /* GPIOA clock */
+    gpioa.ctl().modify(|_, w| w.ctl9().output());
+    gpioa.omode().modify(|_, w| w.om9().push_pull());
+    gpioa.ospd().modify(|_, w| w.ospd9().speed10m());
+    gpioa.pud().modify(|_, w| w.pud9().floating());
 }
 
 #[inline(never)]
-pub fn pa9_low() {
-    wr(GPIOA_BC, PA9_MASK); /* D+ low -> host sees disconnect */
+pub fn pa9_low(gpioa: &pac::Gpioa) {
+    gpioa.bc().write(|w| w.cr9().set_bit()); /* D+ low -> host sees disconnect */
 }
 
 #[inline(never)]
-pub fn pa9_high() {
-    wr(GPIOA_BOP, PA9_MASK); /* D+ pull-up -> host enumerates us */
+pub fn pa9_high(gpioa: &pac::Gpioa) {
+    gpioa.bop().write(|w| w.bop9().set_bit()); /* D+ pull-up -> host enumerates us */
 }
