@@ -11,6 +11,7 @@
 use gd32f1::gd32f150 as pac;
 
 use crate::board;
+use crate::font;
 
 pub const WIDTH: u16 = 160;
 pub const HEIGHT: u16 = 80;
@@ -222,6 +223,32 @@ pub fn test_pattern() -> Result<(), u8> {
         fill_rect(30, y, WIDTH - 3, y + 23, color)?;
     }
     fill_rect(2, 2, 25, 25, 0x0000)
+}
+
+/// Blit one font cell (font.rs, 1 bpp) at (x, y), expanding bits to fg/bg
+/// while streaming — the full cell is overwritten, so no clear, no flicker.
+/// Unknown characters draw nothing.
+#[inline(never)]
+pub fn draw_char(x: u16, y: u16, ch: u8, fg: u16, bg: u16) -> Result<(), u8> {
+    ensure_init()?;
+    let Some(&(_, off)) = font::GLYPHS.iter().find(|&&(c, _)| c == ch) else {
+        return Ok(());
+    };
+    let off = off as usize;
+    let bpr = (font::ADV as usize + 7) / 8;
+    set_window(x, y, x + font::ADV - 1, y + font::CELL_H - 1)?;
+    spi_wait_idle()?;
+    let gpioa = unsafe { &*pac::Gpioa::ptr() };
+    gpioa.bop().write(|w| w.bop4().set_bit()); /* DC high, stays high */
+    for r in 0..font::CELL_H as usize {
+        for c in 0..font::ADV as usize {
+            let ink = font::DATA[off + r * bpr + c / 8] & (0x80 >> (c % 8)) != 0;
+            let color = if ink { fg } else { bg };
+            spi_write_byte((color >> 8) as u8)?;
+            spi_write_byte(color as u8)?;
+        }
+    }
+    spi_wait_idle()
 }
 
 /// TIMER1 CH1 PWM on PB3 (AF2) for the backlight LED driver. 48 MHz / 48 /
