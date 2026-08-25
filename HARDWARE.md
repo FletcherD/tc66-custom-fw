@@ -93,6 +93,7 @@ Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the firs
 | `rotat` / `nextp` / `lastp` | none | rotate / cycle on-device screen |
 | `gtrec` | N×8 B + `reck` | dump the on-device ~1 Hz V/I log |
 | `updat` | `uprdy`, then per-chunk `OK` | our app self-update |
+| `i2crd` | `OK`+data / `ER`+diag | our dev verb: raw I²C read (tools/i2cread.py) |
 
 Keeping `getva` byte-compatible (same reply) lets existing host tools work unchanged.
 
@@ -139,9 +140,21 @@ Last 4 bytes of each 64-byte block are a checksum.
   `0x8F7F` (which would toggle STAT_TX to DISABLED and break control-IN transfers).
 
 ### Measurement front-end (I²C)
-- External power monitor (INA226-class), I²C address **0x4A**, on a **software (bit-banged) I²C bus: SCL = PB6, SDA = PB7** (these are also the hardware I²C0 pins, so hardware I²C0 is an option for a rewrite).
-- EEPROM (256 Kbit) at I²C address **0xA0** shares the same bus — holds per-unit calibration constants, energy accumulators, serial number.
-- Read model: write the monitor's register/channel select, then read a 16-bit value.
+- External power monitor: a genuine **TI INA226** (verified on hardware: manuf ID
+  reg 0xFE = 0x5449 "TI", die ID reg 0xFF = 0x2260), 7-bit I²C address **0x4A**.
+  The stock firmware bit-bangs SCL = PB6 / SDA = PB7; **hardware I²C0 on the same
+  pins (AF1, 100 kHz) works** — the custom firmware uses it (rust/src/i2c.rs).
+- EEPROM (256 Kbit) at 7-bit address **0x50** (0xA0 in 8-bit form) on the same
+  bus, **2-byte addressing** — per-unit calibration constants (verified readable
+  at the offsets below), energy accumulators, serial number.
+- Bus scan also ACKs **0x58** (likely the EEPROM's ID page) and **0x22**
+  (unidentified — to be investigated).
+- INA226 read model: write the 1-byte register pointer, read 16-bit big-endian.
+  At power-on it sits at config default 0x4127 with CAL (reg 5) unset — the
+  firmware must configure it. Registers: 0 config, 1 shunt V, 2 bus V, 3 power,
+  4 current, 5 calibration.
+- Bench note: powering the meter via its PC-comms port does NOT power the
+  measurement path — bus voltage/shunt read 0 until the IN port is fed.
 
 #### Calibration (per-unit constants live in the EEPROM)
 Averaged, calibrated readings:

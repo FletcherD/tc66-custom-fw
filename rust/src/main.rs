@@ -18,6 +18,7 @@
 mod board;
 mod flasher;
 mod getva;
+mod i2c;
 mod markers;
 mod startup;
 mod usb_bus;
@@ -30,7 +31,7 @@ use usb_device::prelude::*;
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 7;
+const BUILD_ID: u32 = 8;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 type Serial<'a> = SerialPort<'a, usb_bus::UsbBus>;
@@ -110,6 +111,13 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
         mk(MK_STAGE, STAGE_QUERY);
     } else if match5(buf, b"getva") {
         write_all(dev, serial, &getva::GETVA_REPLY);
+    } else if match5(buf, b"i2crd") {
+        /* dev/bring-up verb (ours, not stock):
+         *   i2crd <addr7> <wlen 0..=2> <w0> <w1> <rlen 0..=32>
+         * -> "OK" + rlen bytes, or "ER" + [stage, stat0.lo, stat0.hi, stat1.lo] */
+        let mut reply = [0u8; 34];
+        let n = i2c_command(buf, &mut reply);
+        write_all(dev, serial, &reply[..n]);
     } else if match5(buf, b"updat") {
         if let Some(ep) = find_bulk_ep() {
             flasher::launch(ep); /* does not return */
@@ -117,6 +125,41 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
         mk(MK_PROBE, 0xBAD_EB); /* no bulk endpoint found — refuse, host times out */
     }
     /* rotat / nextp / lastp / unknown -> silent */
+}
+
+/// Parse + run an `i2crd` packet; fill `reply`, return its length.
+#[inline(never)]
+fn i2c_command(buf: &[u8], reply: &mut [u8; 34]) -> usize {
+    if buf.len() < 10 {
+        reply[..2].copy_from_slice(b"ER");
+        reply[2] = 0x0F; /* bad args */
+        return 3;
+    }
+    let addr7 = buf[5];
+    let wlen = buf[6] as usize;
+    let wbuf = [buf[7], buf[8]];
+    let rlen = buf[9] as usize;
+    if wlen > 2 || rlen > 32 {
+        reply[..2].copy_from_slice(b"ER");
+        reply[2] = 0x0F;
+        return 3;
+    }
+    let mut rbuf = [0u8; 32];
+    match i2c::transact(addr7, &wbuf[..wlen], &mut rbuf[..rlen]) {
+        Ok(()) => {
+            reply[..2].copy_from_slice(b"OK");
+            reply[2..2 + rlen].copy_from_slice(&rbuf[..rlen]);
+            2 + rlen
+        }
+        Err(e) => {
+            reply[..2].copy_from_slice(b"ER");
+            reply[2] = e.stage;
+            reply[3] = e.stat0 as u8;
+            reply[4] = (e.stat0 >> 8) as u8;
+            reply[5] = e.stat1 as u8;
+            6
+        }
+    }
 }
 
 /// Blocking-ish write with an absent-host bound (the C had the same bounded wait):
