@@ -1,0 +1,10 @@
+# C build artifacts (regenerate with `make`)
+*.o
+*.elf
+*.bin
+*.map
+# Rust
+/rust/target/
+# Python
+__pycache__/
+*.pyc
