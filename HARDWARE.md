@@ -134,7 +134,7 @@ AES: ~1 ms per reply vs ~25 ms for `getva` (soft AES-256 is that expensive on
 this core even optimized). Reply layout in `rust/src/getva.rs` (46 B: `"raw1"`,
 ten LE u32 fields, CRC16/MODBUS tail); client + deduping stream generator in
 `tools/rawva.py`. Verified on the bench: 700 polls/s costs the sampler nothing
-(the firmware catches up blocked ticks; see FIRMWARE.md), zero missed windows.
+(the sampler runs from a timer interrupt; see FIRMWARE.md), zero missed windows.
 
 ## Peripherals & pins
 

@@ -12,8 +12,10 @@
 //! hard-codes 0x01/0x81); the CDC endpoints are whatever the stack allocates
 //! next (expected: EP2 = interrupt IN, EP3 = bulk OUT+IN). `updat` discovers
 //! the CDC bulk endpoint by scanning EPnR (skipping EP1) and the flasher
-//! reads its PMA buffers from the BTABLE. Interrupts stay masked
-//! (startup.rs); everything runs off dev.poll().
+//! reads its PMA buffers from the BTABLE. Exactly one interrupt is enabled
+//! (the TIMER5 250 Hz sampler tick, ina.rs — startup.rs masks everything and
+//! ina::start() unmasks that one line late); USB + commands run off
+//! dev.poll() in the main loop.
 
 #![no_std]
 #![no_main]
@@ -47,6 +49,16 @@ type Serial<'a> = SerialPort<'a, usb_bus::UsbBus>;
 
 #[entry]
 fn main() -> ! {
+    /* Deep one-shot init under THIS shallow frame, not run()'s ~2 KB of
+     * locals: the stack budget must also carry the sampler ISR chain on top
+     * of the deepest thread path (stack-gate). Pure compute — safe before
+     * clock init. */
+    getva::init();
+    run()
+}
+
+#[inline(never)]
+fn run() -> ! {
     mk(MK_BOOT, 0xB007_B007);
     mk(MK_BUILD, BUILD_ID);
     mk(MK_HEART, 0);
@@ -93,20 +105,14 @@ fn main() -> ! {
 
     board::pa9_high(&p.gpioa);
 
-    /* TIMER5 (basic timer, no pins) free-runs at 10 kHz as the sampler
-     * timebase: 40 counts = one 4 ms tick, 250 ticks/s. Elapsed ticks accrue
-     * from CNT deltas each loop pass, so time spent blocked (a getva reply is
-     * ~21 ms of AES) is caught up, never lost — SysTick's COUNTFLAG latched a
-     * single wrap and dropped the rest, stalling sampler + energy clock under
-     * fast host polling. 16-bit @ 10 kHz wraps at 6.55 s, far beyond the
-     * longest blocking path (write_all's absent-host budget, ~0.5 s). */
-    p.rcu.apb1en().modify(|_, w| w.timer5en().enabled());
-    p.timer5.psc().write(|w| w.psc().bits(4799)); /* 48 MHz -> 10 kHz */
-    p.timer5.car().write(|w| w.car().bits(0xFFFF));
-    p.timer5.swevg().write(|w| w.upg().set_bit()); /* latch PSC now */
-    p.timer5.ctl0().modify(|_, w| w.cen().enabled());
-    getva::init(); /* AES key schedule now, while the stack is shallow */
-    let mut sampler = ina::Sampler::new();
+    /* The sampler now runs from the TIMER5 update interrupt at 250 Hz
+     * (ina.rs: 4 ms tick, one interleaved I2C read per tick, ~10.4 Hz
+     * window publish). start() is the firmware's single deliberate IRQ
+     * enable — deliberately last, after every other init. The main loop
+     * derives its cadences (1 Hz energy, 0.5 s UI) from the ISR's tick
+     * counter, so time spent blocked (a getva reply is ~21 ms of AES) is
+     * caught up, never lost. */
+    ina::start(&p.rcu, &p.timer5);
 
     /* 1 Hz energy integration (RAM only, starts at 0; persistence is M2):
      * every 250 ticks accumulate published I and P for one second.
@@ -120,62 +126,37 @@ fn main() -> ! {
     let mut ui_ticks: u32 = 0;
 
     let mut buf = [0u8; 64];
-    let mut prev_cnt = p.timer5.cnt().read().cnt().bits();
-    let mut tick_acc: u32 = 0;
+    let mut last_ticks = ina::ticks();
     loop {
         mk(MK_HEART, mk_get(MK_HEART) + 1);
-        let cnt = p.timer5.cnt().read().cnt().bits();
-        tick_acc += cnt.wrapping_sub(prev_cnt) as u32;
-        prev_cnt = cnt;
-        while tick_acc >= 40 {
-            tick_acc -= 40;
-            if let Some(rd) = sampler.tick() {
-                unsafe {
-                    let m = &mut *PUBLISHED.0.get();
-                    m.v_1e4 = rd.v_1e4;
-                    m.i_1e5 = rd.i_1e5;
-                    m.dp_1e2 = rd.dp_1e2;
-                    m.dm_1e2 = rd.dm_1e2;
-                    m.temp_c = rd.temp_c;
-                }
-            }
-            if let Some((iv, ii)) = sampler.instant() {
-                unsafe {
-                    let m = &mut *PUBLISHED.0.get();
-                    m.inst_v_1e4 = iv;
-                    m.inst_i_1e5 = ii;
-                }
-            }
-            /* refresh the pre-built powerz reply each tick (calm context) */
+        /* cal retries + the deferred window-end ADC burst (temp/D±) */
+        ina::service();
+        let now = ina::ticks();
+        let elapsed = now.wrapping_sub(last_ticks);
+        last_ticks = now;
+        if elapsed > 0 {
+            /* refresh the pre-built powerz reply at tick cadence (calm
+             * context — never from the ISR) */
             pz.set_payload(&powerz_payload());
-            sec_ticks += 1;
-            if sec_ticks >= 250 {
-                sec_ticks = 0;
-                if let Some(avg) = sampler.drain_second() {
-                    unsafe {
-                        let m = &mut *PUBLISHED.0.get();
-                        m.avg_v_1e4 = avg.v_1e4;
-                        m.avg_i_1e5 = avg.i_1e5;
-                        m.ori_uv = avg.ori_uv;
-                        m.ori_ua = avg.ori_ua;
-                    }
-                }
-                unsafe {
-                    let m = &mut *PUBLISHED.0.get();
-                    let (p, _) = ina::derive(m.v_1e4, m.i_1e5);
-                    acc_i_1e5s += m.i_1e5 as u64;
-                    acc_p_1e4s += p as u64;
-                    m.mah = (acc_i_1e5s / 360_000) as u32;
-                    m.mwh = (acc_p_1e4s / 36_000) as u32;
-                }
+            sec_ticks += elapsed;
+            while sec_ticks >= 250 {
+                sec_ticks -= 250;
+                let m = ina::snapshot();
+                let (pw, _) = ina::derive(m.v_1e4, m.i_1e5);
+                acc_i_1e5s += m.i_1e5 as u64;
+                acc_p_1e4s += pw as u64;
+                ina::set_energy(
+                    (acc_i_1e5s / 360_000) as u32,
+                    (acc_p_1e4s / 36_000) as u32,
+                );
             }
-            ui_ticks += 1;
+            ui_ticks += elapsed;
             if ui_ticks >= 125 && tft_alive {
                 ui_ticks = 0;
-                /* re-arm before the draw: it's the longest tick-body path,
+                /* re-arm before the draw: it's the longest loop-body path,
                  * and an unarmed IN during it risks the powerz 5 ms deadline */
                 pz.arm();
-                let m = unsafe { *PUBLISHED.0.get() };
+                let m = ina::snapshot();
                 let (pw, _) = ina::derive(m.v_1e4, m.i_1e5);
                 /* a failed draw disables the refresh for this boot (a wedged
                  * SPI wait would otherwise slow every 0.5 s cycle) */
@@ -273,7 +254,7 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
         reply_ok_er(dev, serial, r);
     } else if match5(buf, b"tftui") {
         /* dev verb: draw/refresh the main screen from published values */
-        let m = unsafe { *PUBLISHED.0.get() };
+        let m = ina::snapshot();
         let (p, _) = ina::derive(m.v_1e4, m.i_1e5);
         reply_ok_er(dev, serial, ui::draw(m.v_1e4, m.i_1e5, p));
     } else if match5(buf, b"tftbl") {
@@ -297,7 +278,7 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
 /// getva/rawva reply.
 #[inline(never)]
 fn live_fields() -> getva::Fields {
-    let m = unsafe { *PUBLISHED.0.get() };
+    let m = ina::snapshot();
     let (p, r) = ina::derive(m.v_1e4, m.i_1e5);
     getva::Fields {
         v: m.v_1e4,
@@ -313,52 +294,13 @@ fn live_fields() -> getva::Fields {
     }
 }
 
-/* Latest published measurement set from the timer-paced sampler + 1 Hz energy
- * integrator; zeros until first window. Single-core, IRQs masked -> Racy ok. */
-struct Racy<T>(core::cell::UnsafeCell<T>);
-unsafe impl<T> Sync for Racy<T> {}
-
-#[derive(Clone, Copy)]
-struct Meas {
-    v_1e4: u32,
-    i_1e5: u32,
-    dp_1e2: u32,
-    dm_1e2: u32,
-    temp_c: i32,
-    mah: u32,
-    mwh: u32,
-    /* powerz fields: latest single conversion, 1 s calibrated average,
-     * 1 s nominal-scale ("original") average */
-    inst_v_1e4: u32,
-    inst_i_1e5: i32,
-    avg_v_1e4: u32,
-    avg_i_1e5: i32,
-    ori_uv: u32,
-    ori_ua: i32,
-}
-static PUBLISHED: Racy<Meas> = Racy(core::cell::UnsafeCell::new(Meas {
-    v_1e4: 0,
-    i_1e5: 0,
-    dp_1e2: 0,
-    dm_1e2: 0,
-    temp_c: 0,
-    mah: 0,
-    mwh: 0,
-    inst_v_1e4: 0,
-    inst_i_1e5: 0,
-    avg_v_1e4: 0,
-    avg_i_1e5: 0,
-    ori_uv: 0,
-    ori_ua: 0,
-}));
-
 /// Build the 44-byte powerz ADC payload (layout: powerz.rs / HARDWARE.md).
 /// All uV/uA are our wire units scaled up (1e-4 V -> x100 uV, 1e-5 A ->
 /// x10 uA); Vcc1/Vcc2/Vdd are 0 until the FUSB302 is brought up (M4); temp
 /// is clamped at 0 (the kernel driver's byte pair can't encode sub-zero).
 #[inline(never)]
 fn powerz_payload() -> [u8; powerz::ADC_PAYLOAD_LEN] {
-    let m = unsafe { *PUBLISHED.0.get() };
+    let m = ina::snapshot();
     let mut p = [0u8; powerz::ADC_PAYLOAD_LEN];
     let mut put = |off: usize, v: i32| p[off..off + 4].copy_from_slice(&v.to_le_bytes());
     put(0, m.inst_v_1e4 as i32 * 100);
@@ -405,7 +347,9 @@ fn i2c_command(buf: &[u8], reply: &mut [u8; 34]) -> usize {
         return 3;
     }
     let mut rbuf = [0u8; 32];
-    match i2c::transact(addr7, &wbuf[..wlen], &mut rbuf[..rlen]) {
+    /* thread-mode I2C must never race the sampler ISR's transactions —
+     * pause the tick for the duration (ina.rs bus rule) */
+    match ina::pause(|| i2c::transact(addr7, &wbuf[..wlen], &mut rbuf[..rlen])) {
         Ok(()) => {
             reply[..2].copy_from_slice(b"OK");
             reply[2..2 + rlen].copy_from_slice(&rbuf[..rlen]);

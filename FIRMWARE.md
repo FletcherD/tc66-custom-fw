@@ -4,21 +4,23 @@ How the firmware (`rust/`) is put together, the hard-won gotchas, and the
 build/flash/debug workflow. Read `HARDWARE.md` first for the board facts
 (memory map, pins, peripherals, command protocol, calibration model).
 
-The firmware is fully polled — interrupts stay masked from reset onward.
-Everything runs off the main loop: USB servicing, the TIMER5-paced sampler,
-and command dispatch.
+The firmware enables exactly ONE interrupt: the TIMER5 update IRQ that runs
+the 250 Hz measurement sampler (ina.rs). Everything else — USB servicing,
+command dispatch, the display, the deferred ADC burst — runs polled off the
+main loop with all other NVIC lines masked. The single IRQ is unmasked
+deliberately and late (`ina::start()`, the last thing before the main loop).
 
 ## Module map (`rust/src/`)
 
 | Module | Role |
 |---|---|
-| `main.rs` | entry, USB device setup, poll loop, command dispatch, 1 Hz energy integration, published-measurement state |
+| `main.rs` | entry, USB device setup, poll loop, command dispatch, 1 Hz energy integration |
 | `startup.rs` | `__pre_init` (cpsid/VTOR/NVIC-clear), asm `DefaultHandler` + `HardFault` SRAM capture, panic handler |
 | `board.rs` | 48 MHz clock bring-up, PA9 D+ soft-connect choreography |
 | `usb_bus.rs` | stm32-usbd `UsbPeripheral` impl for the GD32 USBD |
 | `flasher.rs` | `updat` self-flasher (`.flasher` section, runs from SRAM) |
 | `i2c.rs` | polled I2C0 master (INA226 + EEPROM bus), `i2crd` dev verb backend |
-| `ina.rs` | INA226 reads, EEPROM calibration, timer-paced `Sampler`, NTC/D± conversion |
+| `ina.rs` | the measurement subsystem: TIMER5 250 Hz sampler ISR (interleaved INA226 reads), EEPROM calibration, NTC/D± conversion, published-measurement state (`Meas`/`snapshot()`), `pause()` bus rule |
 | `adc.rs` | polled on-chip ADC (NTC, D+/D−), `adcrd` dev verb backend |
 | `getva.rs` | real `getva` packet builder (template + CRC16/MODBUS + AES-256-ECB) |
 | `tft.rs` | ST7735S display driver (SPI0, stock init/window/fill path), 1-bpp glyph blitter, TIMER1 backlight PWM, `tftfl`/`tftbl` dev verb backends |
@@ -28,9 +30,11 @@ and command dispatch.
 
 ## Startup / linker
 
-**`cortex-m-rt` 0.7** provides the vector table (240 IRQ entries, all
-`DefaultHandler` — no PAC `device` feature needed), `.data`/`.bss` init, and the
-reset handler. Board specifics:
+**`cortex-m-rt` 0.7** provides the reset handler and `.data`/`.bss` init; the
+IRQ half of the vector table comes from the **gd32f1 PAC's `rt` feature**
+(cortex-m-rt `device` mode: 52 device slots from `__INTERRUPTS`, unhandled
+ones PROVIDEd to our asm `DefaultHandler`, `#[interrupt]` available for real
+handlers — today only `TIMER5_DAC` in ina.rs). Board specifics:
 
 - `memory.x`: `FLASH ORIGIN 0x08002C00 LENGTH 51840` (the exact flashable image
   size, so the linker fails before the pad step would) and `RAM LENGTH 0xE40` —
@@ -136,47 +140,84 @@ and main()'s frame alone is ~2 KB, and a boot-path overflow hardfaults
 shipped once, as build 35). The gate computes a conservative static
 worst-case stack depth (disassembly call graph; multi-path frames and tail
 calls overestimated; `blx rN` trait dispatch charged the max UsbClass-impl
-subtree; recursion is a hard error) and fails the build unless worst + one
-exception frame + 192 B margin fits `STACK_TOP − __ebss`. Two related
-subtleties, both load-bearing:
+subtree; recursion is a hard error) and fails the build unless
+`worst + irq + fault + 192 B margin` fits `STACK_TOP − __ebss`. The irq and
+fault charges come from the real `.vector_table`: one 32 B exception frame
+plus the deepest device-IRQ handler subtree (today: `TIMER5_DAC`, ~184 B —
+keep the ISR chain shallow), and the same again for the fault handlers,
+which can land on top of the ISR. The gate assumes **all IRQs share one NVIC
+priority** (no nesting — it charges the max handler chain, not the sum);
+keep it that way or extend the gate first. A populated vector slot that
+doesn't resolve to a disassembled function fails the build. Three related
+subtleties, all load-bearing:
 - **The runtime stack top (0x20001000) is raised in `__pre_init`**
   (startup.rs), not in the linker: the flash header's initial SP must stay
   at the bootloader-proven `0x20000E40` (the bootloader faults on some SP
   values — 0x20002000 known bad, predicate unknown). `STACK_TOP` in
   stack_gate.py must match the asm constant.
-- **Deep one-shot work runs at boot, not under the deepest chain**: the AES
-  key schedule (~1.1 KB of chain) runs once from `getva::init()` before the
-  main loop; `build()` only reads the cached cipher. Keep new expensive
-  init work on that pattern, and never put a call cycle in the graph (the
-  tft `fill_rect`/`ensure_init` cycle was broken with `fill_rect_raw` for
-  exactly this).
+- **Deep one-shot work runs at boot, under a shallow frame**: the AES key
+  schedule (~1.1 KB of chain) runs once from `getva::init()` — called from
+  the `#[entry]` trampoline BEFORE `run()`, so it never sits under run()'s
+  ~1.9 KB of long-lived locals; `build()` only reads the cached cipher.
+  Keep new expensive init work on that pattern, and never put a call cycle
+  in the graph (the tft `fill_rect`/`ensure_init` cycle was broken with
+  `fill_rect_raw` for exactly this).
 
 ## Measurement (M1)
 
 - `i2c.rs`: polled I2C0 master (PB6/PB7 AF1, 100 kHz, the F1-style IP's AN2824
   receive sequences), bounded waits with stage+STAT0/STAT1 error snapshots,
   SRESET + reconfigure per transaction (stateless, self-healing).
-- `ina.rs`: INA226 register reads (big-endian), EEPROM calibration constants
-  (LE u32 at 0x2004/44/08/0c/58), the calibration formulas from HARDWARE.md,
-  and `Sampler` — one I2C read per 4 ms tick, 8 bus + 16 shunt reads per
-  window, then one ADC tick (NTC + D+ + D−) → publish at ~10.4 Hz (250/24).
-  Failures bump MK_I2CERR and restart the window; cal load retries.
-  **The tick timebase is TIMER5** free-running at 10 kHz (no pins, no IRQ):
-  the main loop accrues elapsed ticks from CNT deltas (40 counts = 1 tick),
-  so time spent blocked — a getva reply is ~20 ms of soft AES — is caught up
-  with back-to-back ticks instead of lost. (SysTick's COUNTFLAG latches only
-  one wrap: with it, hammering getva stalled the sampler to ~0.65 Hz and
-  slowed the energy clock ~16×. Verified fixed on the bench: flat-out getva
-  polling now costs 0% window rate.) The 16-bit counter wraps at 6.55 s,
-  far beyond the longest blocking path (write_all's absent-host budget).
-  **The explicit INA226 config write (0x4127) at sampler start is
+- `ina.rs`: the whole measurement subsystem. INA226 register reads
+  (big-endian), EEPROM calibration constants (LE u32 at 0x2004/44/08/0c/58),
+  the calibration formulas from HARDWARE.md, and the **TIMER5-interrupt
+  sampler**: TIMER5 is programmed for a 4 ms update IRQ (PSC 4799, CAR 39;
+  250 Hz) and `TIMER5_DAC` is the firmware's only enabled interrupt,
+  unmasked in `ina::start()` as the last init step. Each tick the ISR does
+  ONE I2C read in the interleaved repeating pattern **shunt, shunt, bus**
+  (×8 → 24 ticks = 16 shunt + 8 bus — the exact sum depths the EEPROM cal
+  bakes in), so instantaneous values stay evenly fresh (newest shunt ≤ 8 ms,
+  newest bus ≤ 12 ms old). At tick 24 it calibrates + publishes V/I
+  (~10.4 Hz windows, MK_WINDOWS++) and every 250 ticks drains the 1 s
+  powerz averages. I2C failures bump MK_I2CERR, snapshot into MK_SMP_I2CE
+  and restart the window; cal loading runs from the main loop (first try in
+  `start()`, retries every ~0.25 s via `ina::service()`) — the ISR idles
+  until `CAL_READY`. **The INA226 config write (0x4127) before cal load is
   load-bearing** — the chip returns 0 for bus voltage until (re)configured.
+  **ISR budget:** one I2C read ≈ 0.5 ms of the 4 ms tick (~12% CPU); the
+  publish/drain ticks add a few µs of integer math. No ADC, no USB, no
+  floats in the ISR.
+- **Deferred ADC burst:** the window-end on-chip-ADC reads (NTC + D+ + D−,
+  ~1 ms) do NOT run in the ISR — the ISR sets `ADC_REQ` and the main loop
+  runs the burst in `ina::service()`, so temp/D± lag the window boundary by
+  one loop pass (normally <1 ms; worst ~0.5 s inside write_all's absent-host
+  budget — acceptable for slow-moving values, and it keeps the handler off
+  any future interrupt's critical path). MK_SMP_ADCB counts serviced bursts
+  (should track MK_WINDOWS).
+- **Shared state:** `ina::Meas`/`PUBLISHED` is split-ownership — the ISR
+  writes {v, i, inst, avg, ori}, the thread writes {mah, mwh, dp, dm, temp}
+  — and every thread-mode access goes through `ina::snapshot()` /
+  the field-writer helpers, all inside `cortex_m::interrupt::free`, so a
+  reply's multi-word copy can never tear mid-window. `CAL` is write-once
+  published via Release/Acquire on `CAL_READY`; `SAMPLER` is ISR-exclusive;
+  tick counts are atomics. The full soundness argument is the ina.rs module
+  doc — read it before touching any of those statics.
+- **Bus rule:** ALL thread-mode I2C (`i2crd`, cal retries) must run inside
+  `ina::pause(...)` (masks the TIMER5 NVIC line + dsb/isb), or a tick will
+  SRESET the peripheral mid-transaction. A long pause only stretches the
+  current window. The on-chip ADC is thread-only, no pause needed.
+- Main-loop cadences (1 Hz energy, 0.5 s UI refresh, cal retry) derive from
+  the ISR's public tick counter (`ina::ticks()`, mirrored at MK_SMP_IRQS):
+  time spent blocked — a getva reply is ~20 ms of soft AES — is caught up
+  from the delta instead of lost. (History: SysTick's single-wrap COUNTFLAG
+  once stalled the sampler under fast polling; the IRQ makes the sampler
+  itself immune, and the delta scheme keeps the derived clocks honest.)
 - `adc.rs`: polled on-chip ADC — **enable IRC14M first** (the ADC's dedicated
   clock, off at reset; calibration hangs without it), ADCON set alone, CLB
   calibration, SWRCST software trigger, 239.5-cycle sampling. NTC uses the
   recovered stock β-model on ch1 (this unit); channels + model in HARDWARE.md.
-- Energy: 1 Hz integration in the main loop off the same tick stream (250
-  ticks = 1 s) — RAM-only, zeroed at boot, both getva groups publish the same
+- Energy: 1 Hz integration in the main loop off the tick counter (250 ticks
+  = 1 s) — RAM-only, zeroed at boot, both getva groups publish the same
   value. Persistence = M2.
 - `getva.rs`: template + live-field patch + CRC16/MODBUS + AES-256-ECB.
   Stamps the sampler window counter (MK_WINDOWS) at offset 132 (pac3+4, a

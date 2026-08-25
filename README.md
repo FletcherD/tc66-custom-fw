@@ -21,8 +21,9 @@ gone) — our own protocol on top of a compatible base, and room to add features
   itself over USB via `updat` with a pure-Rust SRAM flasher — iterate with
   `make -C rust flash`, no button pressing.
 - **M1 — real measurement: done.** INA226 over hardware I²C0 with the per-unit
-  EEPROM calibration, TIMER5-paced sampling (~10 Hz publish, poll-rate
-  independent), NTC temperature (recovered stock β-model) and D+/D− via the
+  EEPROM calibration, TIMER5-interrupt sampling at 250 Hz with an
+  interleaved read schedule (~10 Hz publish, poll-rate independent), NTC
+  temperature (recovered stock β-model) and D+/D− via the
   on-chip ADC, 1 Hz energy integration (RAM-only for now), all served in the
   stock encrypted+checksummed `getva` packet — plus our plaintext `rawva`
   verb with a window sequence number for fast lossless streaming

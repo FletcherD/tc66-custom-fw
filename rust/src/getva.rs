@@ -14,7 +14,8 @@ use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockEncrypt, KeyInit};
 use aes::Aes256Enc;
 
-/* single-core, IRQs masked — same pattern as PUBLISHED in main.rs */
+/* thread-mode only (written once at boot before the sampler IRQ is enabled,
+ * read only from command dispatch; the ISR never touches it) */
 struct RacyCell<T>(core::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for RacyCell<T> {}
 /* MaybeUninit + ready flag instead of Option: lets init() construct the
