@@ -54,6 +54,9 @@ fn main() -> ! {
     mk(MK_ENUM, 0);
     mk(MK_I2CERR, 0);
     mk(MK_WINDOWS, 0);
+    for i in 0..6 {
+        mk(MK_DSP_BASE + 4 * i, 0); /* display/DMA diagnostic block */
+    }
 
     let p = pac::Peripherals::take().unwrap();
     board::clock_init(&p.rcu);
@@ -87,9 +90,12 @@ fn main() -> ! {
     mk(MK_STAGE, STAGE_USB_INIT);
 
     /* TFT init + first frame now, while D+ is still low — the init sequence
-     * has ~400 ms of fixed delays that must not stall enumeration. On error
-     * the display is left off for this boot (verbs can still retry it). */
-    let mut tft_alive = ui::draw(0, 0, 0).is_ok();
+     * has ~400 ms of fixed delays that must not stall enumeration. flush()
+     * pumps the DMA draw engine to completion (blocking is required here:
+     * the frame must be done before pa9_high). On error the display is left
+     * off for this boot (verbs can still retry it). */
+    ui::draw(0, 0, 0);
+    let mut tft_alive = ui::flush().is_ok();
 
     board::pa9_high(&p.gpioa);
 
@@ -172,15 +178,18 @@ fn main() -> ! {
             ui_ticks += 1;
             if ui_ticks >= 125 && tft_alive {
                 ui_ticks = 0;
-                /* re-arm before the draw: it's the longest tick-body path,
-                 * and an unarmed IN during it risks the powerz 5 ms deadline */
-                pz.arm();
+                /* format-only: marks changed cells dirty; the per-pass
+                 * ui::service() below streams the glyphs out via DMA */
                 let m = unsafe { *PUBLISHED.0.get() };
                 let (pw, _) = ina::derive(m.v_1e4, m.i_1e5);
-                /* a failed draw disables the refresh for this boot (a wedged
-                 * SPI wait would otherwise slow every 0.5 s cycle) */
-                tft_alive = ui::draw(m.v_1e4, m.i_1e5, pw).is_ok();
+                ui::draw(m.v_1e4, m.i_1e5, pw);
             }
+        }
+        /* advance the display DMA engine one poll (cheap when idle; at most
+         * one glyph-row kick per pass — never blocks the loop). A failed job
+         * disables the always-on refresh for this boot; verbs can retry. */
+        if tft_alive && ui::service().is_err() {
+            tft_alive = false;
         }
         /* every pass, not only on USB events: a reply consumed while the
          * loop was busy in tick work must be re-armed at the first
@@ -263,7 +272,8 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
         write_all(dev, serial, &reply[..n]);
     } else if match5(buf, b"tftfl") {
         /* dev verb: tftfl -> test pattern; tftfl <lo> <hi> -> solid RGB565 fill
-         * -> "OK", or "ER" + stage (1 SPI TBE timeout, 2 shift-idle timeout) */
+         * -> "OK", or "ER" + stage (tft.rs: 1 SPI TBE timeout, 2 shift-idle
+         * timeout, 3 DMA timeout, 4 DMA error, 5 busy, 6 pump budget) */
         let r = if buf.len() >= 7 {
             let color = buf[5] as u16 | (buf[6] as u16) << 8;
             tft::fill_rect(0, 0, tft::WIDTH - 1, tft::HEIGHT - 1, color)
@@ -272,10 +282,12 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
         };
         reply_ok_er(dev, serial, r);
     } else if match5(buf, b"tftui") {
-        /* dev verb: draw/refresh the main screen from published values */
+        /* dev verb: draw/refresh the main screen from published values
+         * (kick + pump to completion — dev verbs may block) */
         let m = unsafe { *PUBLISHED.0.get() };
         let (p, _) = ina::derive(m.v_1e4, m.i_1e5);
-        reply_ok_er(dev, serial, ui::draw(m.v_1e4, m.i_1e5, p));
+        ui::draw(m.v_1e4, m.i_1e5, p);
+        reply_ok_er(dev, serial, ui::flush());
     } else if match5(buf, b"tftbl") {
         /* dev verb: tftbl <lo> <hi> -> backlight PWM compare 0..=999 */
         let r = if buf.len() >= 7 {

@@ -4,6 +4,9 @@ Custom Rust firmware for the RuiDeng TC66/TC66C USB-C power meter, developed
 against real hardware on the bench. M0 (self-hosting USB + self-reflash),
 M1 (real calibrated measurement), and the M3 basics (ST7735S driver in
 tft.rs + always-on V/I/P main screen in ui.rs, webcam-verified) are done.
+Pixel streaming is now DMA-driven and non-blocking (tft.rs engine pumped by
+ui::service from the main loop; still no interrupts) — **not yet
+bench-verified**: check the MK_DSP block (markers.rs) + webcam on first flash.
 For lossless host streaming use the plaintext `rawva` verb (~1 ms replies,
 window seq for dedup; tools/rawva.py); getva also carries the seq at pac3+4.
 The sampler timebase (TIMER5 CNT deltas) is immune to main-loop blocking.

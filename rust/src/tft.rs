@@ -5,25 +5,80 @@
 //!   Backlight: enable=PA9 (already high — it doubles as the USB D+
 //!   soft-connect, board.rs), brightness=PB3 TIMER1 CH1 PWM.
 //!
+//! Pixel streaming is DMA-driven and non-blocking: commands (CASET/RASET/
+//! RAMWR, init) stay polled 8-bit writes, but bulk pixel data goes out as
+//! 16-bit SPI frames fed by DMA channel 2 (the fixed SPI0_TX request on this
+//! part). Callers kick a job (`start_char`, or the blocking `fill_rect`) and
+//! the main loop pumps `service()` to advance it; nothing busy-waits on
+//! pixels outside the bounded dev-verb/boot pumps. Jobs:
+//!   - fill: one DMA transfer from a single staged color word with the
+//!     memory-increment disabled — zero staging RAM;
+//!   - glyph: per-row staging — one 18-px row (36 B) is expanded 1 bpp ->
+//!     RGB565 into ROWBUF and DMA'd; the next row is staged on completion.
+//!
 //! Same safety pattern as i2c.rs/adc.rs: nothing runs at boot — only via the
-//! `tftfl`/`tftbl` dev verbs; every SPI wait is bounded and returns a stage.
+//! `tftfl`/`tftbl`/`tftui` verbs and the pre-enumeration first frame; every
+//! wait is bounded and returns a stage; a failed job tears the session down
+//! (DMA off, SPI back to 8-bit) so the next attempt starts clean.
 
 use gd32f1::gd32f150 as pac;
 
 use crate::board;
 use crate::font;
+use crate::markers::*;
 
 pub const WIDTH: u16 = 160;
 pub const HEIGHT: u16 = 80;
 const COL_OFF: u8 = 1;
 const ROW_OFF: u8 = 26;
 
-/* stages (for the ER reply): 1 TBE timeout, 2 shift-out (TRANS) timeout */
+/* stages (for the ER reply):
+ *   1 SPI TBE timeout               (polled command path)
+ *   2 SPI shift-out (TRANS) timeout (polled command path / session teardown)
+ *   3 DMA completion timeout        (FTF flag never set)
+ *   4 DMA transfer-error flag       (ERRIF — bad bus access)
+ *   5 engine busy                   (start_* called while a job runs)
+ *   6 pump budget exhausted         (blocking wrapper gave up) */
 const TIMEOUT: u32 = 100_000;
+
+/* service() polls allowed per engine phase before the job is declared
+ * wedged. A full-screen fill is ~8.5 ms of DMA; a tight pump loop polls
+ * every ~0.2 us, so the legitimate worst case is ~45k polls — 300k is a
+ * comfortable bound that still fails fast on a dead SPI/DMA. */
+const PHASE_BUDGET: u32 = 300_000;
+
+/* engine phases (also the MK_DSP_STATE low byte) */
+const PH_IDLE: u8 = 0;
+const PH_FILL: u8 = 1; /* fill DMA running */
+const PH_GLYPH: u8 = 2; /* glyph row DMA running (row in state byte 1) */
+const PH_DRAIN: u8 = 3; /* data done; waiting shifter idle, restore 8-bit */
 
 struct Racy<T>(core::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for Racy<T> {}
 static INITED: Racy<bool> = Racy(core::cell::UnsafeCell::new(false));
+
+struct Engine {
+    phase: u8,
+    row: u8, /* next glyph row to stage */
+    budget: u32,
+    glyph_off: u16,
+    fg: u16,
+    bg: u16,
+}
+static ENGINE: Racy<Engine> = Racy(core::cell::UnsafeCell::new(Engine {
+    phase: PH_IDLE,
+    row: 0,
+    budget: 0,
+    glyph_off: 0,
+    fg: 0,
+    bg: 0,
+}));
+
+/* DMA staging: one glyph row of RGB565 (refilled between row transfers),
+ * and the single color word a fill streams with memory-increment off. */
+const ROW_PX: usize = font::ADV as usize;
+static ROWBUF: Racy<[u16; ROW_PX]> = Racy(core::cell::UnsafeCell::new([0; ROW_PX]));
+static FILL_WORD: Racy<u16> = Racy(core::cell::UnsafeCell::new(0));
 
 #[inline(never)]
 fn spi_write_byte(b: u8) -> Result<(), u8> {
@@ -115,6 +170,7 @@ fn ensure_init() -> Result<(), u8> {
     let spi = unsafe { &*pac::Spi0::ptr() };
 
     rcu.ahben().modify(|_, w| w.paen().enabled());
+    rcu.ahben().modify(|_, w| w.dmaen().enabled());
     rcu.apb2en().modify(|_, w| w.spi0en().enabled());
 
     /* PA5/PA7 -> AF0 (SPI0 SCK/MOSI); PA3/PA4 -> outputs (RST/DC) */
@@ -198,6 +254,236 @@ fn set_window(x0: u16, y0: u16, x1: u16, y1: u16) -> Result<(), u8> {
     write_command(0x2C)
 }
 
+/* ---------------- DMA pixel engine ---------------- */
+
+/// Switch the SPI frame format. FF16 may only change while SPIEN is clear
+/// (and the caller must have seen TRANS idle first, or bits get chopped).
+fn spi_frame16(on: bool) {
+    let spi = unsafe { &*pac::Spi0::ptr() };
+    spi.ctl0().modify(|_, w| w.spien().disabled());
+    spi.ctl0().modify(|_, w| {
+        if on {
+            w.ff16().sixteen_bit()
+        } else {
+            w.ff16().eight_bit()
+        }
+    });
+    spi.ctl0().modify(|_, w| w.spien().enabled());
+}
+
+/// Program + enable DMA channel 2 (the fixed SPI0_TX request): `cnt`
+/// halfword transfers from `maddr` (incrementing if `minc`) into SPI0 DATA.
+#[inline(never)]
+fn dma_kick(maddr: u32, cnt: u16, minc: bool) {
+    let dma = unsafe { &*pac::Dma::ptr() };
+    let spi = unsafe { &*pac::Spi0::ptr() };
+    dma.ch2ctl().modify(|_, w| w.chen().disabled());
+    dma.intc().write(|w| {
+        w.gifc2()
+            .clear()
+            .ftfifc2()
+            .clear()
+            .htfifc2()
+            .clear()
+            .errifc2()
+            .clear()
+    });
+    dma.ch2paddr()
+        .write(|w| unsafe { w.paddr().bits(spi.data().as_ptr() as u32) });
+    dma.ch2maddr().write(|w| unsafe { w.maddr().bits(maddr) });
+    dma.ch2cnt().write(|w| w.cnt().bits(cnt));
+    dma.ch2ctl().write(|w| {
+        let w = w
+            .dir()
+            .from_memory()
+            .pnaga()
+            .fixed()
+            .pwidth()
+            .bits16()
+            .mwidth()
+            .bits16()
+            .prio()
+            .high();
+        if minc {
+            w.mnaga().increment()
+        } else {
+            w.mnaga().fixed()
+        }
+    });
+    dma.ch2ctl().modify(|_, w| w.chen().enabled());
+    mk(MK_DSP_KICKS, mk_get(MK_DSP_KICKS) + 1);
+}
+
+/// Open a pixel session: window commands (polled, 8-bit), DC high, SPI to
+/// 16-bit frames, TX DMA request on. On error nothing is left half-switched.
+fn pixel_session_begin(x0: u16, y0: u16, x1: u16, y1: u16) -> Result<(), u8> {
+    set_window(x0, y0, x1, y1)?;
+    spi_wait_idle()?;
+    let gpioa = unsafe { &*pac::Gpioa::ptr() };
+    gpioa.bop().write(|w| w.bop4().set_bit()); /* DC high = data */
+    spi_frame16(true);
+    let spi = unsafe { &*pac::Spi0::ptr() };
+    spi.ctl1().modify(|_, w| w.dmaten().enabled());
+    Ok(())
+}
+
+/// Close the pixel session: DMA request off, channel off, SPI back to 8-bit.
+/// Caller must have seen TRANS idle (drain phase) on the success path.
+fn pixel_session_end() {
+    let dma = unsafe { &*pac::Dma::ptr() };
+    let spi = unsafe { &*pac::Spi0::ptr() };
+    dma.ch2ctl().modify(|_, w| w.chen().disabled());
+    spi.ctl1().modify(|_, w| w.dmaten().disabled());
+    spi_frame16(false);
+}
+
+/// Tear the job down after a failure and record the diagnostics snapshot:
+/// stage | SPI_STAT<<8 | DMA ch2 INTF nibble<<24 (MK_DSP_ERR).
+#[inline(never)]
+fn abort(stage: u8) -> u8 {
+    let dma = unsafe { &*pac::Dma::ptr() };
+    let spi = unsafe { &*pac::Spi0::ptr() };
+    mk(
+        MK_DSP_ERR,
+        stage as u32
+            | (spi.stat().read().bits() as u32 & 0xFFFF) << 8
+            | ((dma.intf().read().bits() >> 8) & 0xF) << 24,
+    );
+    pixel_session_end();
+    let e = unsafe { &mut *ENGINE.0.get() };
+    e.phase = PH_IDLE;
+    mk(MK_DSP_STATE, PH_IDLE as u32);
+    stage
+}
+
+/// Expand one 1-bpp glyph row into ROWBUF as RGB565. The 16-bit SPI frame
+/// shifts MSB-first, so native u16 values go out hi-byte-first as the panel
+/// expects — no byte swizzling.
+fn stage_row(row: usize) {
+    let e = unsafe { &*ENGINE.0.get() };
+    let buf = unsafe { &mut *ROWBUF.0.get() };
+    let bpr = (font::ADV as usize + 7) / 8;
+    let base = e.glyph_off as usize + row * bpr;
+    for (c, px) in buf.iter_mut().enumerate() {
+        let ink = font::DATA[base + c / 8] & (0x80 >> (c % 8)) != 0;
+        *px = if ink { e.fg } else { e.bg };
+    }
+}
+
+/// Advance the pixel engine one poll. Ok(true) = idle, Ok(false) = a job is
+/// still running, Err(stage) = the job failed and was torn down (the engine
+/// is idle again; the caller decides what to do about the display).
+/// Cheap when idle — the main loop calls this every pass.
+#[inline(never)]
+pub fn service() -> Result<bool, u8> {
+    let e = unsafe { &mut *ENGINE.0.get() };
+    match e.phase {
+        PH_FILL | PH_GLYPH => {
+            let dma = unsafe { &*pac::Dma::ptr() };
+            let f = dma.intf().read();
+            if f.errif2().is_error() {
+                return Err(abort(4));
+            }
+            if f.ftfif2().is_complete() {
+                if e.phase == PH_GLYPH && (e.row as u16) < font::CELL_H {
+                    /* FTF = the last halfword reached the SPI, so ROWBUF is
+                     * free to restage; the shifter drains while we refill */
+                    stage_row(e.row as usize);
+                    e.row += 1;
+                    e.budget = PHASE_BUDGET;
+                    mk(MK_DSP_STATE, PH_GLYPH as u32 | (e.row as u32) << 8);
+                    dma_kick(ROWBUF.0.get() as u32, ROW_PX as u16, true);
+                } else {
+                    e.phase = PH_DRAIN;
+                    e.budget = PHASE_BUDGET;
+                    mk(MK_DSP_STATE, PH_DRAIN as u32);
+                }
+                Ok(false)
+            } else {
+                e.budget -= 1;
+                if e.budget == 0 {
+                    return Err(abort(3));
+                }
+                Ok(false)
+            }
+        }
+        PH_DRAIN => {
+            let spi = unsafe { &*pac::Spi0::ptr() };
+            if spi.stat().read().trans().is_idle() {
+                pixel_session_end();
+                e.phase = PH_IDLE;
+                mk(MK_DSP_STATE, PH_IDLE as u32);
+                mk(MK_DSP_DONE, mk_get(MK_DSP_DONE) + 1);
+                Ok(true)
+            } else {
+                e.budget -= 1;
+                if e.budget == 0 {
+                    return Err(abort(3));
+                }
+                Ok(false)
+            }
+        }
+        _ => Ok(true), /* PH_IDLE */
+    }
+}
+
+/// Pump service() until the engine goes idle. Terminates because every
+/// phase carries a poll budget. Blocking — dev verbs / boot only.
+#[inline(never)]
+fn pump_idle() -> Result<(), u8> {
+    loop {
+        if service()? {
+            return Ok(());
+        }
+    }
+}
+
+/// Kick an async solid fill. Engine must be idle (callers pump first).
+fn start_fill(x0: u16, y0: u16, x1: u16, y1: u16, color: u16) -> Result<(), u8> {
+    let e = unsafe { &mut *ENGINE.0.get() };
+    if e.phase != PH_IDLE {
+        return Err(5);
+    }
+    pixel_session_begin(x0, y0, x1, y1)?;
+    unsafe { *FILL_WORD.0.get() = color };
+    let n = (x1 - x0 + 1) as u32 * (y1 - y0 + 1) as u32; /* max 12800 < 2^16 */
+    e.phase = PH_FILL;
+    e.budget = PHASE_BUDGET;
+    mk(MK_DSP_STATE, PH_FILL as u32);
+    mk(MK_DSP_FILLS, mk_get(MK_DSP_FILLS) + 1);
+    dma_kick(FILL_WORD.0.get() as u32, n as u16, false);
+    Ok(())
+}
+
+/// Kick an async glyph blit (font.rs, 1 bpp expanded row-by-row) at (x, y).
+/// The full cell is overwritten, so no clear, no flicker. Engine must be
+/// idle; unknown characters draw nothing (engine stays idle, Ok).
+#[inline(never)]
+pub fn start_char(x: u16, y: u16, ch: u8, fg: u16, bg: u16) -> Result<(), u8> {
+    ensure_init()?;
+    let e = unsafe { &mut *ENGINE.0.get() };
+    if e.phase != PH_IDLE {
+        return Err(5);
+    }
+    let Some(&(_, off)) = font::GLYPHS.iter().find(|&&(c, _)| c == ch) else {
+        return Ok(());
+    };
+    pixel_session_begin(x, y, x + font::ADV - 1, y + font::CELL_H - 1)?;
+    e.glyph_off = off;
+    e.fg = fg;
+    e.bg = bg;
+    stage_row(0);
+    e.row = 1;
+    e.phase = PH_GLYPH;
+    e.budget = PHASE_BUDGET;
+    mk(MK_DSP_STATE, PH_GLYPH as u32 | 1 << 8);
+    mk(MK_DSP_GLYPHS, mk_get(MK_DSP_GLYPHS) + 1);
+    dma_kick(ROWBUF.0.get() as u32, ROW_PX as u16, true);
+    Ok(())
+}
+
+/// Blocking solid fill (dev verbs / test pattern / init clear): waits out
+/// any running job, kicks the fill, pumps it to completion. Bounded.
 #[inline(never)]
 pub fn fill_rect(x0: u16, y0: u16, x1: u16, y1: u16, color: u16) -> Result<(), u8> {
     ensure_init()?;
@@ -206,16 +492,9 @@ pub fn fill_rect(x0: u16, y0: u16, x1: u16, y1: u16, color: u16) -> Result<(), u
 
 #[inline(never)]
 fn fill_rect_raw(x0: u16, y0: u16, x1: u16, y1: u16, color: u16) -> Result<(), u8> {
-    set_window(x0, y0, x1, y1)?;
-    let n = (x1 - x0 + 1) as u32 * (y1 - y0 + 1) as u32;
-    let gpioa = unsafe { &*pac::Gpioa::ptr() };
-    spi_wait_idle()?;
-    gpioa.bop().write(|w| w.bop4().set_bit()); /* DC high, stays high */
-    for _ in 0..n {
-        spi_write_byte((color >> 8) as u8)?;
-        spi_write_byte(color as u8)?;
-    }
-    spi_wait_idle()
+    pump_idle()?;
+    start_fill(x0, y0, x1, y1, color)?;
+    pump_idle()
 }
 
 /// Bring-up pattern: white border + R/G/B bands + a black square in the
@@ -230,32 +509,6 @@ pub fn test_pattern() -> Result<(), u8> {
         fill_rect(30, y, WIDTH - 3, y + 23, color)?;
     }
     fill_rect(2, 2, 25, 25, 0x0000)
-}
-
-/// Blit one font cell (font.rs, 1 bpp) at (x, y), expanding bits to fg/bg
-/// while streaming — the full cell is overwritten, so no clear, no flicker.
-/// Unknown characters draw nothing.
-#[inline(never)]
-pub fn draw_char(x: u16, y: u16, ch: u8, fg: u16, bg: u16) -> Result<(), u8> {
-    ensure_init()?;
-    let Some(&(_, off)) = font::GLYPHS.iter().find(|&&(c, _)| c == ch) else {
-        return Ok(());
-    };
-    let off = off as usize;
-    let bpr = (font::ADV as usize + 7) / 8;
-    set_window(x, y, x + font::ADV - 1, y + font::CELL_H - 1)?;
-    spi_wait_idle()?;
-    let gpioa = unsafe { &*pac::Gpioa::ptr() };
-    gpioa.bop().write(|w| w.bop4().set_bit()); /* DC high, stays high */
-    for r in 0..font::CELL_H as usize {
-        for c in 0..font::ADV as usize {
-            let ink = font::DATA[off + r * bpr + c / 8] & (0x80 >> (c % 8)) != 0;
-            let color = if ink { fg } else { bg };
-            spi_write_byte((color >> 8) as u8)?;
-            spi_write_byte(color as u8)?;
-        }
-    }
-    spi_wait_idle()
 }
 
 /// TIMER1 CH1 PWM on PB3 (AF2) for the backlight LED driver. 48 MHz / 48 /
