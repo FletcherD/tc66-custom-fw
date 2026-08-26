@@ -13,9 +13,21 @@ Everything here was measured on THIS unit, through the bench VL817 hub
 (full-speed device behind a USB3 hub's transaction translator) — host-side
 contributions are not fully excluded unless stated.
 
-## 1. NAK traffic stalls CPU bus accesses (~1–5 ms each)
+## 1. NAK traffic stalls CPU bus accesses (~1–5 ms each) — ABSORBED
 
-**Confidence: high (three independent measurements).** While a host
+**Status (2026-08-26): the silicon behavior is presumably still there, but
+the firmware no longer provokes it** — pre-armed powerz replies (no IN NAK
+storms in steady state), the ISR drain loop below (OUT events serviced
+promptly), fast-flash fetch (§4) and the SysTick timebase together mean no
+sustained NAK phase exists for the stall to bite: powerz sustains ~5000
+reads/s with zero timeouts and CDC sits at sub-ms. The underlying stall
+was never explained by anything in the manual (the audit found only the
+PMA-arbitration note, ns-scale) — treat it as errata-like and re-measure
+only if a new traffic pattern reintroduces NAK phases. RCU_CFG0's APB1
+prescaler (inherited from the bootloader; UM requires >24 MHz for USBD)
+remains worth a one-off dev-verb dump.
+
+**Original findings:** while a host
 NAK-polls any of our bulk endpoints (IN awaiting data, or OUT awaiting
 buffer space), CPU accesses to APB peripherals stall for milliseconds:
 
@@ -39,9 +51,23 @@ reaches instruction fetch, but this is confounded (see §4).
 storms never form in steady state; ring-full parks the ISR so OUT storms
 stay brief.
 
-## 2. USB events are lost / the IRQ line does not re-assert
+## 2. USB events are lost / the IRQ line does not re-assert — FIXED IN FIRMWARE
 
-**Confidence: high.** The USBD's CTR flags should be level-triggered: a
+**Status (2026-08-26): closed by adopting the stock firmware's drain-loop
+shape** (build 61). The USBD_LP ISR now services in a loop until no
+endpoint shows a pending event, so one IRQ entry never strands a second
+event behind a re-fire this clone may lose. Crucially the loop condition
+is an **EPxCS scan (RX_ST/TX_ST, bits 15/7 — rc_w0, reads side-effect-
+free), NOT `ISTR & CTR`** like stock: a bare ISTR read measurably consumes
+events here (A/B below). The loop is bounded (4 passes; backpressure — a
+full usbd-serial buffer holding RX_ST — is deliberately left for the
+re-fire, and the ring-full park is unchanged). Bench: MK_USB_REDRAIN
+counted 157 extra same-entry passes over one ~5 kHz powerz run with
+MK_USB_RDMAX = 0; callback delivery went from lossy to >2 dispatches per
+consumed reply; latency unchanged. The unconditional `arm()` and
+write_all sweeps stay as belt-and-braces.
+
+**Original findings:** the USBD's CTR flags should be level-triggered: a
 pending endpoint event should refire USBD_LP until serviced. Measured
 instead:
 
@@ -71,11 +97,12 @@ by pure EP1-IN reads against the powerz dbg counters:
   read. CDC latency was identical in all three (the unconditional-arm +
   write_all-sweep absorptions mask event loss completely).
 
-**Firmware absorption:** `powerz::arm()` writes unconditionally (never
-trusts a software armed-latch); `write_all` runs a thread-mode `dev.poll`
-sweep every 64 spins (reply drains stalled in ~50 ms steps without it);
-the grace window sweeps every pass. The stock firmware's `while (ISTR &
-CTR)` drain loop (see Tier 1 below) is the vendor's own answer here.
+**Firmware absorption:** the EPxCS-conditioned drain loop above (the
+vendor's own answer, from the stock firmware's `while (ISTR & CTR)` ISR —
+Tier 1 below); plus belt-and-braces: `powerz::arm()` writes
+unconditionally (never trusts a software armed-latch), `write_all` runs a
+thread-mode `dev.poll` sweep every 64 spins, the grace window sweeps
+every pass.
 
 ## 3. Two poll consumers interfere destructively
 

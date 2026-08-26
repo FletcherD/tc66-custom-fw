@@ -62,13 +62,15 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 60;
+const BUILD_ID: u32 = 61;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
-/// 64-B read store (one full USB packet — commands are <=10 B) instead of
-/// usbd-serial's 128-B default: the buffers live in run()'s frame, and the
-/// stack-gate budget is tight (the DMA display statics ate the slack).
-type Serial<'a> = SerialPort<'a, usb_bus::UsbBus, [u8; 64], [u8; 128]>;
+/// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
+/// write store (1.5 packets; write_all refills as the ISR drains) instead
+/// of usbd-serial's 128-B defaults: the buffers live in run()'s frame, and
+/// the stack-gate budget is tight (DMA display statics + the ISR drain
+/// loop ate the slack).
+type Serial<'a> = SerialPort<'a, usb_bus::UsbBus, [u8; 64], [u8; 96]>;
 type Pz<'a> = powerz::PowerZ<'a, usb_bus::UsbBus>;
 
 #[entry]
@@ -110,7 +112,7 @@ fn run() -> ! {
      * CDC-ACM (our protocol + updat reflash) follows on interfaces 1+2. */
     let usb_alloc = usb_bus::UsbBus::new(usb_bus::Gd32Usb);
     let mut pz = powerz::PowerZ::new(&usb_alloc);
-    let mut serial = SerialPort::new_with_store(&usb_alloc, [0u8; 64], [0u8; 128]);
+    let mut serial = SerialPort::new_with_store(&usb_alloc, [0u8; 64], [0u8; 96]);
     let mut dev = UsbDeviceBuilder::new(&usb_alloc, UsbVidPid(0x5FC9, 0x0063))
         .strings(&[StringDescriptors::default()
             .manufacturer("ChargerLAB")
@@ -169,6 +171,8 @@ fn run() -> ! {
         mk(MK_USB_FULL, 0);
         mk(MK_USB_CMDS, 0);
         mk(MK_USB_SPUR, 0);
+        mk(MK_USB_REDRAIN, 0);
+        mk(MK_USB_RDMAX, 0);
         cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USBD_LP);
         cortex_m::interrupt::enable();
     }
@@ -631,7 +635,7 @@ fn run_pending_cmds(grace_only: bool) {
     }
 }
 
-/// USBD_LP (IRQ 37): the only unmasked interrupt. Keeps the bus serviced no
+/// USBD_LP (IRQ 37). Keeps the bus serviced no
 /// matter what the main loop is doing. Everything here is bounded and short
 /// (stm32-usbd/usbd-serial never busy-wait); the long work (AES replies)
 /// stays in thread mode. MK_USB_STATE phases localize a wedge; see markers.rs.
@@ -648,22 +652,73 @@ fn USBD_LP() {
         return;
     }
     let (dev, pz, serial) = unsafe { (&mut *u.dev, &mut *u.pz, &mut *u.serial) };
-    dev.poll(&mut [&mut *pz, &mut *serial]);
-    mk(MK_USB_STATE, 2);
-    /* powerz: answer Connect/Disconnect, then make sure the pre-built ADC
-     * reply is armed (endpoint_in_complete re-arms inside poll; this covers
-     * the first arm and queued-command-reply handoffs) */
-    pz.poll_cmd();
-    pz.arm();
-    mk(MK_USB_STATE, 3);
-    if drain_serial(serial) {
-        /* ring full: park (see drain_serial) — the thread unmasks after it
-         * frees a slot, and the pending CTR refires us exactly once */
-        IRQ_PARKED.store(true, Ordering::Release);
-        cortex_m::peripheral::NVIC::mask(pac::Interrupt::USBD_LP);
+    /* Stock-firmware drain-loop shape (QUIRKS §2): service until no
+     * endpoint shows a pending transfer event, so one IRQ entry never
+     * strands a second event behind a possibly-lost re-fire. The stock ISR
+     * loops on `ISTR & CTR`; ours loops on the EPxCS ST flags instead —
+     * EPxCS reads are side-effect-free (rc_w0), while a bare ISTR read
+     * measurably consumes events on this clone (builds 50-52 A/B). Bounded:
+     * a flag poll cannot clear (e.g. usbd-serial's buffer full holding
+     * RX_ST as backpressure) must not spin the ISR — the level IRQ (or the
+     * next event) refires us for anything left behind. */
+    let mut passes = 0u32;
+    loop {
+        dev.poll(&mut [&mut *pz, &mut *serial]);
+        mk(MK_USB_STATE, 2);
+        /* powerz: answer Connect/Disconnect, then make sure the pre-built
+         * ADC reply is armed (endpoint_in_complete re-arms inside poll;
+         * this covers the first arm and queued-command-reply handoffs) */
+        pz.poll_cmd();
+        pz.arm();
+        mk(MK_USB_STATE, 3);
+        if drain_serial(serial) {
+            /* ring full: park (see drain_serial) — the thread unmasks after
+             * it frees a slot, and the pending CTR refires us exactly once */
+            IRQ_PARKED.store(true, Ordering::Release);
+            cortex_m::peripheral::NVIC::mask(pac::Interrupt::USBD_LP);
+            break;
+        }
+        passes += 1;
+        if !ep_events_pending() {
+            break;
+        }
+        if passes >= 4 {
+            /* still pending after 4 passes: something poll won't clear this
+             * entry (backpressure) — leave it for the re-fire, count it */
+            mk(MK_USB_RDMAX, mk_get(MK_USB_RDMAX) + 1);
+            break;
+        }
+    }
+    if passes > 1 {
+        /* extra same-entry service passes the drain loop earned */
+        mk(MK_USB_REDRAIN, mk_get(MK_USB_REDRAIN) + passes - 1);
     }
     mk(MK_USB_STATE, 4);
     mk(MK_USB_STATE, 0);
+}
+
+/// Any endpoint with a pending transfer event (EPxCS RX_ST bit 15 /
+/// TX_ST bit 7)? Read-only scan — EPxCS ST flags are rc_w0, so reads are
+/// side-effect-free (unlike ISTR on this clone). Unconfigured EPxCS read 0.
+#[inline(never)]
+fn ep_events_pending() -> bool {
+    let usbd = unsafe { &*pac::Usbd::ptr() };
+    for n in 0..8u32 {
+        let cs = match n {
+            0 => usbd.ep0cs().read().bits(),
+            1 => usbd.ep1cs().read().bits(),
+            2 => usbd.ep2cs().read().bits(),
+            3 => usbd.ep3cs().read().bits(),
+            4 => usbd.ep4cs().read().bits(),
+            5 => usbd.ep5cs().read().bits(),
+            6 => usbd.ep6cs().read().bits(),
+            _ => usbd.ep7cs().read().bits(),
+        };
+        if cs & 0x8080 != 0 {
+            return true;
+        }
+    }
+    false
 }
 
 /// Build + publish the powerz reply (thread mode; the copy into

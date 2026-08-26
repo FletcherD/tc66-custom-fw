@@ -130,20 +130,25 @@ K1 recovery remains for.
 
 ### Interrupt-driven servicing (the USBD_LP ISR)
 
-USB is serviced from **`USBD_LP` (IRQ 37)** — the
-only unmasked interrupt — so blocking main-loop work (an ADC burst ~1 ms,
-TFT draws, getva's ~20 ms AES) can never starve the bus; the powerz
-driver's 5 ms URB budget is met regardless of what the loop is doing.
-stm32-usbd's `enable()` sets the CNTR masks (CTRM/RESETM/SUSPM/WKUPM — no
-SOF, so the ISR is event-driven); `main()` publishes the USB object
-pointers, unmasks USBD_LP in the NVIC, and clears PRIMASK as its last init
-step. The split:
+USB is serviced from **`USBD_LP` (IRQ 37)**, so blocking main-loop work
+(an ADC burst ~1 ms, TFT flushes, getva's AES) can never starve the bus;
+the powerz driver's 5 ms URB budget is met regardless of what the loop is
+doing. stm32-usbd's `enable()` sets the CNTR masks (CTRM/RESETM/SUSPM/
+WKUPM — no SOF, so the ISR is event-driven); `run()` publishes the USB
+object pointers, unmasks USBD_LP in the NVIC, and clears PRIMASK. The
+split:
 
-- **ISR** (short, bounded): `dev.poll` (control pipe + endpoint callbacks),
-  powerz `poll_cmd`/`arm` (`endpoint_in_complete` re-arms the pre-built ADC
-  reply inside the poll), then drains complete CDC packets into `CMD_RING`
-  (reading straight into the ring slot — no scratch buffer). Phase markers
-  in the MK_USB block locate a wedge (markers.rs).
+- **ISR** (short, bounded): a **drain loop** in the stock firmware's shape
+  (QUIRKS §2): each pass runs `dev.poll` (control pipe + endpoint
+  callbacks), powerz `poll_cmd`/`arm` (`endpoint_in_complete` re-arms the
+  pre-built ADC reply inside the poll), then drains complete CDC packets
+  into `CMD_RING` (reading straight into the ring slot — no scratch
+  buffer); passes repeat while any EPxCS shows a pending RX_ST/TX_ST
+  (side-effect-free reads — NEVER condition on ISTR, a bare read consumes
+  events on this clone), bounded at 4 so backpressure (a full usbd-serial
+  buffer holding RX_ST) is left for the IRQ re-fire instead of spinning.
+  MK_USB_REDRAIN/RDMAX count the loop's work; phase markers in the MK_USB
+  block locate a wedge (markers.rs).
 - **Thread mode** (main loop): pops `CMD_RING`, dispatches commands and
   builds replies (AES etc.) with interrupts enabled, then feeds the bytes to
   usbd-serial under **short critical sections** (`with_usb`) — one buffer
@@ -155,7 +160,7 @@ Shared-state soundness (full arguments live next to each item in the code):
 
 | Item | Rule |
 |---|---|
-| `UsbPtrs` (dev/pz/serial) | one ownership unit in `main`'s frame (main never returns); ISR derives `&mut`s freely (single IRQ, no nesting), thread mode only inside `with_usb` (PRIMASK) — the two contexts are mutually exclusive, and main's locals are shadowed after publishing |
+| `UsbPtrs` (dev/pz/serial) | one ownership unit in `run`'s frame (run never returns); ISR derives `&mut`s freely (same-priority IRQs never nest, and TIMER5 never touches the USB objects), thread mode only inside `with_usb` (PRIMASK) — the two contexts are mutually exclusive, and run's locals are shadowed after publishing |
 | `CMD_RING` | SPSC slot ring; producer (`drain_serial`) runs in the ISR *or* under `interrupt::free`, consumer only in the thread loop; head/tail are single-word atomics with acquire/release pairing; on a full ring the ISR PARKS ITSELF (NVIC mask) — leaving the packet unread keeps the level-triggered CTR asserted and would refire the IRQ forever, starving the thread that must drain the ring (bench-hit livelock: 2.3M IRQs, thread frozen); the thread unmasks after popping a slot, and slots are copied out before dispatch so the ISR stays live during slow replies |
 | `powerz::REPLY` (52 B) | multi-word, but only reachable through `PowerZ` methods, which are only reachable via the mutually-exclusive contexts above — `set_payload` (thread, in CS) can never tear an `arm` read (ISR) |
 | `PUBLISHED` (`Meas`) | thread-mode only — the ISR's data comes from `REPLY`, refreshed once per 4 ms tick |

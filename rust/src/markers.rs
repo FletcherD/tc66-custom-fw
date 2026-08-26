@@ -54,7 +54,15 @@ pub const MK_USB_SPUR: usize = MK_USB_BASE + 0x14; // ISR entries before the USB
                                                    // pointers were published (must
                                                    // stay 0 — nonzero means the IRQ
                                                    // was unmasked too early)
-// +0x18..+0x2c reserved for the USB block
+pub const MK_USB_REDRAIN: usize = MK_USB_BASE + 0x18; // extra same-entry service
+                                                      // passes the ISR drain loop
+                                                      // took (events that would
+                                                      // have needed a re-fire)
+pub const MK_USB_RDMAX: usize = MK_USB_BASE + 0x1c; // drain loop hit its 4-pass
+                                                    // bound with EPxCS still
+                                                    // pending (backpressure left
+                                                    // for the re-fire)
+// +0x20..+0x2c reserved for the USB block
 
 /* Sampler interrupt block (ina.rs: TIMER5_DAC ISR @ 250 Hz + its main-loop
  * `service()` half). Writers noted per word; single-writer per word except

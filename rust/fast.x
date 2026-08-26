@@ -52,6 +52,7 @@ SECTIONS
     *(.text.*7tc66_fw3ina*);            /* sampler tick, cal math */
     *(.text.*7tc66_fw3i2c*);            /* I2C read inside the ISR */
     *(.text.*12drain_serial*);
+    *(.text.*17ep_events_pending*); /* the ISR drain-loop condition */
     *(.text.*7tc66_fw6powerz*);         /* poll_cmd/arm/set_payload */
     *(.text.*6UsbBus4poll*);            /* stm32_usbd bus poll */
     *(.text.*10stm32_usbd8endpoint*);   /* endpoint + PMA access */
