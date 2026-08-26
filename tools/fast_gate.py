@@ -28,7 +28,7 @@ CRITICAL = [
     "9sub_bytes",
     "11xor_columns",
     "13mix_columns_",
-    "5getva5build",
+    "5getva9build_raw",  # rawva streaming; getva5build is deliberately slow (fast.x)
     "11u64_div_rem",
     "3mem6memcpy",
 ]

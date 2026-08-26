@@ -38,6 +38,11 @@ SECTIONS
     *(.text.*19aes256_key_schedule*);   /* one-shot, boot (getva::init) */
     *(.text.*7try_cal*);                /* boot + 0.25 s retries until cal */
     *(.text.*8UsbError*);
+    /* getva::build (encrypted compat packet, 1.2 KB): the first casualty of
+     * the documented squeeze order — getva = compat, spills first. The AES
+     * inner loops and build_raw (rawva streaming) stay in tier 4. Does NOT
+     * match 5getva9build_raw (length-prefixed mangling). */
+    *(.text.*5getva5build*);
   } > FLASH
 } INSERT AFTER .text;
 

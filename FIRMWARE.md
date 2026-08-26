@@ -534,7 +534,11 @@ The GD32F150 fetches zero-wait only below **0x0800_8000**; above it every
 fetch takes "a long delay" (~10x, bench-measured — QUIRKS.md §4). The app
 image spans the boundary, so placement decides performance: moving the hot
 path fast took getva 48.6 → 2.3 ms, rawva 9.2 → 0.6 ms, query 4.5 → 0.2 ms
-and erased the ~8 ms latency staircase.
+and erased the ~8 ms latency staircase. (The M4 code growth has since spent
+the region: `getva::build` — the encrypted compat packet builder, not the
+AES loops or `build_raw` — is now deliberately `.slowtext`, the first
+casualty of the documented spill order; expect getva somewhat above that
+2.3 ms figure.)
 
 `rust/fast.x` defines `.fasttext` (priority-ordered hot patterns, placed
 right after the vector table; the TAIL of the list is what spills past the

@@ -9,4 +9,5 @@ fn main() {
     println!("cargo:rustc-link-search={}", out.display());
     println!("cargo:rerun-if-changed=memory.x");
     println!("cargo:rerun-if-changed=flasher.x");
+    println!("cargo:rerun-if-changed=fast.x"); /* else fast.x edits don't relink */
 }
