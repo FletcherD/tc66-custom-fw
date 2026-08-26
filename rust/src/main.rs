@@ -52,6 +52,8 @@ mod markers;
 #[cfg(feature = "dev-verbs")]
 mod pd;
 mod powerz;
+#[cfg(feature = "dev-verbs")]
+mod qc;
 mod startup;
 mod tft;
 mod ui;
@@ -67,7 +69,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 75;
+const BUILD_ID: u32 = 76;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -392,6 +394,20 @@ fn on_packet(buf: &[u8]) {
             };
             reply_ok_er(r);
         }
+    } else if match5(buf, b"qctrg") {
+        #[cfg(feature = "dev-verbs")]
+        {
+            /* qctrg <mode>: QC2.0 D+/D- trigger, mode 0/1/2/3 = 5/9/12/20 V
+             * (blocks ~1.5 s on the first call — QC entry). Raises OUT V. */
+            let r = match buf.get(5) {
+                Some(&m) => qc::trigger(m),
+                None => Err(0x0F),
+            };
+            reply_ok_er(r);
+        }
+    } else if match5(buf, b"qcoff") {
+        #[cfg(feature = "dev-verbs")]
+        reply_ok_er(qc::off());
     } else if match5(buf, b"tftfl") {
         #[cfg(feature = "dev-verbs")]
         {
