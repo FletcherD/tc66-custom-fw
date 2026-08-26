@@ -2,4 +2,6 @@
 target = "thumbv7m-none-eabi"
 
 [target.thumbv7m-none-eabi]
-rustflags = ["-C", "link-arg=-Tlink.x", "-C", "link-arg=-Tflasher.x"]
+# fast.x must precede link.x: input-section patterns claim in script order,
+# and .fasttext has to steal its hot functions before link.x's .text glob.
+rustflags = ["-C", "link-arg=-Tfast.x", "-C", "link-arg=-Tlink.x", "-C", "link-arg=-Tflasher.x"]

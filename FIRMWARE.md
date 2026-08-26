@@ -362,10 +362,52 @@ All wrapped in `rust/Makefile`:
   the repo root; Pico debugprobe wiring in HARDWARE.md).
 - Build gates, run on every build: **flasher-gate** (`.flasher` is
   self-contained), **init-gate** (data/bss init symbols inside real RAM),
+  **stack-gate**, **fast-gate** (hot path below the fast-flash boundary),
   **header gate** (SP = 0x20000e40, reset vector Thumb + in-slot, size fits).
 
 Bump `BUILD_ID` in `main.rs` when flashing; reading `MK_BUILD` (0x20001060)
 back proves the new image is actually running.
+
+### Fast-flash placement (`fast.x` + `make fast-gate`)
+
+The GD32F150 fetches zero-wait only below **0x0800_8000**; above it every
+fetch takes "a long delay" (~10x, bench-measured — QUIRKS.md §4). The app
+image spans the boundary, so placement decides performance: moving the hot
+path fast took getva 48.6 → 2.3 ms, rawva 9.2 → 0.6 ms, query 4.5 → 0.2 ms
+and erased the ~8 ms latency staircase.
+
+`rust/fast.x` defines `.fasttext` (priority-ordered hot patterns, placed
+right after the vector table; the TAIL of the list is what spills past the
+boundary if it outgrows the region) and `.slowtext` (cold enum-time/one-shot
+machinery force-demoted so the hot globs can't drag it in — mangled generic
+names contain type-parameter crates, so crate globs over-match). Mechanics
+that are load-bearing: fast.x must be passed to the linker BEFORE link.x
+(input sections are claimed in script order); `_stext = __efasttext`
+overrides link.x so `.text` follows contiguously. `make fast-gate`
+(tools/fast_gate.py) fails the build if a critical symbol (ISRs, USB poll
+path, AES/getva) lands above the boundary, and reports the budget. The
+linker emits `__Thumbv7ABSLongThunk_*` veneers for some cross-section
+calls; stack_gate.py collapses them in its call graph.
+
+When adding code, decide its region: hot loops → a fast.x tier (and check
+the fast-gate report); straight-line per-command code tolerates slow (one
+traversal costs µs). The TFT path is deliberately slow-region until the
+spi-dma refactor lands. Re-measure with the PC profiler (below) after
+moving things.
+
+### PC profiler (`pcprf` verb + tools/pcprofile.py)
+
+The chip's DWT is a stub (PCSR reads 0xFFFFFFFF, CYCCNT never counts), so
+hardware PC sampling is unavailable. Instead the TIMER5_DAC entry veneer
+(ina.rs, cargo feature `pcprf`, default on — `--no-default-features` drops
+it) records the interrupted context's PC from the exception frame into a
+128-entry SRAM ring at 0x2000_1100 (markers.rs) at 250 Hz; the `pcprf`
+verb dumps counter+ring over CDC and `tools/pcprofile.py <elf> [secs]
+[--load getva:192]` polls, dedups, symbolizes, and histograms — no SWD, no
+wedge risk. Biases: thread-mode PCs only (USBD_LP time lands on the
+interrupted thread PC via tail-chaining, TIMER5's own work is invisible);
+tick-cadence thread work is under-sampled; the polling itself is visible
+(do_pcprf + memcpy) — read around it.
 
 ### The debug reality (the chip is readout-protected)
 

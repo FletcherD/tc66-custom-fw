@@ -60,7 +60,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 50;
+const BUILD_ID: u32 = 58;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 type Serial<'a> = SerialPort<'a, usb_bus::UsbBus>;
@@ -208,11 +208,11 @@ fn run() -> ! {
      * (ui.rs dirty tracking), so an idle refresh costs nothing */
     let mut ui_ticks: u32 = 0;
 
-    /* Screen idle timeout: after 10 min with no measurable input the panel
+    /* Screen idle timeout: after 15 s with no measurable input the panel
      * is blanked (DISPOFF + backlight off) — an overnight static screen
      * caused real LCD image persistence. Activity = bus voltage above
      * 2.5 V or current above 1 mA; wake within a second of either. */
-    const IDLE_OFF_SECS: u32 = 600;
+    const IDLE_OFF_SECS: u32 = 15;
     let mut idle_secs: u32 = 0;
 
     let mut last_ticks = ina::ticks();
@@ -314,6 +314,9 @@ fn on_packet(buf: &[u8]) {
         do_getva();
     } else if match5(buf, b"rawva") {
         do_rawva();
+    } else if match5(buf, b"pcprf") {
+        #[cfg(feature = "pcprf")]
+        do_pcprf();
     } else if match5(buf, b"i2crd") {
         do_i2crd(buf);
     } else if match5(buf, b"adcrd") {
@@ -372,6 +375,25 @@ fn do_getva() {
     let mut reply = [0u8; 192];
     getva::build(&mut reply, &live_fields());
     write_all(&reply);
+}
+
+/// dev verb: dump the TIMER5-veneer PC-profiler ring (markers.rs
+/// MK_PCPRF_BASE): u32 LE total-sample counter + 128 u32 LE PCs. The ISR
+/// keeps writing during the copy — the host drops the newest few entries
+/// per poll to stay consistent (tools/pcprofile.py).
+#[cfg(feature = "pcprf")]
+#[inline(never)]
+fn do_pcprf() {
+    /* 129 words (counter + ring) in three 43-word chunks: one 516-B stack
+     * buffer here put the deepest thread chain over the stack-gate budget */
+    let mut chunk = [0u8; 4 * 43];
+    for c in 0..3 {
+        for i in 0..43 {
+            let v = mk_get(MK_PCPRF_BASE + 4 * (43 * c + i));
+            chunk[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        write_all(&chunk);
+    }
 }
 
 /// dev verb: same fields as getva, plaintext + CRC16, no AES — for fast

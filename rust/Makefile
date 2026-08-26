@@ -27,7 +27,12 @@ print('init-gate ok: data/bss init bounded to %s..%s' % (hex(min(syms.values()))
 stack-gate: build
 	@python3 ../tools/stack_gate.py $(ELF)
 
-tc66fw.bin: build flasher-gate init-gate stack-gate
+# Hot path must sit below 0x08008000 (zero-wait flash — QUIRKS §4); fast.x
+# places it, this proves it and reports the region budget.
+fast-gate: build
+	@python3 ../tools/fast_gate.py $(ELF)
+
+tc66fw.bin: build flasher-gate init-gate stack-gate fast-gate
 	arm-none-eabi-objcopy -O binary $(ELF) tc66fw.bin
 	@python3 -c "import struct; d = open('tc66fw.bin','rb').read(); \
 sp, rst = struct.unpack('<II', d[:8]); \
@@ -70,4 +75,4 @@ clean:
 	cargo clean
 	rm -f tc66fw.bin tc66fw.pad.bin tc66fw.enc.bin
 
-.PHONY: all build flasher-gate init-gate stack-gate flash recover markers clean
+.PHONY: all build flasher-gate init-gate stack-gate fast-gate flash recover markers clean

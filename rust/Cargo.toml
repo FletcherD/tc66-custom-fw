@@ -3,6 +3,13 @@ name = "tc66-fw"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# pcprf: the TIMER5-veneer PC profiler (ina.rs) + its `pcprf` dump verb.
+# On by default; build with --no-default-features to drop the sampling
+# veneer (TIMER5_DAC then branches straight to the tick body).
+default = ["pcprf"]
+pcprf = []
+
 [dependencies]
 cortex-m = { version = "0.7.9", features = ["critical-section-single-core"] }
 stm32-usbd = "0.8"

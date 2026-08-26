@@ -19,6 +19,11 @@ power meter. Everything here is what the firmware needs to drive the board.
 | Config page | `0x0800fc00 – 0x08010000` | Per-unit config (serial, cal flag, etc.). **Do not erase/overwrite.** |
 | SRAM | `0x20000000 – 0x20002000` (8 KB) | |
 
+**Flash speed boundary at `0x0800_8000`:** fetches below it are zero-wait;
+above it each fetch takes "a long delay" (UM §1.3.3/§2.2 — measured ~10x on
+this unit). The app spans the boundary, so hot code must be placed below it
+(FIRMWARE.md "Fast-flash placement", `rust/fast.x` + `make fast-gate`).
+
 ### Application requirements (enforced by the bootloader)
 
 The bootloader hands control to the app on a normal boot **only if**:
@@ -94,6 +99,7 @@ Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the firs
 | `gtrec` | N×8 B + `reck` | dump the on-device ~1 Hz V/I log |
 | `updat` | `uprdy`, then per-chunk `OK` | our app self-update |
 | `rawva` | 46 B plaintext | our dev verb: getva fields + window seq, no AES — use for streaming (tools/rawva.py) |
+| `pcprf` | 516 B plaintext | our dev verb: PC-profiler ring dump (u32 counter + 128 u32 PCs; FIRMWARE.md "PC profiler", tools/pcprofile.py) |
 | `i2crd` | `OK`+data / `ER`+diag | our dev verb: raw I²C read (tools/i2cread.py) |
 | `adcrd` | `OK`+u32 / `ER`+stage | our dev verb: ADC sum-of-16 (tools/adcread.py) |
 | `tftfl` | `OK` / `ER`+stage | our dev verb: TFT test pattern (no args) or solid fill (RGB565 LE u16) (tools/tft.py) |

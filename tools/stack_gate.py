@@ -114,6 +114,28 @@ def parse(disasm):
             # mid-function jump — only whole-symbol targets are calls
             if m.group(3) is None:
                 cur["calls"].add(m.group(2))
+
+    # Collapse linker-generated long-branch veneers (fast.x's section
+    # placement makes lld emit them): a thunk is a stackless trampoline to
+    # exactly one target, so rewrite callers to call the target directly.
+    # Leaving them in would double-count PRE_IRQ_ROOTS matches and hide the
+    # real caller behind the veneer.
+    thunks = {}
+    prefix = "__Thumbv7ABSLongThunk"
+    for name, f in funcs.items():
+        if name.startswith(prefix):
+            assert f["frame"] == 0, f"thunk {name} has a stack frame"
+            # the body is movw/movt+bx (no parseable branch): the target is
+            # encoded in the symbol name (lld separates with an underscore:
+            # __Thumbv7ABSLongThunk_<target>)
+            target = name[len(prefix):]
+            if target not in funcs and target[1:] in funcs:
+                target = target[1:]
+            thunks[name] = target
+    for name in thunks:
+        del funcs[name]
+    for f in funcs.values():
+        f["calls"] = {thunks.get(c, c) for c in f["calls"]}
     return funcs
 
 

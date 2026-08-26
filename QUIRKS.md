@@ -51,10 +51,31 @@ instead:
   the ISR never firing — until the *next packet's edge*: a dummy "chaser"
   packet sent 2 ms after a command cut round-trip latency 2–4×.
 
+**Manual audit (2026-08-25):** unlike STM32's RM0008, the GD32F1x0 UM
+(§22.7.2) marks STIF access "r" with *no documented clear mechanism* and
+never promises it stays asserted as a summary of pending EPxCS ST flags —
+the level-triggered guarantee we assumed is an STM32 documentation
+property GigaDevice does not make. The UM's own vocabulary (§23.1) even
+includes an rc_r "read clears it" flag class.
+
+**A/B experiment (2026-08-25, builds 50–52):** the bare diagnostic
+`read_volatile(ISTR)` at USBD_LP entry (MK_USB_ISTR) vs deleted, measured
+by pure EP1-IN reads against the powerz dbg counters:
+- read present, slow-flash build: **0%** of consumed replies produced an
+  `endpoint_in_complete` callback (0/401) — the read consumes the event
+  before `dev.poll` sees it;
+- read deleted, slow-flash build: **50.4%** (202/401) — better, still lossy;
+- read present, **fast-flash build 55** (§4 fix): **>100%** (588/401) —
+  with the whole ISR path fetching zero-wait, events flow; the residual
+  loss on slow builds was the ISR being too slow to keep up, not only the
+  read. CDC latency was identical in all three (the unconditional-arm +
+  write_all-sweep absorptions mask event loss completely).
+
 **Firmware absorption:** `powerz::arm()` writes unconditionally (never
 trusts a software armed-latch); `write_all` runs a thread-mode `dev.poll`
 sweep every 64 spins (reply drains stalled in ~50 ms steps without it);
-the grace window sweeps every pass.
+the grace window sweeps every pass. The stock firmware's `while (ISTR &
+CTR)` drain loop (see Tier 1 below) is the vendor's own answer here.
 
 ## 3. Two poll consumers interfere destructively
 
@@ -64,21 +85,30 @@ thread-mode `dev.poll` sweeps gives 24 / 93 ms — *identical* at 4 ms-cadence
 and per-pass cadence, so the harm is per-transaction (some stateful
 ISTR/EPnR interaction between contexts), not timing contention. This is why
 the main loop deliberately does NOT sweep (see the comment in main.rs).
-Residual latency shows ~8 ms quantization that looks like a host NAK-retry
-schedule (possibly the hub TT's).
+Manual note (2026-08-25 audit): UM §22.6.2 flatly forbids touching an
+enabled endpoint's EPxCS/COUNT until its STIF event — a restriction STM32
+doesn't have and the whole stm32-usbd toggle-write model ignores.
 
-## 4. Soft AES-256 is ~20 ms when ~1–5 ms is expected
+**~8 ms quantization: RESOLVED (2026-08-25).** The residual latency
+staircase was slow-flash instruction fetch (§4), not a host NAK-retry
+schedule: with the USB path in the fast region (build 55+), query fell
+8 → 0.2 ms, rawva 36 → 0.7 ms, getva 48 → 2.3 ms — the quanta are gone
+entirely. Whether the two-consumer harm itself persists on a fast-flash
+build has not been re-measured (the absorptions stay in place).
 
-**Confidence: measured, cause unresolved.** Every measurement so far ran
-while the host was NAK-polling for the reply (unavoidable in
-request/response), so §1's fetch-stall and a genuine flash misconfiguration
-are confounded. Note `clock_init` never touches the FMC wait-state/prefetch
-config — we inherit whatever the bootloader set.
+## 4. Soft AES-256 is ~20 ms when ~1–5 ms is expected — RESOLVED
 
-**Discriminating experiment (cheap, not yet run):** time `getva::build`
-with device-side SysTick stamps but *report* the result in a later reply,
-so nothing polls during the measurement. Also dump the FMC wait-state
-register via a dev verb.
+**Documented hardware behavior, fixed (2026-08-25).** The GD32F150 fetches
+zero-wait only from the first 32 KB of flash (0x0800_0000–0x0800_7FFF);
+above that the datasheet/UM promise "a long delay" per fetch (UM §1.3.3 /
+§2.2, datasheet §3.2 — the GD32 serial-flash architecture; FMC_WS is
+irrelevant, it configures the fast region). The linker had put the entire
+AES implementation above the boundary. **Fix: `rust/fast.x`** pins the hot
+path (ISRs, USB stack, AES/getva, main loop) below 0x0800_8000, enforced
+by `make fast-gate`. Measured effect (build 53 vs 52, same code): getva
+48.6 → 3.4 ms, rawva 9.2 → 1.3 ms, query 4.5 → 0.7 ms; the ~10x slow-fetch
+factor also explains most of §1's "AES slowed by NAK storms" confound and
+all of §3's ~8 ms staircase.
 
 ## 5. Not silicon, but adjacent (documented elsewhere, listed for map)
 
@@ -95,15 +125,34 @@ register via a dev verb.
 The stock firmware is production code running on this exact silicon —
 a uniquely good discriminator, in two tiers:
 
-**Tier 1 — static analysis (free, no flashing):** `firmware/V118.bin`
-decrypts with the known image AES key. Read out:
-- The vector table: does stock enable/use the USBD interrupt at all, or is
-  it purely polled? If stock uses the IRQ, its handler will contain any
-  vendor workarounds for §2 — a cheat sheet. If stock is purely polled,
-  that is soft evidence the vendor avoided the IRQ path on purpose.
-- The clock init: does stock program FMC wait states/prefetch (§4)?
-- The USB service loop shape: continuous polling (would mask §1–§3
-  entirely, matching our polled builds' behavior).
+**Tier 1 — static analysis (free, no flashing): DONE (2026-08-25).** Answers
+below; full write-up + Ghidra annotations in
+`~/tc66/firmware/ghidra/STOCK_USB_ARCH.md`.
+
+- **Vector table — does stock use the USBD interrupt?** YES. A real USBD ISR is
+  installed at vector idx 53 (**IRQ37 = USBD_LP**), `usbd_lp_isr @0x08007ee0`
+  (reads USB_ISTR @0x40005c44, handles CTR/RESET/SUSP/SOF/ESOF/PMAOVR). Stock is
+  **fully interrupt-driven** for USB, not polled — so if our polled builds "work"
+  it's polling masking the symptom, not the vendor also avoiding the IRQ.
+  - **§2 cheat-sheet:** the CTR handler `usb_ctr_drain_loop @0x08007d50` is the
+    classic **`while (ISTR & CTR)` drain loop** — re-read ISTR each pass, dispatch
+    on `ISTR & 0xf` (EP_ID), service **all** pending EP events per IRQ entry, clear
+    CTR per-endpoint via EPnR (never via ISTR). That is the fix for "events lost /
+    IRQ doesn't re-assert": don't trust one CTR per IRQ; loop until CTR clears.
+- **Clock init — does stock program FMC wait states/prefetch (§4)?** NO.
+  `SystemInit @0x08004f70` touches **RCU only** (PLL ×12 from HSI/2 → 48 MHz); it
+  never references FMC (0x40022000). The only FMC users are the flash prog/erase
+  helpers, none of which write FMC_WS. **Stock inherits the bootloader's FMC config
+  exactly like we do** → FMC is *not* a stock-vs-us difference; §4 stays open (read
+  the bootloader or `*0x40022000` live). NB: SystemInit computes **48 MHz**, not the
+  72 MHz in FINDINGS — this changes the "expected AES time" baseline.
+- **USB service-loop shape.** HYBRID: ISR fills a **software** RX buffer
+  (`@0x20000370`) + ready flag (`@0x20000001`); the main superloop calls
+  `usb_command_dispatcher @0x080054b8` once/pass and reads only that buffer — it
+  **never touches ISTR/EPnR**. So there is exactly ONE hw consumer (the ISR), which
+  is structurally why stock avoids §3 (two-poll-consumer ISTR/EPnR interference) and
+  sidesteps §1's register-access stall in steady state. (getva reply = 3×64 B with a
+  fixed `delay_ms(10)` between blocks — the source of the observed cadence.)
 
 **Tier 2 — dynamic (costs one K1 cycle to return!):** flash stock, measure
 getva RTT distribution at several poll rates through the same hub/host. If

@@ -34,7 +34,7 @@ pub const MK_WINDOWS: usize = 0x2000_1068; // completed sample windows, ~10.4 Hz
  * error/status snapshot; words 3..11 subsystem-defined — DOCUMENT every
  * slot you claim here, next to its constant. Read with `make markers`
  * (covers 0x1000..0x1100). Only ever write via mk() (volatile).
- * The window ends at 0x20001400 (flasher); 0x1100..0x1400 is free. */
+ * The window ends at 0x20001400 (flasher); 0x1304..0x1400 is free. */
 
 /* USB interrupt-path block: the USBD_LP ISR + command ring (main.rs).
  * All words are single-writer (ISR, or thread mode under interrupt::free
@@ -88,6 +88,13 @@ pub const MK_SMP_ADCE: usize = MK_SMP_BASE + 0x18;
 
 /* display/DMA block (spi-dma refactor) */
 pub const MK_DSP_BASE: usize = 0x2000_10d0; // +0 state, +4 evt count, +8 status
+
+/* PC-profiler ring (the TIMER5_DAC entry veneer in ina.rs — address is
+ * hardcoded in its asm): +0 = total-samples counter, +4..+0x204 = 128-entry
+ * ring of interrupted-context PCs, one per 4 ms tick. Read over CDC with
+ * the `pcprf` verb (tools/pcprofile.py); the chip's DWT PCSR is a stub. */
+pub const MK_PCPRF_BASE: usize = 0x2000_1100;
+pub const PCPRF_RING: usize = 128;
 
 pub const STAGE_CLOCK: u32 = 1; // 48 MHz clock + USB clock configured
 pub const STAGE_USB_INIT: u32 = 2; // USB peripheral powered + connected

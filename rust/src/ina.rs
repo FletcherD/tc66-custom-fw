@@ -73,7 +73,6 @@ use crate::markers::{
     MK_SMP_IRQS, MK_SMP_SECS, MK_SMP_STATE, MK_WINDOWS,
 };
 use gd32f1::gd32f150 as pac;
-use pac::interrupt;
 
 const INA_ADDR: u8 = 0x4A;
 const EEPROM_ADDR: u8 = 0x50;
@@ -336,6 +335,8 @@ pub fn start(rcu: &pac::Rcu, tim: &pac::Timer5) {
     for w in 0..7 {
         mk(MK_SMP_BASE + 4 * w, 0);
     }
+    #[cfg(feature = "pcprf")]
+    mk(crate::markers::MK_PCPRF_BASE, 0); /* PC-profiler sample counter */
 
     /* first cal attempt: IRQ not yet enabled, so I2C is exclusively ours */
     try_cal();
@@ -393,11 +394,54 @@ fn adc_burst() {
 
 /* ---------------- the ISR ---------------- */
 
-/// 250 Hz sampler tick. Budget: one I2C read ~0.5 ms (~12% CPU); the
-/// window-publish tick adds a few us of integer math; worst case the
-/// 1 s drain coincides (+ ~2 us). No ADC, no USB, no floats in here.
-#[interrupt]
-fn TIMER5_DAC() {
+/* TIMER5_DAC entry veneer: a statistical PC profiler for free. Before the
+ * tick body runs, grab the interrupted context's PC from the hardware
+ * exception frame (sp[6]: r0,r1,r2,r3,r12,lr,PC,xPSR) into a 128-entry
+ * SRAM ring at PC_RING (markers.rs: counter word + ring, 0x2000_1100 —
+ * read out over CDC via the `pcprf` verb, tools/pcprofile.py). The chip's
+ * DWT is a stub (PCSR reads 0xFFFFFFFF, CYCCNT never counts), so this is
+ * the only PC sampling this hardware gets. Samples thread mode (and
+ * attributes USBD_LP time to the interrupted thread PC on tail-chains);
+ * tick-cadence thread work is under-sampled (it runs just after ticks).
+ * r0-r3 are stacked = free; LR (EXC_RETURN) is untouched, so the body
+ * returns from the exception like any plain handler. Feature-gated:
+ * `pcprf` (default on) — without it the vector branches straight to the
+ * body. */
+#[cfg(feature = "pcprf")]
+core::arch::global_asm!(
+    ".section .text.TIMER5_DAC, \"ax\", %progbits",
+    ".global TIMER5_DAC",
+    ".type TIMER5_DAC, %function",
+    ".thumb_func",
+    "TIMER5_DAC:",
+    "ldr r0, [sp, #24]",     // stacked PC
+    "ldr r1, =0x20001100",   // PC_RING: [0] = counter, [1..129] = samples
+    "ldr r2, [r1]",
+    "and r3, r2, #127",
+    "adds r2, #1",
+    "str r2, [r1]",
+    "add r3, r1, r3, lsl #2",
+    "str r0, [r3, #4]",
+    "b {body}",
+    body = sym timer5_body,
+);
+
+#[cfg(not(feature = "pcprf"))]
+core::arch::global_asm!(
+    ".section .text.TIMER5_DAC, \"ax\", %progbits",
+    ".global TIMER5_DAC",
+    ".type TIMER5_DAC, %function",
+    ".thumb_func",
+    "TIMER5_DAC:",
+    "b {body}",
+    body = sym timer5_body,
+);
+
+/// 250 Hz sampler tick (body — entered via the profiling veneer above).
+/// Budget: one I2C read ~0.5 ms (~12% CPU); the window-publish tick adds a
+/// few us of integer math; worst case the 1 s drain coincides (+ ~2 us).
+/// No ADC, no USB, no floats in here.
+extern "C" fn timer5_body() {
     let tim = unsafe { &*pac::Timer5::ptr() };
     tim.intf().write(|w| w); /* clear UPIF (write-0-to-clear) */
     let n = TICKS.fetch_add(1, Ordering::Relaxed).wrapping_add(1);

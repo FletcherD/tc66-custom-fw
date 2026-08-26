@@ -29,7 +29,12 @@ gone) — our own protocol on top of a compatible base, and room to add features
   verb with a window sequence number for fast lossless streaming
   (`tools/rawva.py`). Verified live on hardware.
 - **M3 — display basics: done.** ST7735S driver + always-on V/I/P main screen
-  (webcam-verified), 10-min idle screen-off (burn-in protection).
+  (webcam-verified), 15 s idle screen-off (burn-in protection).
+- **Fast-flash placement: done.** Hot path pinned below the GD32's 32 KB
+  zero-wait flash boundary (`rust/fast.x` + `make fast-gate`): query 0.2 ms,
+  rawva 0.6 ms, getva 2.3 ms round-trip (were 4.5/9/49); powerz sustains
+  >5000 reads/s. Profile-guided via the on-device 250 Hz PC sampler
+  (`pcprf` verb + `tools/pcprofile.py` — the chip's DWT is a stub).
 - **USB architecture: interrupt-serviced, bench-verified.** The USBD_LP ISR
   keeps the bus served regardless of main-loop work; the device is a
   composite that also emulates a ChargerLAB POWER-Z KM003C, so the mainline
@@ -43,14 +48,13 @@ gone) — our own protocol on top of a compatible base, and room to add features
   - **M2 — persistence** (real serial/run-count, energy write-back to the
     wear-leveled EEPROM journal, `gtrec` log, EEPROM writes in the I²C
     driver).
-  - Trial + merge the remaining refactor branches: `refactor/sampler-irq`
-    (250 Hz sampler ISR, evenly-interleaved shunt/shunt/vbus reads) and
-    `refactor/spi-dma` (non-blocking DMA pixel engine; its SPI0_TX→DMA-ch2
-    mapping is manual-derived, unverified). Both predate the current master
-    — merge master INTO them first; their stack-gate variants lose to
-    master's.
-  - CDC latency root cause (~8 ms retry quanta; QUIRKS.md §3) and the
-    stock-firmware comparison (QUIRKS.md, bottom).
+  - Trial + merge the remaining refactor branch: `refactor/spi-dma`
+    (non-blocking DMA pixel engine; its SPI0_TX→DMA-ch2 mapping is
+    manual-derived, unverified). It predates the current master — merge
+    master INTO it first. (`refactor/sampler-irq` is merged; the TFT path
+    is deliberately kept out of fast flash awaiting this branch.)
+  - The remaining QUIRKS.md open items (§1 NAK/APB stalls, §2 residual
+    event-loss mechanism) and stock-firmware Tier 2 comparison.
   - Richer M3 screens (energy, temp, D±); **M4 — stretch** (BLE mirror;
     USB-PD / QC trigger via the on-board FUSB302 — the KM003C protocol's
     AdcQueue/PD-capture attributes are the natural wire format).
