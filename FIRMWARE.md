@@ -107,18 +107,22 @@ events, and any reset is processed by `dev.poll` (which programs the EPnR
 address fields) before `poll_cmd`/`arm` touch an endpoint. The grace window
 serves only CDC (no powerz endpoint writes). Keep it that way.
 
-### Boot phase 1: the grace window (pseudo-bootloader)
+### The grace window (pseudo-bootloader)
 
-The first ~10 s after boot serve ONLY `query`→`firm` and `updat`, with USB
-POLLED and all interrupts masked — no TFT, sampler, or powerz service. A
-fault in anything that starts later is recovered by power-cycling and
-running `make flash` inside the window (no K1): the flash path never
-depends on the ISR machinery. `MK_PROBE` reads `0x6ACE6ACE` while the
-window is open. Standalone (no host) boots just wait out the 10 s.
+The first ~10 s after the IRQ unmask dispatch ONLY `query`→`firm` and
+`updat` — no TFT, sampler, I2C/ADC, or full command set. USB runs on the
+same ISR + ring machinery as normal operation (one code path; the thread
+does nothing but drain the ring, so the ring-full livelock below cannot
+occur here). A fault in any feature that starts later is recovered by
+power-cycling and running `make flash` inside the window (no K1; escape
+drill bench-verified). `MK_PROBE` reads `0x6ACE6ACE` while the window is
+open. Standalone (no host) boots just wait out the 10 s. If the ISR/ring
+machinery itself is ever broken, the window cannot save you — that is what
+K1 recovery remains for.
 
-### Boot phase 2: interrupt-driven servicing (the USBD_LP ISR)
+### Interrupt-driven servicing (the USBD_LP ISR)
 
-After the grace window, USB is serviced from **`USBD_LP` (IRQ 37)** — the
+USB is serviced from **`USBD_LP` (IRQ 37)** — the
 only unmasked interrupt — so blocking main-loop work (an ADC burst ~1 ms,
 TFT draws, getva's ~20 ms AES) can never starve the bus; the powerz
 driver's 5 ms URB budget is met regardless of what the loop is doing.
@@ -144,7 +148,7 @@ Shared-state soundness (full arguments live next to each item in the code):
 | Item | Rule |
 |---|---|
 | `UsbPtrs` (dev/pz/serial) | one ownership unit in `main`'s frame (main never returns); ISR derives `&mut`s freely (single IRQ, no nesting), thread mode only inside `with_usb` (PRIMASK) — the two contexts are mutually exclusive, and main's locals are shadowed after publishing |
-| `CMD_RING` | SPSC slot ring; producer (`drain_serial`) runs in the ISR *or* under `interrupt::free`, consumer only in the thread loop; head/tail are single-word atomics with acquire/release pairing; a full ring stops reading usbd-serial → bytes back up and NAK the endpoint (backpressure, not loss), and main re-drains after freeing a slot |
+| `CMD_RING` | SPSC slot ring; producer (`drain_serial`) runs in the ISR *or* under `interrupt::free`, consumer only in the thread loop; head/tail are single-word atomics with acquire/release pairing; on a full ring the ISR PARKS ITSELF (NVIC mask) — leaving the packet unread keeps the level-triggered CTR asserted and would refire the IRQ forever, starving the thread that must drain the ring (bench-hit livelock: 2.3M IRQs, thread frozen); the thread unmasks after popping a slot, and slots are copied out before dispatch so the ISR stays live during slow replies |
 | `powerz::REPLY` (52 B) | multi-word, but only reachable through `PowerZ` methods, which are only reachable via the mutually-exclusive contexts above — `set_payload` (thread, in CS) can never tear an `arm` read (ISR) |
 | `PUBLISHED` (`Meas`) | thread-mode only — the ISR's data comes from `REPLY`, refreshed once per 4 ms tick |
 | markers | single-word volatile writes (naturally atomic on M3); every counter has a single writer context (see markers.rs) |
