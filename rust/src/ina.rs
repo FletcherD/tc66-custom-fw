@@ -104,57 +104,20 @@ fn d_line_1e2(sum16: u32) -> u32 {
     sum16 * 330 / 65520
 }
 
-/// NTC temperature — the STOCK model (10k @ 25 C, beta = 3450, bottom of an
-/// 11.5k divider; HARDWARE.md "Temperature (NTC) & D±") as an integer LUT:
-/// entry i = the largest sum16 still reading (T0+i) °C, precomputed from
-///   R = avg*11500/(4095-avg);  T = 1/(1/298.15 + ln(R/10000)/3450)
-/// by tools/mkntclut.py. Bit-exact vs the float version across the whole
-/// -40..125 range (except the one LSB at exactly -40) — the LUT exists
-/// because the β-equation was the firmware's only float user and its
-/// logf+soft-float support cost ~2 KB of flash the PD engine needed.
+/// NTC temperature — the STOCK model, recovered exactly from the stock
+/// firmware (HARDWARE.md "Temperature (NTC) & D±"): 10k @ 25 C, beta = 3450,
+/// on the bottom of an 11.5k divider:
+///   R = avg * 11500 / (4095 - avg);  T = 1/(1/298.15 + ln(R/10000)/3450)
 /// (Stock reads ch3 on the rev it targets; on THIS unit the divider is
 /// measurably on ch1 — ch3 floats. Verified: reads room temp on a cool board.)
-const NTC_LUT_T0: i32 = -40;
-const NTC_LUT: [u16; 166] = [
-    62658, 62480, 62293, 62097, 61891, 61676, 61451, 61216, 60970, 60713,
-    60446, 60167, 59877, 59575, 59261, 58935, 58597, 58247, 57884, 57509,
-    57121, 56721, 56308, 55882, 55443, 54992, 54528, 54052, 53564, 53063,
-    52551, 52027, 51492, 50945, 50388, 49820, 49242, 48655, 48059, 47453,
-    46840, 46218, 45590, 44955, 44313, 43667, 43015, 42359, 41699, 41035,
-    40370, 39702, 39033, 38363, 37693, 37024, 36355, 35688, 35024, 34362,
-    33703, 33048, 32397, 31751, 31109, 30474, 29844, 29221, 28605, 27995,
-    27393, 26798, 26212, 25633, 25063, 24501, 23948, 23404, 22869, 22343,
-    21827, 21319, 20821, 20332, 19853, 19383, 18923, 18471, 18030, 17597,
-    17174, 16760, 16355, 15959, 15572, 15193, 14824, 14463, 14110, 13766,
-    13430, 13102, 12782, 12470, 12166, 11869, 11579, 11297, 11022, 10753,
-    10492, 10237, 9988, 9746, 9511, 9281, 9057, 8839, 8627, 8420,
-    8218, 8022, 7831, 7645, 7464, 7287, 7115, 6948, 6785, 6626,
-    6471, 6321, 6174, 6031, 5892, 5757, 5625, 5496, 5371, 5249,
-    5130, 5015, 4902, 4792, 4686, 4581, 4480, 4381, 4285, 4191,
-    4099, 4010, 3923, 3838, 3756, 3675, 3597, 3521, 3446, 3373,
-    3302, 3233, 3166, 3100, 3036, 2973,
-];
-
 fn ntc_temp_c(sum16: u32) -> i32 {
-    if !(16..=16 * 4094).contains(&sum16) {
-        return 0; /* open/shorted divider */
+    let avg = sum16 as f32 / 16.0;
+    if avg < 1.0 || avg > 4094.0 {
+        return 0; /* open/shorted divider — don't feed ln() garbage */
     }
-    let s = sum16 as u16;
-    if s >= NTC_LUT[0] {
-        return NTC_LUT_T0;
-    }
-    if s < NTC_LUT[NTC_LUT.len() - 1] {
-        return NTC_LUT_T0 + NTC_LUT.len() as i32 - 1;
-    }
-    /* first index whose entry is below s (table is strictly decreasing) */
-    let i = NTC_LUT.partition_point(|&b| b >= s);
-    let t = NTC_LUT_T0 + i as i32 - 1;
-    /* float version truncated toward zero; the table floors */
-    if t < 0 {
-        t + 1
-    } else {
-        t
-    }
+    let r = avg * 11500.0 / (4095.0 - avg);
+    let inv_t = 1.0 / 298.15 + libm::logf(r / 10_000.0) / 3450.0;
+    (1.0 / inv_t - 273.15) as i32
 }
 
 fn eeprom_u32(off: u16) -> Option<u32> {

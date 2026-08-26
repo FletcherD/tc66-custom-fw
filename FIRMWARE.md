@@ -323,22 +323,16 @@ Related subtleties, all load-bearing:
 - `adc.rs`: polled on-chip ADC — **enable IRC14M first** (the ADC's dedicated
   clock, off at reset; calibration hangs without it), ADCON set alone, CLB
   calibration, SWRCST software trigger, 239.5-cycle sampling. NTC uses the
-  recovered stock β-model on ch1 (this unit) as an **integer LUT**
-  (`NTC_LUT` in ina.rs, generated + verified bit-exact by
-  `tools/mkntclut.py` — the float version's logf + soft-float support was
-  ~2 KB of flash); channels + model in HARDWARE.md.
+  recovered stock β-model on ch1 (this unit); channels + model in HARDWARE.md.
 - Energy: 1 Hz integration in the main loop off the tick counter (250 ticks
   = 1 s) — RAM-only, zeroed at boot, both getva groups publish the same
   value. Persistence = M2.
 - `getva.rs`: template + live-field patch + CRC16/MODBUS + AES-256-ECB.
   Stamps the sampler window counter (MK_WINDOWS) at offset 132 (pac3+4, a
-  stock-unused field). Built and sent as **three independent 64-B blocks**
-  (`build_block` — the CRC is per block and ECB blocks are independent, so
-  the wire bytes are identical while only 64 B of reply ever sits on the
-  deepest stack path). The AES key schedule is cached in a static after the
-  first reply; the `aes` crate rides at per-crate `opt-level = "s"`
-  (Cargo.toml — 3 was faster but the PD engine needed the flash). Also
-  builds the **`rawva`** dev
+  stock-unused field). The AES key schedule is cached in a static after the
+  first reply and blocks are encrypted as one batch (the fixsliced core works
+  on block pairs) — with the per-crate `opt-level = 3` on `aes` (Cargo.toml)
+  this takes a reply from ~64 ms to ~20 ms. Also builds the **`rawva`** dev
   verb reply (`build_raw`): the same fields plaintext + CRC16, 46 B, ~1 ms —
   the streaming endpoint. Host recipe + layout: HARDWARE.md, `tools/rawva.py`
   (bench-verified: 700 polls/s, zero missed windows, sampler unaffected).

@@ -3,9 +3,11 @@
 
   pd.py arm            arm the sink engine (pdctl 1) — then plug the source in
   pd.py off            FUSB302 SW_RES + engine off (pdctl 0)
+  pd.py hardreset      send a PD hard reset: source re-caps at its top rev (pdctl 2)
   pd.py status         one engine-state snapshot (pdsta)
   pd.py caps           decode the stored Source_Capabilities PDOs (pdcap)
-  pd.py req <n>        request source PDO n (1-based, fixed-supply) (pdreq)
+  pd.py req <n> [volts [amps]]   request source PDO n (pdreq); volts (+ amps,
+                       default the APDO max) required for a PPS APDO
   pd.py watch [secs]   poll status at 2 Hz (default 20 s)
 
 DANGER: a granted request RAISES THE OUT-PORT VOLTAGE (9/12/15/20 V).
@@ -28,7 +30,8 @@ STATES = {
     6: "rd-cycle (forcing re-attach)",
 }
 ERRS = {
-    0x0E: "not a fixed-supply PDO",
+    0x0D: "PPS setpoint missing or out of the APDO's range",
+    0x0E: "unsupported PDO kind (or PPS on a PD 2.0 source)",
     0x0F: "bad args / bad state",
     0xE1: "tx retries exhausted (no GoodCRC)",
     0xE2: "source rejected the request",
@@ -84,7 +87,7 @@ def decode_pdo(i, pdo):
         lo, hi = ((pdo >> 10) & 0x3FF) * 50, ((pdo >> 20) & 0x3FF) * 50
         return "PDO %d: battery %.2f-%.2f V %d W" % (i, lo / 1000, hi / 1000, (pdo & 0x3FF) // 4)
     lo, hi = ((pdo >> 8) & 0xFF) * 100, ((pdo >> 17) & 0xFF) * 100
-    return "PDO %d: PPS    %5.2f-%.2f V %.2f A (pdreq: not yet)" % (i, lo / 1000, hi / 1000, (pdo & 0x7F) / 20)
+    return "PDO %d: PPS    %5.2f-%.2f V %.2f A" % (i, lo / 1000, hi / 1000, (pdo & 0x7F) / 20)
 
 
 CTL_NAMES = {1: "GoodCRC", 3: "Accept", 4: "Reject", 5: "Ping", 6: "PS_RDY",
@@ -109,12 +112,13 @@ def show_status(s):
     ev = ",".join(n for b, n in EVENTS if st[6] & b) or "-"
     hdrs = [st[14] | (st[15] << 8), st[16] | (st[17] << 8), st[18] | (st[19] << 8)]
     print(
-        "state=%s cc=%s caps=%d contract=PDO%d req=PDO%d err=%s\n"
+        "state=%s cc=%s rev=%s caps=%d contract=PDO%d req=PDO%d err=%s\n"
         "events=%s status0=0x%02x (vbus %s, bc_lvl %d) status1=0x%02x msgid=%d rx=%d\n"
         "last rx: %s"
         % (
             STATES.get(st[0], st[0]),
             st[1] or "-",
+            {1: "2.0", 2: "3.0"}.get(st[13], st[13]),
             st[2],
             st[3],
             st[4],
@@ -141,6 +145,8 @@ def main():
         ok_er(xfer(s, b"pdctl\x01", 3), "arm")
     elif cmd == "off":
         ok_er(xfer(s, b"pdctl\x00", 3), "off")
+    elif cmd == "hardreset":
+        ok_er(xfer(s, b"pdctl\x02", 3), "hard reset")
     elif cmd == "status":
         show_status(s)
     elif cmd == "caps":
@@ -155,7 +161,11 @@ def main():
             print(decode_pdo(i + 1, pdo), " raw=0x%08x" % pdo)
     elif cmd == "req":
         n = int(sys.argv[2], 0)
-        if ok_er(xfer(s, b"pdreq" + bytes([n]), 3), "request PDO %d" % n):
+        mv = int(float(sys.argv[3]) * 1000) if len(sys.argv) > 3 else 0
+        ma = int(float(sys.argv[4]) * 1000) if len(sys.argv) > 4 else 0
+        pkt = b"pdreq" + bytes([n]) + mv.to_bytes(2, "little") + ma.to_bytes(2, "little")
+        what = "request PDO %d" % n + (" @ %.2f V" % (mv / 1000) if mv else "")
+        if ok_er(xfer(s, pkt, 3), what):
             time.sleep(0.7)
             show_status(s)
     elif cmd == "watch":

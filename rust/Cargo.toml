@@ -30,6 +30,7 @@ cortex-m-rt = { version = "0.7.6", features = ["set-sp"] }
 # device.x PROVIDEs. All other IRQs stay masked.
 gd32f1 = { version = "0.9.2", features = ["gd32f150", "critical-section", "rt"] }
 aes = "0.8"
+libm = "0.2"
 
 # The C reference ships usb.c at -O0 because -Os inlining caused a post-enumeration
 # lockup (reference-c/Makefile). opt-level=1 + inline(never) on the USB path keeps

@@ -67,7 +67,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 71;
+const BUILD_ID: u32 = 75;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -355,10 +355,13 @@ fn on_packet(buf: &[u8]) {
     } else if match5(buf, b"pdctl") {
         #[cfg(feature = "dev-verbs")]
         {
-            /* pdctl 0 = FUSB302 off (SW_RES), pdctl 1 = arm as PD sink */
+            /* pdctl 0 = FUSB302 off (SW_RES), pdctl 1 = arm as PD sink,
+             * pdctl 2 = send PD hard reset (source restarts caps at its
+             * highest rev; VBUS dips) */
             let r = match buf.get(5) {
                 Some(0) => pd::off(),
                 Some(1) => pd::arm(),
+                Some(2) => pd::hard_reset(),
                 _ => Err(0x0F),
             };
             reply_ok_er(r);
@@ -372,9 +375,19 @@ fn on_packet(buf: &[u8]) {
     } else if match5(buf, b"pdreq") {
         #[cfg(feature = "dev-verbs")]
         {
-            /* pdreq <n>: request source PDO n (1-based, fixed-supply) */
+            /* pdreq <n> [mv u16 LE] [ma u16 LE]: request source PDO n
+             * (1-based); mv/ma only for a PPS APDO */
             let r = match buf.get(5) {
-                Some(&n) => pd::request(n),
+                Some(&n) => {
+                    let u16at = |i: usize| -> u16 {
+                        if buf.len() >= i + 2 {
+                            buf[i] as u16 | (buf[i + 1] as u16) << 8
+                        } else {
+                            0
+                        }
+                    };
+                    pd::request(n, u16at(6), u16at(8))
+                }
                 None => Err(0x0F),
             };
             reply_ok_er(r);
@@ -442,14 +455,9 @@ fn on_packet(buf: &[u8]) {
 
 #[inline(never)]
 fn do_getva() {
-    /* streamed as 3 x 64-B blocks: only one block of reply lives on the
-     * stack under the AES frames (stack-gate; wire bytes unchanged) */
-    let f = live_fields();
-    for b in 0..3 {
-        let mut block = [0u8; 64];
-        getva::build_block(b, &mut block, &f);
-        write_all(&block);
-    }
+    let mut reply = [0u8; 192];
+    getva::build(&mut reply, &live_fields());
+    write_all(&reply);
 }
 
 /// dev verb: dump the TIMER5-veneer PC-profiler ring (markers.rs

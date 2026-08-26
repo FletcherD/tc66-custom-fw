@@ -289,9 +289,8 @@ Constants (flash literals): R_series `0x2cec` = 11500, R0 `0x461c4000` = 10000.0
 273.15, and 1.8 / 32 for °F. The getva `temp` field carries the magnitude; the
 separate `temp sign` field (offset 88) marks sub-zero.
 
-The firmware implements this model as an integer lookup table (ina.rs
-`NTC_LUT`, generated + verified bit-exact by tools/mkntclut.py) — `logf` plus
-the soft-float builtins cost ~2 KB of flash. (Older hardware,
+The getva temperature is a single `ln()` per second — trivial, but if you want to
+avoid pulling in `libm` you can use a small NTC lookup table instead. (Older hardware,
 `CFG+0x48 ≤ 0x144`, uses an integer piecewise-linear curve on a different channel;
 not present on current units.)
 

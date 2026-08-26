@@ -49,9 +49,15 @@ const R_FIFOS: u8 = 0x43;
 const SW0_PDWN: u8 = 0x03; /* Rd on both CC */
 const SW0_MEAS_CC1: u8 = 0x04;
 const SW0_MEAS_CC2: u8 = 0x08;
-/* Switches1: SPECREV=01 (PD 2.0) + AUTO_CRC + TXCC1/2 */
-const SW1_REV20: u8 = 0x20;
+/* Switches1: SPECREV in bits 6:5 (01 = PD 2.0, 10 = PD 3.0 — also sets the
+ * hardware GoodCRC's rev field) + AUTO_CRC + TXCC1/2 */
 const SW1_AUTO_CRC: u8 = 0x04;
+/* header/Switches1 rev codes */
+const REV20: u8 = 1;
+const REV30: u8 = 2;
+fn sw1_rev(rev: u8) -> u8 {
+    rev << 5
+}
 /* Control0/1 */
 const C0_INT_MASK_TXFLUSH: u8 = 0x60;
 const C1_RX_FLUSH: u8 = 0x04;
@@ -89,6 +95,8 @@ const CTL_GET_SRC_CAP: u8 = 7;
 const CTL_GET_SNK_CAP: u8 = 8;
 const CTL_WAIT: u8 = 12;
 const CTL_SOFT_RESET: u8 = 13;
+const CTL_NOT_SUPPORTED: u8 = 16; /* rev-3.0 only */
+const CTL_PING: u8 = 5;
 const DAT_SOURCE_CAP: u8 = 1;
 const DAT_REQUEST: u8 = 2;
 const DAT_SINK_CAP: u8 = 4;
@@ -107,6 +115,7 @@ const E_RETRYFAIL: u8 = 0xE1;
 const E_REJECT: u8 = 0xE2;
 const E_ACCEPT_TIMEOUT: u8 = 0xE3;
 const E_PSRDY_TIMEOUT: u8 = 0xE4;
+/* verb arg errors: 0x0D bad/missing PPS setpoint, 0x0E unsupported PDO kind */
 
 pub struct Pd {
     state: u8,
@@ -125,10 +134,16 @@ pub struct Pd {
     rx_hdr: [u16; 3], /* last 3 received SOP headers, newest first (pdsta) */
     vcc1_mv: u16, /* CC pin voltages from the MDAC sweep (powerz Vcc1/Vcc2) */
     vcc2_mv: u16,
+    rev: u8,       /* negotiated header rev code: REV20 / REV30 (from caps) */
+    tx_pend: bool, /* a TX is in flight (no TXSENT/RETRYFAIL yet) — gates
+                    * non-essential replies so bursts (Apple VDM spam) can't
+                    * duplicate msg ids or flush a message mid-flight */
+    last_rdo: u32, /* last Request object sent (PPS keepalive re-sends it) */
     poll_tick: u32,
     req_tick: u32,
     cap_ask_tick: u32,
     vcc_tick: u32,
+    pps_tick: u32,
 }
 
 struct Racy<T>(core::cell::UnsafeCell<T>);
@@ -153,10 +168,14 @@ static PD: Racy<Pd> = Racy(core::cell::UnsafeCell::new(Pd {
     rx_hdr: [0; 3],
     vcc1_mv: 0,
     vcc2_mv: 0,
+    rev: REV20,
+    tx_pend: false,
+    last_rdo: 0,
     poll_tick: 0,
     req_tick: 0,
     cap_ask_tick: 0,
     vcc_tick: 0,
+    pps_tick: 0,
 }));
 
 fn pd() -> &'static mut Pd {
@@ -205,7 +224,7 @@ pub fn arm() -> Result<(), u8> {
      * detach/re-attach makes it start over (bench-hit with an Apple 20 W).
      * The cycle costs nothing when no source is attached yet. */
     wr(R_SWITCHES0, 0x00)?;
-    wr(R_SWITCHES1, SW1_REV20)?;
+    wr(R_SWITCHES1, sw1_rev(REV20))?;
     *p = Pd {
         state: ST_RD_CYCLE,
         cc: 0,
@@ -223,10 +242,14 @@ pub fn arm() -> Result<(), u8> {
         rx_hdr: [0; 3],
         vcc1_mv: 0,
         vcc2_mv: 0,
+        rev: REV20,
+        tx_pend: false,
+        last_rdo: 0,
         poll_tick: ina::ticks(),
         req_tick: ina::ticks(), /* ST_RD_CYCLE start */
         cap_ask_tick: 0,
         vcc_tick: 0,
+        pps_tick: 0,
     };
     Ok(())
 }
@@ -255,7 +278,7 @@ pub fn status(out: &mut [u8; 20]) {
     out[9] = p.msg_id;
     out[10..12].copy_from_slice(&p.rx_msgs.to_le_bytes());
     out[12] = p.detach;
-    out[13] = 0;
+    out[13] = p.rev; /* negotiated header rev code (1 = PD 2.0, 2 = PD 3.0) */
     for i in 0..3 {
         out[14 + 2 * i..16 + 2 * i].copy_from_slice(&p.rx_hdr[i].to_le_bytes());
     }
@@ -271,20 +294,61 @@ pub fn caps(out: &mut [u8; 28]) -> u8 {
     p.caps_n
 }
 
-/// `pdreq <n>`: request source PDO n (1-based). Fixed-supply PDOs only for
-/// now (APDO/PPS needs the rev-3.0 header + 20 mV RDO — later).
+/// `pdreq <n> [mv] [ma]`: request source PDO n (1-based). Fixed-supply PDOs
+/// ignore the setpoint; a PPS APDO requires `mv` (and takes `ma`, default
+/// its max) and a PD 3.0 source. mv/ma == 0 means "not given".
 #[inline(never)]
-pub fn request(idx: u8) -> Result<(), u8> {
+pub fn request(idx: u8, mv: u16, ma: u16) -> Result<(), u8> {
     let p = pd();
     if p.state < ST_LISTEN || idx == 0 || idx > p.caps_n {
         return Err(0x0F);
     }
     let pdo = p.caps[idx as usize - 1];
-    if pdo >> 30 != 0 {
-        return Err(0x0E); /* not a fixed-supply PDO */
-    }
     p.err = 0;
-    send_request(p, idx, pdo)
+    match pdo >> 30 {
+        0 => {
+            /* fixed supply: operating = max = the PDO's current limit */
+            let ma10 = pdo & 0x3FF;
+            send_rdo(p, idx, (idx as u32) << 28 | 1 << 24 | ma10 << 10 | ma10)
+        }
+        3 if pdo >> 28 & 3 == 0 => {
+            /* PPS APDO (rev 3.0 only): 20 mV / 50 mA RDO units */
+            if p.rev < REV30 {
+                return Err(0x0E);
+            }
+            let min_mv = (pdo >> 8 & 0xFF) * 100;
+            let max_mv = (pdo >> 17 & 0xFF) * 100;
+            let max_ma = (pdo & 0x7F) * 50;
+            let ma = if ma == 0 { max_ma as u16 } else { ma };
+            if (mv as u32) < min_mv || mv as u32 > max_mv || ma as u32 > max_ma {
+                return Err(0x0D);
+            }
+            send_rdo(
+                p,
+                idx,
+                (idx as u32) << 28 | 1 << 24 | (mv as u32 / 20) << 9 | (ma as u32 / 50),
+            )
+        }
+        _ => Err(0x0E), /* variable/battery APDO kinds: not supported */
+    }
+}
+
+/// `pdctl 2`: send a PD Hard Reset (Control3 SEND_HARD_RESET). The source
+/// drops VBUS, forgets the negotiated contract AND spec rev, and restarts
+/// from Source_Capabilities at its highest rev — also the way to unpark a
+/// source stuck at rev 2.0 from an earlier failed exchange.
+#[inline(never)]
+pub fn hard_reset() -> Result<(), u8> {
+    let p = pd();
+    if p.state < ST_LISTEN {
+        return Err(0x0F);
+    }
+    wr(R_CONTROL3, C3_RETRIES | 0x40)?; /* self-clearing */
+    p.contract = 0;
+    p.req_obj = 0;
+    p.state = ST_LISTEN;
+    /* IA_HARDSENT lands on the next poll and runs the full PD-reset path */
+    Ok(())
 }
 
 /// Latest CC pin voltages in mV (0 when the engine is off / nothing
@@ -313,21 +377,13 @@ fn mdac_search() -> Result<u8, u8> {
     Ok(code)
 }
 
-/// Measure both CC pins via the MDAC (~5 ms of paused I2C), then restore
-/// the MEAS switch for the active CC. VCONN above the DAC range clamps to
-/// ~2.7 V. Runs every ~500 ms while armed (not during the Rd-cycle — it
-/// must not re-present the pulldowns early).
+/// Measure the CC pin voltage(s) via the MDAC. The MEAS_CC switch ALSO
+/// feeds the BMC receiver, so while a link is up (cc known) ONLY the
+/// already-selected active CC is measured — flipping the switch to the
+/// idle pin eats any message arriving meanwhile (bench-hit: periodic
+/// contract drops every few sweeps). Both pins are swept only pre-attach.
+/// VCONN above the DAC range clamps to ~2.7 V.
 fn vcc_sweep(p: &mut Pd) -> Result<(), u8> {
-    wr(R_SWITCHES0, SW0_PDWN | SW0_MEAS_CC1)?;
-    let m1 = mdac_search()?;
-    wr(R_SWITCHES0, SW0_PDWN | SW0_MEAS_CC2)?;
-    let m2 = mdac_search()?;
-    let restore = match p.cc {
-        1 => SW0_MEAS_CC1,
-        2 => SW0_MEAS_CC2,
-        _ => 0,
-    };
-    wr(R_SWITCHES0, SW0_PDWN | restore)?;
     let mv = |m: u8| -> u16 {
         if m == 0 {
             0
@@ -335,6 +391,22 @@ fn vcc_sweep(p: &mut Pd) -> Result<(), u8> {
             (m as u16 + 1) * 42 + 21 /* midpoint of the found step */
         }
     };
+    if p.cc != 0 {
+        let m = mdac_search()?;
+        if p.cc == 1 {
+            p.vcc1_mv = mv(m);
+            p.vcc2_mv = 0;
+        } else {
+            p.vcc2_mv = mv(m);
+            p.vcc1_mv = 0;
+        }
+        return Ok(());
+    }
+    wr(R_SWITCHES0, SW0_PDWN | SW0_MEAS_CC1)?;
+    let m1 = mdac_search()?;
+    wr(R_SWITCHES0, SW0_PDWN | SW0_MEAS_CC2)?;
+    let m2 = mdac_search()?;
+    wr(R_SWITCHES0, SW0_PDWN)?;
     p.vcc1_mv = mv(m1);
     p.vcc2_mv = mv(m2);
     Ok(())
@@ -381,6 +453,18 @@ pub fn service() {
             p.err = e;
         }
     }
+    /* PPS keepalive: a PPS contract dies (source hard-reset) unless the sink
+     * re-Requests within ~10 s — re-send the standing RDO every 8 s */
+    if p.state == ST_CONTRACT
+        && p.contract > 0
+        && p.caps[p.contract as usize - 1] >> 30 == 3
+        && now.wrapping_sub(p.pps_tick) >= 2000
+    {
+        let (idx, rdo) = (p.req_obj, p.last_rdo);
+        if let Err(e) = send_rdo(p, idx, rdo) {
+            p.err = e;
+        }
+    }
 }
 
 /// Measure CC1 then CC2 through the comparator; on Rp detection lock the
@@ -407,9 +491,15 @@ fn attach_poll(p: &mut Pd) -> Result<(), u8> {
         R_SWITCHES0,
         SW0_PDWN | if cc1 { SW0_MEAS_CC1 } else { SW0_MEAS_CC2 },
     )?;
+    /* Lead with rev 2.0 in the hardware GoodCRC: every source accepts it,
+     * while a 3.0-stamped GoodCRC to a 2.0 message makes some sources
+     * (bench-hit: Apple 96 W, which talks 2.0 even after a hard reset)
+     * soft/hard-reset the link. If a source's caps arrive at 3.0 the
+     * handler upgrades Switches1 + our headers before the Request. */
+    p.rev = REV20;
     wr(
         R_SWITCHES1,
-        SW1_REV20 | SW1_AUTO_CRC | if cc1 { 0x01 } else { 0x02 },
+        sw1_rev(REV20) | SW1_AUTO_CRC | if cc1 { 0x01 } else { 0x02 },
     )?;
     wr(R_CONTROL1, C1_RX_FLUSH)?;
     wr(R_RESET, RST_PD)?;
@@ -437,11 +527,15 @@ fn active_poll(p: &mut Pd, now: u32) -> Result<(), u8> {
     if inta & IA_TXSENT != 0 {
         p.msg_id = (p.msg_id + 1) & 7;
     }
+    if inta & (IA_TXSENT | IA_RETRYFAIL) != 0 {
+        p.tx_pend = false;
+    }
     if inta & (IA_HARDRST | IA_HARDSENT) != 0 {
         /* hard reset on the wire: back to listening, source re-sends caps */
         wr(R_CONTROL1, C1_RX_FLUSH)?;
         wr(R_RESET, RST_PD)?;
         p.msg_id = 0;
+        p.tx_pend = false;
         p.contract = 0;
         p.req_obj = 0;
         p.state = ST_LISTEN;
@@ -463,7 +557,7 @@ fn active_poll(p: &mut Pd, now: u32) -> Result<(), u8> {
             p.contract = 0;
             p.req_obj = 0;
             p.state = ST_WAIT_ATTACH;
-            wr(R_SWITCHES1, SW1_REV20)?;
+            wr(R_SWITCHES1, sw1_rev(REV20))?;
             return Ok(());
         }
     } else {
@@ -518,7 +612,7 @@ fn rx_frame(p: &mut Pd, now: u32) -> Result<(), u8> {
     let nobj = ((hdr >> 12) & 7) as usize;
     let mut body = [0u8; 32]; /* 7·4 objects + 4 CRC max */
     rd(R_FIFOS, &mut body[..4 * nobj + 4])?;
-    let mtype = (hdr & 0x0F) as u8; /* rev-2.0 type field */
+    let mtype = (hdr & 0x1F) as u8; /* 5-bit in rev 3.0; bit 4 is 0 in 2.0 */
     p.rx_msgs = p.rx_msgs.wrapping_add(1);
     p.rx_hdr = [hdr, p.rx_hdr[0], p.rx_hdr[1]];
 
@@ -545,7 +639,9 @@ fn rx_frame(p: &mut Pd, now: u32) -> Result<(), u8> {
             }
             CTL_GET_SNK_CAP => {
                 /* one fixed sink PDO: 5 V, 100 mA */
-                send_data(p, DAT_SINK_CAP, (100u32 << 10) | 10)?;
+                if !p.tx_pend {
+                    send_data(p, DAT_SINK_CAP, (100u32 << 10) | 10)?;
+                }
             }
             CTL_SOFT_RESET => {
                 p.msg_id = 0;
@@ -553,7 +649,16 @@ fn rx_frame(p: &mut Pd, now: u32) -> Result<(), u8> {
                 p.state = ST_LISTEN;
                 p.cap_ask_tick = now;
             }
-            _ => {} /* Ping, swaps, … — GoodCRC (hardware) is answer enough */
+            CTL_PING | CTL_NOT_SUPPORTED => {}
+            _ => {
+                /* swaps, rev-3.0 extensions: a PD 3.0 port must answer
+                 * Not_Supported; 2.0 lets GoodCRC (hardware) stand alone.
+                 * tx_pend gate: one reply at a time — a burst (Apple sends
+                 * ~7 VDMs) must not duplicate msg ids / flush TX mid-flight */
+                if p.rev >= REV30 && !p.tx_pend {
+                    send(p, CTL_NOT_SUPPORTED, &[])?;
+                }
+            }
         }
         return Ok(());
     }
@@ -568,26 +673,37 @@ fn rx_frame(p: &mut Pd, now: u32) -> Result<(), u8> {
                 body[4 * i + 3],
             ]);
         }
+        /* negotiate the spec rev down from the source's caps header (this
+         * also retargets the hardware GoodCRC rev field) */
+        let rev = (((hdr >> 6) & 3) as u8).clamp(REV20, REV30);
+        if rev != p.rev {
+            p.rev = rev;
+            let txcc = if p.cc == 1 { 0x01 } else { 0x02 };
+            wr(R_SWITCHES1, sw1_rev(rev) | SW1_AUTO_CRC | txcc)?;
+        }
         /* a sink that GoodCRCs caps MUST Request within tSenderResponse or
          * the source hard-resets: immediately take PDO 1 (vSafe5V — no
          * output-voltage change). `pdreq` renegotiates from there. */
-        send_request(p, 1, p.caps[0])?;
+        let ma10 = p.caps[0] & 0x3FF;
+        send_rdo(p, 1, 1 << 28 | 1 << 24 | ma10 << 10 | ma10)?;
+    } else if p.rev >= REV30 && !p.tx_pend {
+        /* VDMs, Alert, … — PD 3.0 requires Not_Supported (tx_pend-gated) */
+        send(p, CTL_NOT_SUPPORTED, &[])?;
     }
-    /* other data messages (VDMs …): ignored — rev 2.0 allows it */
     Ok(())
 }
 
 /* ---- TX ---- */
 
-/// Fixed-supply RDO for PDO `idx`: operating = max = the PDO's current
-/// limit, no-USB-suspend set.
+/// Send a Request carrying `rdo` for object position `idx` and enter
+/// WAIT_ACCEPT. The RDO is remembered for the PPS keepalive.
 #[inline(never)]
-fn send_request(p: &mut Pd, idx: u8, pdo: u32) -> Result<(), u8> {
-    let ma10 = pdo & 0x3FF;
-    let rdo = (idx as u32) << 28 | 1 << 24 | ma10 << 10 | ma10;
+fn send_rdo(p: &mut Pd, idx: u8, rdo: u32) -> Result<(), u8> {
     send_data(p, DAT_REQUEST, rdo)?;
     p.req_obj = idx;
+    p.last_rdo = rdo;
     p.req_tick = ina::ticks();
+    p.pps_tick = p.req_tick;
     p.state = ST_WAIT_ACCEPT;
     Ok(())
 }
@@ -602,11 +718,14 @@ fn send(p: &mut Pd, mtype: u8, objs: &[u8]) -> Result<(), u8> {
 }
 
 /// Write one SOP message into the TX FIFO and fire it. Header: sink/UFP,
-/// spec rev 2.0, our rolling message id (incremented on I_TXSENT).
+/// the negotiated spec rev, our rolling message id (incremented on I_TXSENT).
 #[inline(never)]
 fn send_frame(p: &mut Pd, mtype: u8, nobj: u8, objs: &[u8]) -> Result<(), u8> {
     wr(R_CONTROL0, C0_INT_MASK_TXFLUSH)?; /* flush any stale TX */
-    let hdr = (mtype as u16) | 0x0040 | ((p.msg_id as u16) << 9) | ((nobj as u16) << 12);
+    let hdr = (mtype as u16)
+        | ((p.rev as u16) << 6)
+        | ((p.msg_id as u16) << 9)
+        | ((nobj as u16) << 12);
     let mut buf = [0u8; 16];
     buf[0] = R_FIFOS;
     buf[1..5].copy_from_slice(&[TK_SOP1, TK_SOP1, TK_SOP1, TK_SOP2]);
@@ -616,5 +735,7 @@ fn send_frame(p: &mut Pd, mtype: u8, nobj: u8, objs: &[u8]) -> Result<(), u8> {
     buf[8..8 + objs.len()].copy_from_slice(objs);
     let tail = 8 + objs.len();
     buf[tail..tail + 4].copy_from_slice(&[TK_JAM_CRC, TK_EOP, TK_TXOFF, TK_TXON]);
-    wr_buf(&buf[..tail + 4])
+    wr_buf(&buf[..tail + 4])?;
+    p.tx_pend = true;
+    Ok(())
 }

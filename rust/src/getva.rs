@@ -73,7 +73,7 @@ fn crc16_modbus(data: &[u8]) -> u16 {
     crc
 }
 
-fn put_u32(buf: &mut [u8; 64], off: usize, v: u32) {
+fn put_u32(buf: &mut [u8; 192], off: usize, v: u32) {
     buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
 }
 
@@ -116,48 +116,41 @@ pub fn build_raw(out: &mut [u8; RAW_LEN], f: &Fields) {
     out[44..46].copy_from_slice(&crc.to_le_bytes());
 }
 
-/// Fill, checksum and encrypt ONE 64-B block (b = 0..3) of the 192-B reply.
-/// Chunked because the CRC is per 64-B block and AES-ECB blocks are
-/// independent: the caller streams three blocks and only ever holds 64 B of
-/// reply on the deepest stack path (a whole-reply buffer put the getva chain
-/// over the stack-gate budget when the PD engine landed). Wire bytes are
-/// identical to a whole-buffer build.
+/// Fill the template with live values, checksum, encrypt.
 #[inline(never)]
-pub fn build_block(b: usize, out: &mut [u8; 64], f: &Fields) {
-    out.copy_from_slice(&TEMPLATE[b * 64..b * 64 + 64]);
-    match b {
-        0 => {
-            put_u32(out, 48, f.v);
-            put_u32(out, 52, f.i);
-            put_u32(out, 56, f.p);
-        }
-        1 => {
-            put_u32(out, 68 - 64, f.r);
-            /* both energy groups carry the same since-boot integration (no
-             * per-group UI yet; persistence is M2) */
-            put_u32(out, 72 - 64, f.mah);
-            put_u32(out, 76 - 64, f.mwh);
-            put_u32(out, 80 - 64, f.mah);
-            put_u32(out, 84 - 64, f.mwh);
-            put_u32(out, 88 - 64, if f.temp_c < 0 { 1 } else { 0 }); /* temp sign */
-            put_u32(out, 92 - 64, f.temp_c.unsigned_abs());
-            put_u32(out, 96 - 64, f.dp);
-            put_u32(out, 100 - 64, f.dm);
-        }
-        _ => put_u32(out, 132 - 128, f.seq),
+pub fn build(out: &mut [u8; 192], f: &Fields) {
+    *out = TEMPLATE;
+    put_u32(out, 48, f.v);
+    put_u32(out, 52, f.i);
+    put_u32(out, 56, f.p);
+    put_u32(out, 68, f.r);
+    /* both energy groups carry the same since-boot integration (no per-group
+     * UI yet; persistence is M2) */
+    put_u32(out, 72, f.mah);
+    put_u32(out, 76, f.mwh);
+    put_u32(out, 80, f.mah);
+    put_u32(out, 84, f.mwh);
+    put_u32(out, 88, if f.temp_c < 0 { 1 } else { 0 }); /* temp sign */
+    put_u32(out, 92, f.temp_c.unsigned_abs());
+    put_u32(out, 96, f.dp);
+    put_u32(out, 100, f.dm);
+    put_u32(out, 132, f.seq);
+    for b in 0..3 {
+        let crc = crc16_modbus(&out[b * 64..b * 64 + 60]) as u32;
+        let bytes = crc.to_le_bytes();
+        out[b * 64 + 60..b * 64 + 64].copy_from_slice(&bytes);
     }
-    let crc = crc16_modbus(&out[..60]) as u32;
-    out[60..64].copy_from_slice(&crc.to_le_bytes());
     /* The cipher comes from init() (boot-time, shallow stack): the fixsliced
      * key schedule needs ~550 B of stack, and running it here would put it
      * under the deepest chain in the program — the stack-gate flagged
      * exactly that. init() always ran by the time a host can talk to us,
-     * so the None arm is dead in practice. */
+     * so the None arm is dead in practice. Blocks encrypted as one batch so
+     * the fixsliced core works on block pairs. */
     if unsafe { *CIPHER_OK.0.get() } {
         let cipher = unsafe { (*CIPHER.0.get()).assume_init_ref() };
         /* GenericArray<u8, U16> is layout-identical to [u8; 16] (documented) */
         let blocks: &mut [aes::Block] =
-            unsafe { core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut aes::Block, 4) };
+            unsafe { core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut aes::Block, 12) };
         cipher.encrypt_blocks(blocks);
     }
 }
