@@ -29,9 +29,11 @@
 //! to each item (UsbPtrs, CmdRing, powerz::REPLY, the ina.rs module doc).
 //!
 //! The first ~10 s after the unmask are the GRACE WINDOW (pseudo-bootloader
-//! escape hatch): the thread dispatches ONLY `query`/`updat` and no feature
-//! (TFT/sampler/I2C/ADC) has started — a fault in anything later is
-//! recovered by power-cycle + `make flash` inside the window, no K1.
+//! escape hatch): the thread dispatches ONLY `query`/`updat` and no
+//! measurement feature (sampler/I2C/ADC) has started — a fault in anything
+//! later is recovered by power-cycle + `make flash` inside the window, no
+//! K1. (The display's DMA first frame runs even earlier, pre-enumeration —
+//! bounded-error throughout; K1 is the backstop for a hard fault there.)
 
 #![no_std]
 #![no_main]
@@ -60,7 +62,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 59;
+const BUILD_ID: u32 = 60;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) instead of
@@ -123,6 +125,17 @@ fn run() -> ! {
         .build(); /* build() enables the peripheral (CNTR power-up, BTABLE=0) */
     mk(MK_STAGE, STAGE_USB_INIT);
 
+    /* TFT init + first frame now, while D+ is still low — the init
+     * sequence has ~400 ms of fixed delays that must not stall
+     * enumeration, and the screen is live from power-on instead of after
+     * the grace window. flush() pumps the DMA engine to completion
+     * (bounded by its per-phase poll budgets); on error the display stays
+     * off for this boot (verbs can still retry it). Every wait in this
+     * path is bounded and error-returning — a fault here would land
+     * before the escape hatch opens, and K1 remains the backstop. */
+    ui::draw(0, 0, 0);
+    let mut tft_alive = ui::flush().is_ok();
+
     board::pa9_high(&p.gpioa);
 
     /* SysTick free-runs over its full 24 bits as the grace-window timebase
@@ -163,8 +176,9 @@ fn run() -> ! {
     let (dev, pz, serial) = ((), (), ());
 
     /* ---- pseudo-bootloader grace window (dev escape hatch) ----
-     * 10 s dispatching ONLY `query`->firm and `updat` before any feature
-     * starts: no TFT, no sampler/I2C/ADC. USB runs on the same ISR + ring
+     * 10 s dispatching ONLY `query`->firm and `updat` before the
+     * measurement features start (no sampler/I2C/ADC; the display's first
+     * frame already ran pre-enumeration). USB runs on the same ISR + ring
      * machinery as normal operation (single code path); the thread does
      * nothing here but drain the ring, so the ring can never stay full. A
      * fault in anything that starts later is escaped by power-cycling and
@@ -197,14 +211,6 @@ fn run() -> ! {
      * line (ina.rs) — deliberately only now, after the grace window, so a
      * sampler/I2C fault stays escapable by power-cycle + `make flash`. */
     ina::start(&p.rcu, &p.timer5);
-
-    /* TFT init + first frame (the ~400 ms of init delays are harmless now
-     * that enumeration finished during the grace window). flush() pumps the
-     * DMA draw engine to completion — bounded by its per-phase poll
-     * budgets. On error the display is left off for this boot (verbs can
-     * still retry it). */
-    ui::draw(0, 0, 0);
-    let mut tft_alive = ui::flush().is_ok();
 
     /* 1 Hz energy integration (RAM only, starts at 0; persistence is M2):
      * every 250 ticks accumulate published I and P for one second.

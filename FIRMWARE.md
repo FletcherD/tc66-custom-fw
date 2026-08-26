@@ -115,7 +115,10 @@ serves only CDC (no powerz endpoint writes). Keep it that way.
 ### The grace window (pseudo-bootloader)
 
 The first ~10 s after the IRQ unmask dispatch ONLY `query`→`firm` and
-`updat` — no TFT, sampler, I2C/ADC, or full command set. USB runs on the
+`updat` — no sampler, I2C/ADC, or full command set. (The display's DMA
+first frame runs even earlier, pre-enumeration: every wait in that path is
+bounded and error-returning, and K1 remains the backstop for a hard fault
+there.) USB runs on the
 same ISR + ring machinery as normal operation (one code path; the thread
 does nothing but drain the ring, so the ring-full livelock below cannot
 occur here). A fault in any feature that starts later is recovered by
