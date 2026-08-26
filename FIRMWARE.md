@@ -6,7 +6,7 @@ build/flash/debug workflow. Read `HARDWARE.md` first for the board facts
 
 Exactly one interrupt runs: **USBD_LP (IRQ 37)** services the USB peripheral
 (so host traffic never waits on blocking main-loop work). Everything else is
-polled from the main loop: the TIMER5-paced sampler, command dispatch and
+polled from the main loop: the SysTick-paced sampler, command dispatch and
 reply building, energy integration, and the UI. All other IRQs stay masked
 from reset onward (`__pre_init`), and PRIMASK stays set until `main()`
 finishes initializing every static the ISR touches. See "USB" below for the
