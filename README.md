@@ -50,10 +50,21 @@ gone) — our own protocol on top of a compatible base, and room to add features
   in any later feature is recovered by power-cycle + `make flash` inside the
   window — no button press. The chip fought back in strange ways; QUIRKS.md
   is the measured catalog (all entries now closed).
+- **M4 — USB-PD voltage trigger: working.** A host-armed FUSB302 PD 2.0
+  sink engine (`rust/src/pd.rs`, verbs `pdctl`/`pdsta`/`pdcap`/`pdreq`,
+  host tool `tools/pd.py`): attach/orientation, source-capability
+  collection, and fixed-PDO voltage triggering — bench-verified 5/9/15/20 V
+  against an Apple 96 W charger. Nothing runs at boot; a granted request
+  **raises the OUT-port voltage** (trigger with nothing downstream). PPS
+  and the QC/FCP/SCP/AFC D+/D− bit-bang family are not implemented yet.
 - **Next steps** (see also the open items in QUIRKS.md):
   - **M2 — persistence** (real serial/run-count, energy write-back to the
     wear-leveled EEPROM journal, `gtrec` log, EEPROM writes in the I²C
     driver).
+  - **M4 extensions:** PPS/APDO requests (rev-3.0 header + 20 mV RDO), the
+    QC2/QC3 D+/D− trigger engine (PA13/PA14 + PB4/PB5 — fully mapped in
+    the RE repo's PD_VBUS_FINDINGS.md), surfacing CC voltages in the
+    powerz Vcc1/Vcc2 fields, and a KM003C PD-capture attribute.
   - The remaining QUIRKS.md open items (§1 NAK/APB stalls, §2 residual
     event-loss mechanism) and stock-firmware Tier 2 comparison. (Both
     refactor branches are merged; the TFT loops are deliberately not in

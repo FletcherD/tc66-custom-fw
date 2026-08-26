@@ -67,7 +67,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 66;
+const BUILD_ID: u32 = 69;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -533,15 +533,15 @@ fn do_clkrd() {
     write_all(&reply);
 }
 
-/// dev verb: pdsta -> "OK" + 14-byte PD engine state (layout: pd::status)
+/// dev verb: pdsta -> "OK" + 20-byte PD engine state (layout: pd::status)
 #[cfg(feature = "dev-verbs")]
 #[inline(never)]
 fn do_pdsta() {
-    let mut reply = [0u8; 16];
+    let mut reply = [0u8; 22];
     reply[..2].copy_from_slice(b"OK");
-    let mut st = [0u8; 14];
+    let mut st = [0u8; 20];
     pd::status(&mut st);
-    reply[2..16].copy_from_slice(&st);
+    reply[2..22].copy_from_slice(&st);
     write_all(&reply);
 }
 

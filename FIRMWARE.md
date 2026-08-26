@@ -25,7 +25,8 @@ the ina.rs module doc.
 | `board.rs` | 48 MHz clock bring-up, PA9 D+ soft-connect choreography |
 | `usb_bus.rs` | stm32-usbd `UsbPeripheral` impl for the GD32 USBD |
 | `flasher.rs` | `updat` self-flasher (`.flasher` section, runs from SRAM) |
-| `i2c.rs` | polled I2C0 master (INA226 + EEPROM bus), `i2crd` dev verb backend |
+| `i2c.rs` | polled I2C0 master (INA226 + EEPROM + FUSB302 bus), `i2crd` dev verb backend, bus-unstick recovery |
+| `pd.rs` | FUSB302 USB-PD sink engine (M4): attach/orientation, source-caps collection, voltage trigger; `pdctl`/`pdsta`/`pdcap`/`pdreq` verb backends |
 | `ina.rs` | the measurement subsystem: TIMER5 250 Hz sampler ISR (interleaved INA226 reads), EEPROM calibration, NTC/D± conversion, published-measurement state (`Meas`/`snapshot()`), `pause()` bus rule |
 | `adc.rs` | polled on-chip ADC (NTC, D+/D−), `adcrd` dev verb backend |
 | `getva.rs` | real `getva` packet builder (template + CRC16/MODBUS + AES-256-ECB) |
@@ -265,7 +266,15 @@ Related subtleties, all load-bearing:
 
 - `i2c.rs`: polled I2C0 master (PB6/PB7 AF1, 100 kHz, the F1-style IP's AN2824
   receive sequences), bounded waits with stage+STAT0/STAT1 error snapshots,
-  SRESET + reconfigure per transaction (stateless, self-healing).
+  SRESET + reconfigure per transaction (stateless, self-healing). Three
+  hard-won robustness rules (a stuck-busy bus once froze the whole system —
+  build 65): every transaction **waits for its STOP to finish** before
+  returning (an SRESET mid-STOP abandons the STOP and wedges the bus busy);
+  the initial bus-idle wait **fails fast** (~1.5 ms, not the full 30 ms
+  timeout — the sampler ISR pays it every tick when the bus is stuck); and a
+  stage-1 busy failure triggers a **9-clock GPIO bus-unstick + one retry**
+  (frees a slave left mid-transaction). The sampler adds a 200 ms back-off
+  after a stuck-bus tick so a dead bus degrades to ~2% CPU, never starvation.
 - `ina.rs`: the whole measurement subsystem. INA226 register reads
   (big-endian), EEPROM calibration constants (LE u32 at 0x2004/44/08/0c/58),
   the calibration formulas from HARDWARE.md, and the **TIMER5-interrupt
@@ -314,16 +323,22 @@ Related subtleties, all load-bearing:
 - `adc.rs`: polled on-chip ADC — **enable IRC14M first** (the ADC's dedicated
   clock, off at reset; calibration hangs without it), ADCON set alone, CLB
   calibration, SWRCST software trigger, 239.5-cycle sampling. NTC uses the
-  recovered stock β-model on ch1 (this unit); channels + model in HARDWARE.md.
+  recovered stock β-model on ch1 (this unit) as an **integer LUT**
+  (`NTC_LUT` in ina.rs, generated + verified bit-exact by
+  `tools/mkntclut.py` — the float version's logf + soft-float support was
+  ~2 KB of flash); channels + model in HARDWARE.md.
 - Energy: 1 Hz integration in the main loop off the tick counter (250 ticks
   = 1 s) — RAM-only, zeroed at boot, both getva groups publish the same
   value. Persistence = M2.
 - `getva.rs`: template + live-field patch + CRC16/MODBUS + AES-256-ECB.
   Stamps the sampler window counter (MK_WINDOWS) at offset 132 (pac3+4, a
-  stock-unused field). The AES key schedule is cached in a static after the
-  first reply and blocks are encrypted as one batch (the fixsliced core works
-  on block pairs) — with the per-crate `opt-level = 3` on `aes` (Cargo.toml)
-  this takes a reply from ~64 ms to ~20 ms. Also builds the **`rawva`** dev
+  stock-unused field). Built and sent as **three independent 64-B blocks**
+  (`build_block` — the CRC is per block and ECB blocks are independent, so
+  the wire bytes are identical while only 64 B of reply ever sits on the
+  deepest stack path). The AES key schedule is cached in a static after the
+  first reply; the `aes` crate rides at per-crate `opt-level = "s"`
+  (Cargo.toml — 3 was faster but the PD engine needed the flash). Also
+  builds the **`rawva`** dev
   verb reply (`build_raw`): the same fields plaintext + CRC16, 46 B, ~1 ms —
   the streaming endpoint. Host recipe + layout: HARDWARE.md, `tools/rawva.py`
   (bench-verified: 700 polls/s, zero missed windows, sampler unaffected).
@@ -384,6 +399,43 @@ Related subtleties, all load-bearing:
   the decrypted known-good template, recomputes **CRC16/MODBUS over bytes
   0..60 of each 64-B block** (stored LE at 60..64), AES-256-ECB encrypts
   on-device (`aes` crate). Serial/run-count still carry template values (M2).
+
+## USB-PD sink / voltage trigger (M4, `pd.rs`)
+
+Host-armed FUSB302 PD 2.0 sink — **nothing runs at boot**; `pdctl 1` arms it,
+`pdctl 0` shuts it off. Bench-verified against an Apple 96 W charger
+(5/9/15/20 V triggers, Accept+PS_RDY on every request).
+
+- **Structure:** all thread-mode (main-loop `pd::service()` + verb handlers —
+  one context, so the `PD` static needs no synchronization). Every FUSB302
+  I²C access runs inside `ina::pause` (shared bus). The INT_N pin is unwired/
+  unknown and unneeded: status+interrupt registers are polled every 2 ticks
+  (8 ms) while active; the tight PD timing (GoodCRC in 195 µs) is the chip's
+  AUTO_CRC hardware. Idle cost: zero. Active cost: one 7-byte status burst
+  per 2 ticks ≈ 1 ms of sampler pause per 8 ms.
+- **Flow:** arm → **Rd-cycle** (drop the pulldowns ~600 ms, then re-present —
+  a source plugged in before we armed has exhausted its Source_Capabilities
+  retries against a silent sink and stopped listening; only a detach makes it
+  start over — bench-hit) → attach + orientation via the BC_LVL comparator →
+  BMC on the active CC, PD_RESET → collect caps (asking Get_Source_Cap every
+  500 ms if none arrive) → **immediately Request PDO 1** (5 V — a sink that
+  GoodCRCs caps but never Requests is hard-reset by the source ~30 ms later)
+  → Accept → PS_RDY = contract. `pdreq <n>` renegotiates; hard/soft reset and
+  detach are handled (detach debounce: BC_LVL=0 with no BMC activity for 10
+  polls). Apple VDM spam is ignored (rev 2.0 allows it).
+- **Not yet:** PPS/APDO requests (needs the rev-3.0 header + 20 mV RDO;
+  `pdreq` rejects non-fixed PDOs with ER 0x0E), sink-side QC/FCP/SCP/AFC
+  (that's the separate D+/D− bit-bang engine — PA13/PA14+PB4/PB5, mapped in
+  the RE repo's PD_VBUS_FINDINGS.md), powerz Vcc1/Vcc2 from CC measurements.
+- **Timeout gotcha (cost a debug cycle):** state timeouts must compare
+  against a **fresh** `ina::ticks()` read, not the poll-entry snapshot — a
+  request is stamped mid-poll after ms of I2C, so `entry_now - req_tick`
+  wraps negative and fires instantly.
+- Host tool: `tools/pd.py` (`arm/off/status/caps/req/watch`, decodes PDOs and
+  the 20-B `pdsta` reply — field layout in `pd::status`).
+- **Danger:** a granted request raises the OUT-port voltage. Nothing may be
+  attached downstream when triggering; any future always-on/auto policy must
+  gate on that.
 
 ## Build / flash / debug workflow
 

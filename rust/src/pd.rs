@@ -98,6 +98,7 @@ const ST_LISTEN: u8 = 2; /* attached, BMC up; caps_n says if caps seen */
 const ST_WAIT_ACCEPT: u8 = 3;
 const ST_WAIT_PSRDY: u8 = 4;
 const ST_CONTRACT: u8 = 5;
+const ST_RD_CYCLE: u8 = 6; /* Rd dropped to force the source to re-attach */
 
 /* err codes carried in Pd.err (i2c stages are 1..0x0F | 0x80) */
 const E_RETRYFAIL: u8 = 0xE1;
@@ -119,6 +120,7 @@ pub struct Pd {
     status1: u8,
     detach: u8,    /* consecutive quiet BC_LVL=0 polls */
     rx_msgs: u16,
+    rx_hdr: [u16; 3], /* last 3 received SOP headers, newest first (pdsta) */
     poll_tick: u32,
     req_tick: u32,
     cap_ask_tick: u32,
@@ -143,6 +145,7 @@ static PD: Racy<Pd> = Racy(core::cell::UnsafeCell::new(Pd {
     status1: 0,
     detach: 0,
     rx_msgs: 0,
+    rx_hdr: [0; 3],
     poll_tick: 0,
     req_tick: 0,
     cap_ask_tick: 0,
@@ -188,10 +191,15 @@ pub fn arm() -> Result<(), u8> {
     wr(R_MASKB, 0x01)?;
     wr(R_CONTROL0, C0_INT_MASK_TXFLUSH)?;
     wr(R_CONTROL1, C1_RX_FLUSH)?;
-    wr(R_SWITCHES0, SW0_PDWN)?;
+    /* Drop Rd first (service restores it after ~600 ms): a source plugged
+     * before we armed has exhausted its Source_Capabilities retries against
+     * the chip's dead-Rd defaults and stopped listening for PD — only a
+     * detach/re-attach makes it start over (bench-hit with an Apple 20 W).
+     * The cycle costs nothing when no source is attached yet. */
+    wr(R_SWITCHES0, 0x00)?;
     wr(R_SWITCHES1, SW1_REV20)?;
     *p = Pd {
-        state: ST_WAIT_ATTACH,
+        state: ST_RD_CYCLE,
         cc: 0,
         msg_id: 0,
         caps_n: 0,
@@ -204,8 +212,9 @@ pub fn arm() -> Result<(), u8> {
         status1: 0,
         detach: 0,
         rx_msgs: 0,
+        rx_hdr: [0; 3],
         poll_tick: ina::ticks(),
-        req_tick: 0,
+        req_tick: ina::ticks(), /* ST_RD_CYCLE start */
         cap_ask_tick: 0,
     };
     Ok(())
@@ -219,9 +228,9 @@ pub fn off() -> Result<(), u8> {
     wr(R_RESET, RST_SW)
 }
 
-/// `pdsta` payload: 14 bytes of engine state.
+/// `pdsta` payload: 20 bytes of engine state.
 #[inline(never)]
-pub fn status(out: &mut [u8; 14]) {
+pub fn status(out: &mut [u8; 20]) {
     let p = pd();
     out[0] = p.state;
     out[1] = p.cc;
@@ -236,6 +245,9 @@ pub fn status(out: &mut [u8; 14]) {
     out[10..12].copy_from_slice(&p.rx_msgs.to_le_bytes());
     out[12] = p.detach;
     out[13] = 0;
+    for i in 0..3 {
+        out[14 + 2 * i..16 + 2 * i].copy_from_slice(&p.rx_hdr[i].to_le_bytes());
+    }
 }
 
 /// `pdcap`: copy the stored source PDOs; returns count.
@@ -273,15 +285,26 @@ pub fn service() {
         return;
     }
     let now = ina::ticks();
-    let interval = if p.state == ST_WAIT_ATTACH { 12 } else { 2 };
+    let interval = if p.state >= ST_LISTEN { 2 } else { 12 };
     if now.wrapping_sub(p.poll_tick) < interval {
         return;
     }
     p.poll_tick = now;
-    let r = if p.state == ST_WAIT_ATTACH {
-        attach_poll(p)
-    } else {
-        active_poll(p, now)
+    let r = match p.state {
+        ST_RD_CYCLE => {
+            /* req_tick = when the cycle started (arm) */
+            if now.wrapping_sub(p.req_tick) >= 150 {
+                let r = wr(R_SWITCHES0, SW0_PDWN);
+                if r.is_ok() {
+                    p.state = ST_WAIT_ATTACH;
+                }
+                r
+            } else {
+                Ok(())
+            }
+        }
+        ST_WAIT_ATTACH => attach_poll(p),
+        _ => active_poll(p, now),
     };
     if let Err(e) = r {
         p.err = e; /* sticky I²C diagnosis; keep polling — self-heals */
@@ -385,12 +408,16 @@ fn active_poll(p: &mut Pd, now: u32) -> Result<(), u8> {
         rx_frame(p, now)?;
     }
 
-    /* response timeouts (ticks are 4 ms) */
-    if p.state == ST_WAIT_ACCEPT && now.wrapping_sub(p.req_tick) > 25 {
+    /* response timeouts (ticks are 4 ms). Fresh ticks read, NOT the poll-entry
+     * `now`: send_request stamps req_tick mid-poll (after ms of I2C), so
+     * now - req_tick can wrap negative and fire the timeout instantly —
+     * build 68 dropped a perfectly good Accept/PS_RDY exchange exactly so. */
+    let t = ina::ticks();
+    if p.state == ST_WAIT_ACCEPT && t.wrapping_sub(p.req_tick) > 25 {
         p.err = E_ACCEPT_TIMEOUT;
         p.state = ST_LISTEN;
     }
-    if p.state == ST_WAIT_PSRDY && now.wrapping_sub(p.req_tick) > 150 {
+    if p.state == ST_WAIT_PSRDY && t.wrapping_sub(p.req_tick) > 150 {
         p.err = E_PSRDY_TIMEOUT;
         p.state = ST_LISTEN;
     }
@@ -421,6 +448,7 @@ fn rx_frame(p: &mut Pd, now: u32) -> Result<(), u8> {
     rd(R_FIFOS, &mut body[..4 * nobj + 4])?;
     let mtype = (hdr & 0x0F) as u8; /* rev-2.0 type field */
     p.rx_msgs = p.rx_msgs.wrapping_add(1);
+    p.rx_hdr = [hdr, p.rx_hdr[0], p.rx_hdr[1]];
 
     if nobj == 0 {
         match mtype {

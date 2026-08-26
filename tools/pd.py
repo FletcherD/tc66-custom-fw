@@ -25,6 +25,7 @@ STATES = {
     3: "wait-accept",
     4: "wait-ps-rdy",
     5: "CONTRACT",
+    6: "rd-cycle (forcing re-attach)",
 }
 ERRS = {
     0x0E: "not a fixed-supply PDO",
@@ -86,15 +87,31 @@ def decode_pdo(i, pdo):
     return "PDO %d: PPS    %5.2f-%.2f V %.2f A (pdreq: not yet)" % (i, lo / 1000, hi / 1000, (pdo & 0x7F) / 20)
 
 
+CTL_NAMES = {1: "GoodCRC", 3: "Accept", 4: "Reject", 5: "Ping", 6: "PS_RDY",
+             7: "GetSrcCap", 8: "GetSnkCap", 12: "Wait", 13: "SoftReset"}
+DAT_NAMES = {1: "SourceCap", 2: "Request", 4: "SinkCap"}
+
+
+def hdr_name(h):
+    if h == 0:
+        return "-"
+    nobj = (h >> 12) & 7
+    t = h & 0x1F
+    name = (DAT_NAMES if nobj else CTL_NAMES).get(t & 0x0F, "type%d" % t)
+    return "%s(0x%04x)" % (name, h)
+
+
 def show_status(s):
-    r = xfer(s, b"pdsta", 16)
-    if r[:2] != b"OK" or len(r) < 16:
+    r = xfer(s, b"pdsta", 22)
+    if r[:2] != b"OK" or len(r) < 22:
         sys.exit("garbled pdsta reply: %r" % r)
     st = r[2:]
     ev = ",".join(n for b, n in EVENTS if st[6] & b) or "-"
+    hdrs = [st[14] | (st[15] << 8), st[16] | (st[17] << 8), st[18] | (st[19] << 8)]
     print(
         "state=%s cc=%s caps=%d contract=PDO%d req=PDO%d err=%s\n"
-        "events=%s status0=0x%02x (vbus %s, bc_lvl %d) status1=0x%02x msgid=%d rx=%d"
+        "events=%s status0=0x%02x (vbus %s, bc_lvl %d) status1=0x%02x msgid=%d rx=%d\n"
+        "last rx: %s"
         % (
             STATES.get(st[0], st[0]),
             st[1] or "-",
@@ -109,6 +126,7 @@ def show_status(s):
             st[8],
             st[9],
             st[10] | (st[11] << 8),
+            "  ".join(hdr_name(h) for h in hdrs),
         )
     )
     return st

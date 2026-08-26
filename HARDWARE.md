@@ -139,6 +139,10 @@ Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the firs
 | `tftfl` | `OK` / `ER`+stage | our dev verb: TFT test pattern (no args) or solid fill (RGB565 LE u16) (tools/tft.py) |
 | `tftbl` | `OK` / `ER`+stage | our dev verb: backlight PWM compare, LE u16 0..=999 (tools/tft.py) |
 | `tftui` | `OK` / `ER`+stage | our dev verb: force a main-screen refresh (tools/tft.py) |
+| `pdctl` | `OK` / `ER`+stage | our dev verb: PD sink engine off (arg 0) / arm (arg 1) (pd.rs, tools/pd.py) |
+| `pdsta` | `OK`+20 B | our dev verb: PD engine state (layout: `pd::status`) |
+| `pdcap` | `OK`+n+n×4 B | our dev verb: received source PDOs (LE u32 each) |
+| `pdreq` | `OK` / `ER` | our dev verb: request source PDO n (1-based; fixed-supply only) — **raises OUT voltage** |
 
 Keeping `getva` byte-compatible (same reply) lets existing host tools work
 unchanged. The dev/debug verbs (`i2crd adcrd clkrd tftfl tftbl tftui` — and
@@ -285,8 +289,9 @@ Constants (flash literals): R_series `0x2cec` = 11500, R0 `0x461c4000` = 10000.0
 273.15, and 1.8 / 32 for °F. The getva `temp` field carries the magnitude; the
 separate `temp sign` field (offset 88) marks sub-zero.
 
-The getva temperature is a single `ln()` per second — trivial, but if you want to
-avoid pulling in `libm` you can use a small NTC lookup table instead. (Older hardware,
+The firmware implements this model as an integer lookup table (ina.rs
+`NTC_LUT`, generated + verified bit-exact by tools/mkntclut.py) — `logf` plus
+the soft-float builtins cost ~2 KB of flash. (Older hardware,
 `CFG+0x48 ≤ 0x144`, uses an integer piecewise-linear curve on a different channel;
 not present on current units.)
 
@@ -336,8 +341,15 @@ Stock boot init (`0x22`): `Reset=3` → `Power=0x0F` → `Switches0=0x04` →
 `Switches1=0x20` (AUTO_CRC) → `Control3=0` → `Mask=0xEF` → `Mask_a=0xFF` →
 `Mask_b=0x01` → `Reset=2` (PD_RESET) → `Control0=0` → `Power=0x0F`, then read
 Status regs 0x3E/0x3F/0x42. It's a well-documented part (open driver references:
-Chromium EC `fusb302`, various USB-PD stacks), so **M4 PD trigger is tractable** —
-reuse this init and add a minimal Sink policy engine.
+Chromium EC `fusb302`, various USB-PD stacks; `FUSB302B Datasheet.pdf` in the
+repo root — this unit reads Device ID **0x81** = FUSB302, silicon rev B).
+
+**Our firmware's sink engine (rust/src/pd.rs, M4) is live and bench-verified**:
+attach/orientation, Source_Capabilities collection, and fixed-PDO voltage
+trigger (5/9/15/20 V Accept+PS_RDY against an Apple 96 W charger). Verbs +
+host tool in the command table above / tools/pd.py; engine internals in
+FIRMWARE.md "USB-PD sink". The INT_N pin is not needed (registers are polled).
+The chip shares the INA226/EEPROM I²C bus — all access inside `ina::pause`.
 
 ### Display (SPI TFT)
 - **ST7735S** controller, **160×80 RGB565**, memory offset **(col +1, row +26)**, inversion on.
