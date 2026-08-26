@@ -62,8 +62,11 @@ gone) — our own protocol on top of a compatible base, and room to add features
   Charge 2.0/3.0** is a separate D+/D− trigger engine (`rust/src/qc.rs`,
   verbs `qctrg`/`qc3ct`/`qcoff`, host tool `tools/qc.py`) — bench-verified
   QC2.0 discrete 5/9/12 V and QC3.0 continuous ±200 mV fine-stepping
-  (bidirectional) against real chargers. Nothing runs at boot; a granted
-  request **raises the OUT-port voltage** (trigger with nothing downstream).
+  (bidirectional) against real chargers. Captured PD traffic is exposed over
+  the powerz vendor endpoint as the **KM003C PdPacket attribute (0x0010)**
+  (`tools/pdcap.py`; the transport is verified, event capture awaits a PD
+  source on the bench). Nothing runs at boot; a granted request **raises the
+  OUT-port voltage** (trigger with nothing downstream).
 - **Next steps** (see also the open items in QUIRKS.md):
   - **M2 — persistence** (real serial/run-count, energy write-back to the
     wear-leveled EEPROM journal, `gtrec` log, EEPROM writes in the I²C

@@ -26,7 +26,7 @@ the ina.rs module doc.
 | `usb_bus.rs` | stm32-usbd `UsbPeripheral` impl for the GD32 USBD |
 | `flasher.rs` | `updat` self-flasher (`.flasher` section, runs from SRAM) |
 | `i2c.rs` | polled I2C0 master (INA226 + EEPROM + FUSB302 bus), `i2crd` dev verb backend, bus-unstick recovery |
-| `pd.rs` | FUSB302 USB-PD sink engine (M4): attach/orientation, source-caps collection, voltage trigger; `pdctl`/`pdsta`/`pdcap`/`pdreq` verb backends |
+| `pd.rs` | FUSB302 USB-PD sink engine (M4): attach/orientation, source-caps collection, voltage trigger, KM003C PD capture ring; `pdctl`/`pdsta`/`pdcap`/`pdreq` verb backends |
 | `qc.rs` | Quick Charge 2.0 D+/D− trigger (M4): PA13/PA14 + PB4/PB5 level synthesis, `qctrg`/`qcoff` verb backends |
 | `ina.rs` | the measurement subsystem: TIMER5 250 Hz sampler ISR (interleaved INA226 reads), EEPROM calibration, NTC/D± conversion, published-measurement state (`Meas`/`snapshot()`), `pause()` bus rule |
 | `adc.rs` | polled on-chip ADC (NTC, D+/D−), `adcrd` dev verb backend |
@@ -460,6 +460,37 @@ past the ~10 s keepalive deadline).
 - **Danger:** a granted request raises the OUT-port voltage. Nothing may be
   attached downstream when triggering; any future always-on/auto policy must
   gate on that.
+
+### PD capture (KM003C PdPacket attribute 0x0010)
+
+Every PD message the engine sends/receives, plus connect/disconnect, is
+captured and exposed over the **powerz vendor endpoint** in the real KM003C
+`PdPacket` wire format — so a KM003C-protocol host tool reads the meter's live
+PD traffic.
+
+- **Ring** (`pd.rs`, in `.hibss`): SPSC, thread producer (rx_frame/send_frame/
+  attach/detach — all one context) → USBD_LP ISR consumer (`drain_pd_packet`).
+  Events are pre-formatted at capture time so the ISR only memcpys. Full ring
+  drops newest (capture is best-effort). `service()` publishes the 12-byte
+  measurement preamble (ts, VBUS, IBUS, CC1, CC2) into atomics the ISR reads.
+- **Wire format** (github.com/okhsunrog/km003c-protocol-research): payload =
+  12-B preamble + events; a connect/disconnect event is 6 B (`0x45`, ts LE24,
+  0, `0x21`/`0x22`), a wrapped PD message is `size_flag=0x80|(N+5)`, ts LE32,
+  sop, then N wire bytes (`wire_len = (size_flag & 0x3F) − 5`). byte0 bit 7
+  distinguishes them.
+- **Transport** (`powerz.rs`): `GetData(ATT_PD)` builds a `PutData(0x10)` into
+  the `PD_REPLY` static and queues it **ahead of** the re-armed ADC packet in
+  `flush()` — so the **ADC fast-path is untouched**. The host may read the
+  armed ADC first, then the PD reply on its next IN; it filters by the
+  ext-header attribute. One 64-B packet per poll (preamble + one/two events);
+  the host polls to drain more.
+- Host tool: `tools/pdcap.py` (libusb; needs root/udev for the vendor
+  interface — the kernel `powerz` hwmon driver binds it otherwise).
+- **Verified:** the attribute/transport — `GetData(0x10)` returns a valid
+  `PutData` with a live preamble (VBUS tracked), ADC-first-then-PD filtering
+  works, empty ring returns preamble-only. Event capture against real PD
+  traffic is pending a PD source on the bench (the wire format is per spec but
+  not yet round-tripped end-to-end).
 
 ## Quick Charge 2.0 trigger (M4, `qc.rs`)
 

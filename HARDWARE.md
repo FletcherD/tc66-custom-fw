@@ -119,6 +119,13 @@ NAK-polling — the driver's 5 ms URB budget is the design constraint.
 `Connect`/`Disconnect` (0x02/0x03) get Accept; other commands Reject.
 Bench: >5000 reads/s sustained with zero timeouts.
 
+The vendor protocol also serves **`GetData(ATT_PD=0x0010)`** — the KM003C
+`PdPacket` attribute carrying captured PD traffic (12-B measurement preamble +
+event records); built from the `pd.rs` capture ring, read by `tools/pdcap.py`.
+It queues behind the pre-armed ADC packet, so the ADC fast-path is untouched
+(the host reads the armed ADC first, then the PD reply, filtering by attribute).
+See FIRMWARE.md "PD capture".
+
 ### CDC verb protocol (interfaces 1+2 — compatibility + dev)
 
 Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the first
