@@ -60,10 +60,13 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 58;
+const BUILD_ID: u32 = 59;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
-type Serial<'a> = SerialPort<'a, usb_bus::UsbBus>;
+/// 64-B read store (one full USB packet — commands are <=10 B) instead of
+/// usbd-serial's 128-B default: the buffers live in run()'s frame, and the
+/// stack-gate budget is tight (the DMA display statics ate the slack).
+type Serial<'a> = SerialPort<'a, usb_bus::UsbBus, [u8; 64], [u8; 128]>;
 type Pz<'a> = powerz::PowerZ<'a, usb_bus::UsbBus>;
 
 #[entry]
@@ -85,6 +88,9 @@ fn run() -> ! {
     mk(MK_ENUM, 0);
     mk(MK_I2CERR, 0);
     mk(MK_WINDOWS, 0);
+    for i in 0..6 {
+        mk(MK_DSP_BASE + 4 * i, 0); /* display/DMA diagnostic block */
+    }
 
     let p = pac::Peripherals::take().unwrap();
     board::clock_init(&p.rcu);
@@ -102,7 +108,7 @@ fn run() -> ! {
      * CDC-ACM (our protocol + updat reflash) follows on interfaces 1+2. */
     let usb_alloc = usb_bus::UsbBus::new(usb_bus::Gd32Usb);
     let mut pz = powerz::PowerZ::new(&usb_alloc);
-    let mut serial = SerialPort::new(&usb_alloc);
+    let mut serial = SerialPort::new_with_store(&usb_alloc, [0u8; 64], [0u8; 128]);
     let mut dev = UsbDeviceBuilder::new(&usb_alloc, UsbVidPid(0x5FC9, 0x0063))
         .strings(&[StringDescriptors::default()
             .manufacturer("ChargerLAB")
@@ -193,9 +199,12 @@ fn run() -> ! {
     ina::start(&p.rcu, &p.timer5);
 
     /* TFT init + first frame (the ~400 ms of init delays are harmless now
-     * that enumeration finished during the grace window). On error the
-     * display is left off for this boot (verbs can still retry it). */
-    let mut tft_alive = ui::draw(0, 0, 0).is_ok();
+     * that enumeration finished during the grace window). flush() pumps the
+     * DMA draw engine to completion — bounded by its per-phase poll
+     * budgets. On error the display is left off for this boot (verbs can
+     * still retry it). */
+    ui::draw(0, 0, 0);
+    let mut tft_alive = ui::flush().is_ok();
 
     /* 1 Hz energy integration (RAM only, starts at 0; persistence is M2):
      * every 250 ticks accumulate published I and P for one second.
@@ -224,11 +233,9 @@ fn run() -> ! {
         let elapsed = now.wrapping_sub(last_ticks);
         last_ticks = now;
         if elapsed > 0 {
-            /* refresh the pre-built powerz reply at tick cadence; built in
-             * thread mode, copied into powerz::REPLY inside the critical
-             * section */
-            let pl = powerz_payload();
-            with_usb(|_, pz, _| pz.set_payload(&pl));
+            /* refresh the pre-built powerz reply at tick cadence (own frame:
+             * its 44-B buffer must not live in run()'s — stack-gate) */
+            refresh_powerz_payload();
             sec_ticks += elapsed;
             while sec_ticks >= 250 {
                 sec_ticks -= 250;
@@ -257,14 +264,18 @@ fn run() -> ! {
             ui_ticks += elapsed;
             if ui_ticks >= 125 && tft_alive {
                 ui_ticks = 0;
-                /* the draw may block for a while, but the USBD ISR keeps
-                 * the powerz reply armed throughout — no pre-arm needed */
+                /* format-only: marks changed cells dirty; the per-pass
+                 * ui::service() below streams the glyphs out via DMA */
                 let (v, i) = ina::snapshot_vi();
                 let (pw, _) = ina::derive(v, i);
-                /* a failed draw disables the refresh for this boot (a wedged
-                 * SPI wait would otherwise slow every 0.5 s cycle) */
-                tft_alive = ui::draw(v, i, pw).is_ok();
+                ui::draw(v, i, pw);
             }
+        }
+        /* advance the display DMA engine one poll (cheap when idle; at most
+         * one glyph-row kick per pass — never blocks the loop). A failed job
+         * disables the always-on refresh for this boot; verbs can retry. */
+        if tft_alive && ui::service().is_err() {
+            tft_alive = false;
         }
         /* NO general thread-mode dev.poll sweep here: mixing a second poll
          * consumer with the ISR makes CDC latency WORSE on this clone
@@ -273,8 +284,7 @@ fn run() -> ! {
          * cadences, so the harm is per-transaction event interference, not
          * timing). The exceptions that DO sweep: write_all (its drain chain
          * measurably stalls without it) and the grace window (escape-hatch
-         * robustness outranks latency). CDC latency root cause (~8 ms
-         * host-retry-quantum steps) is still open — see the memory note. */
+         * robustness outranks latency). */
         /* dispatch commands the ISR queued; replies (AES etc.) are built
          * right here in thread mode with interrupts enabled */
         run_pending_cmds(false);
@@ -323,7 +333,8 @@ fn on_packet(buf: &[u8]) {
         do_adcrd(buf);
     } else if match5(buf, b"tftfl") {
         /* dev verb: tftfl -> test pattern; tftfl <lo> <hi> -> solid RGB565 fill
-         * -> "OK", or "ER" + stage (1 SPI TBE timeout, 2 shift-idle timeout) */
+         * -> "OK", or "ER" + stage (tft.rs: 1 SPI TBE timeout, 2 shift-idle
+         * timeout, 3 DMA timeout, 4 DMA error, 5 busy, 6 pump budget) */
         let _ = tft::screen_on(); /* draw verbs wake an idle-off screen */
         let r = if buf.len() >= 7 {
             let color = buf[5] as u16 | (buf[6] as u16) << 8;
@@ -333,11 +344,13 @@ fn on_packet(buf: &[u8]) {
         };
         reply_ok_er(r);
     } else if match5(buf, b"tftui") {
-        /* dev verb: draw/refresh the main screen from published values */
+        /* dev verb: draw/refresh the main screen from published values
+         * (kick + pump to completion — dev verbs may block) */
         let _ = tft::screen_on();
         let m = ina::snapshot();
         let (p, _) = ina::derive(m.v_1e4, m.i_1e5);
-        reply_ok_er(ui::draw(m.v_1e4, m.i_1e5, p));
+        ui::draw(m.v_1e4, m.i_1e5, p);
+        reply_ok_er(ui::flush());
     } else if match5(buf, b"tftbl") {
         /* dev verb: tftbl <lo> <hi> -> backlight PWM compare 0..=999 */
         let _ = tft::screen_on();
@@ -645,6 +658,14 @@ fn USBD_LP() {
     }
     mk(MK_USB_STATE, 4);
     mk(MK_USB_STATE, 0);
+}
+
+/// Build + publish the powerz reply (thread mode; the copy into
+/// powerz::REPLY runs inside the critical section).
+#[inline(never)]
+fn refresh_powerz_payload() {
+    let pl = powerz_payload();
+    with_usb(|_, pz, _| pz.set_payload(&pl));
 }
 
 /// Build the 44-byte powerz ADC payload (layout: powerz.rs / HARDWARE.md).

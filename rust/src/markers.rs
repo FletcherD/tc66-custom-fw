@@ -86,8 +86,28 @@ pub const MK_SMP_ADCB: usize = MK_SMP_BASE + 0x14;
 pub const MK_SMP_ADCE: usize = MK_SMP_BASE + 0x18;
 /* +0x1c..+0x2c free (5 words) */
 
-/* display/DMA block (spi-dma refactor) */
-pub const MK_DSP_BASE: usize = 0x2000_10d0; // +0 state, +4 evt count, +8 status
+/* display/DMA block — the tft.rs async pixel engine (SPI0 TX on DMA ch2).
+ * +0  MK_DSP_STATE  engine phase, written at every transition — a frozen
+ *                   value locates a wedge. Low byte: 0 idle, 1 fill DMA
+ *                   running, 2 glyph row DMA running, 3 drain (waiting
+ *                   TRANS idle / 8-bit restore). Byte 1: for phase 2, the
+ *                   NEXT glyph row to stage (1..=24).
+ * +4  MK_DSP_KICKS  DMA channel-enable count (one per fill, one per glyph row)
+ * +8  MK_DSP_ERR    last failure snapshot: stage | SPI_STAT<<8 |
+ *                   (DMA ch2 INTF nibble: GIF/FTFIF/HTFIF/ERRIF)<<24.
+ *                   Stages: tft.rs top comment (3 = DMA timeout, 4 = DMA
+ *                   transfer error, 5 = busy, 6 = pump budget).
+ * +12 MK_DSP_DONE   jobs completed (engine returned to idle cleanly)
+ * +16 MK_DSP_GLYPHS glyph jobs started
+ * +20 MK_DSP_FILLS  fill jobs started
+ * +24..+44 unclaimed */
+pub const MK_DSP_BASE: usize = 0x2000_10d0;
+pub const MK_DSP_STATE: usize = MK_DSP_BASE;
+pub const MK_DSP_KICKS: usize = MK_DSP_BASE + 4;
+pub const MK_DSP_ERR: usize = MK_DSP_BASE + 8;
+pub const MK_DSP_DONE: usize = MK_DSP_BASE + 12;
+pub const MK_DSP_GLYPHS: usize = MK_DSP_BASE + 16;
+pub const MK_DSP_FILLS: usize = MK_DSP_BASE + 20;
 
 /* PC-profiler ring (the TIMER5_DAC entry veneer in ina.rs — address is
  * hardcoded in its asm): +0 = total-samples counter, +4..+0x204 = 128-entry

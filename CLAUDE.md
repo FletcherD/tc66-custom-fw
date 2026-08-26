@@ -3,7 +3,9 @@
 Custom Rust firmware for the RuiDeng TC66/TC66C USB-C power meter, developed
 against real hardware on the bench. M0 (self-hosting USB + self-reflash),
 M1 (real calibrated measurement), and the M3 basics (ST7735S driver in
-tft.rs + always-on V/I/P screen with 15 s idle screen-off) are done. USB
+tft.rs + always-on V/I/P screen with 15 s idle screen-off) are done. Pixel
+streaming is DMA-driven and non-blocking (tft.rs engine on DMA ch2, pumped
+by ui::service from the main loop — no display interrupt). USB
 is ISR-serviced and the device is a composite that emulates a POWER-Z
 KM003C (mainline Linux `powerz` hwmon binds it) — **powerz comms are the
 priority path; getva/CDC exists for compatibility**. The sampler runs from
