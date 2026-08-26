@@ -56,7 +56,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 46;
+const BUILD_ID: u32 = 49;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 type Serial<'a> = SerialPort<'a, usb_bus::UsbBus>;
@@ -171,6 +171,12 @@ fn main() -> ! {
             let c = cortex_m::peripheral::SYST::get_current();
             acc += prev.wrapping_sub(c) & 0x00FF_FFFF; /* down-counter */
             prev = c;
+            /* sweep every pass: during grace nothing else runs, so the
+             * escape hatch gets polled-mode robustness on top of the ISR
+             * (the clone's IRQ line loses events — see the tick sweep) */
+            with_usb(|dev, pz, serial| {
+                dev.poll(&mut [&mut *pz, &mut *serial]);
+            });
             run_pending_cmds(true);
             with_usb(|_, _, serial| drain_serial(serial));
         }
@@ -279,6 +285,15 @@ fn main() -> ! {
                 tft_alive = ui::draw(v, i, pw).is_ok();
             }
         }
+        /* NO general thread-mode dev.poll sweep here: mixing a second poll
+         * consumer with the ISR makes CDC latency WORSE on this clone
+         * (bench A/B: pure ISR = query 8 ms / rawva 36 ms; with sweeps at
+         * either 4 ms or per-pass cadence = 24 / 93 ms — identical at both
+         * cadences, so the harm is per-transaction event interference, not
+         * timing). The exceptions that DO sweep: write_all (its drain chain
+         * measurably stalls without it) and the grace window (escape-hatch
+         * robustness outranks latency). CDC latency root cause (~8 ms
+         * host-retry-quantum steps) is still open — see the memory note. */
         /* dispatch commands the ISR queued; replies (AES etc.) are built
          * right here in thread mode with interrupts enabled */
         run_pending_cmds(false);
