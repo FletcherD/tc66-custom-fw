@@ -21,16 +21,38 @@ gone) — our own protocol on top of a compatible base, and room to add features
   itself over USB via `updat` with a pure-Rust SRAM flasher — iterate with
   `make -C rust flash`, no button pressing.
 - **M1 — real measurement: done.** INA226 over hardware I²C0 with the per-unit
-  EEPROM calibration, TIMER5-paced sampling (~10 Hz publish, poll-rate
+  EEPROM calibration, SysTick-paced sampling (~10 Hz publish, poll-rate
   independent), NTC temperature (recovered stock β-model) and D+/D− via the
   on-chip ADC, 1 Hz energy integration (RAM-only for now), all served in the
   stock encrypted+checksummed `getva` packet — plus our plaintext `rawva`
   verb with a window sequence number for fast lossless streaming
   (`tools/rawva.py`). Verified live on hardware.
-- **Next: M2 — persistence** (real serial/run-count, energy write-back to the
-  wear-leveled EEPROM journal, `gtrec` log, EEPROM writes in the I²C driver).
-- **Then: M3 — display** (ST7735 bring-up + minimal V/I/P draw layer);
-  **M4 — stretch** (BLE mirror; USB-PD / QC trigger via the on-board FUSB302).
+- **M3 — display basics: done.** ST7735S driver + always-on V/I/P main screen
+  (webcam-verified), 10-min idle screen-off (burn-in protection).
+- **USB architecture: interrupt-serviced, bench-verified.** The USBD_LP ISR
+  keeps the bus served regardless of main-loop work; the device is a
+  composite that also emulates a ChargerLAB POWER-Z KM003C, so the mainline
+  Linux `powerz` hwmon driver binds it and `sensors` just works (0 failures
+  in 2000 gap-free reads). The first ~10 s of every boot are a
+  **pseudo-bootloader grace window** (only `query`/`updat` served): a fault
+  in any later feature is recovered by power-cycle + `make flash` inside the
+  window — no button press. The chip fights back in strange ways; QUIRKS.md
+  is the measured catalog.
+- **Next steps** (see also the open items in QUIRKS.md):
+  - **M2 — persistence** (real serial/run-count, energy write-back to the
+    wear-leveled EEPROM journal, `gtrec` log, EEPROM writes in the I²C
+    driver).
+  - Trial + merge the remaining refactor branches: `refactor/sampler-irq`
+    (250 Hz sampler ISR, evenly-interleaved shunt/shunt/vbus reads) and
+    `refactor/spi-dma` (non-blocking DMA pixel engine; its SPI0_TX→DMA-ch2
+    mapping is manual-derived, unverified). Both predate the current master
+    — merge master INTO them first; their stack-gate variants lose to
+    master's.
+  - CDC latency root cause (~8 ms retry quanta; QUIRKS.md §3) and the
+    stock-firmware comparison (QUIRKS.md, bottom).
+  - Richer M3 screens (energy, temp, D±); **M4 — stretch** (BLE mirror;
+    USB-PD / QC trigger via the on-board FUSB302 — the KM003C protocol's
+    AdcQueue/PD-capture attributes are the natural wire format).
 
 ## Layout
 
@@ -39,8 +61,11 @@ README.md           this file
 HARDWARE.md         board reference: memory map, pins, peripherals (INA226,
                     EEPROM, ADC/NTC, FUSB302), flash + debug mechanics,
                     command protocol + getva format, calibration model
-FIRMWARE.md         firmware internals: module map, boot path, USB, the
-                    self-flasher, measurement, build gates, debug workflow
+FIRMWARE.md         firmware internals: module map, boot path, USB (ISR +
+                    grace window), the self-flasher, measurement, build
+                    gates, debug workflow
+QUIRKS.md           measured GD32F150 misbehavior (USB event loss, NAK bus
+                    stalls, ...) + the open investigations & experiments
 CLAUDE.md           orientation + working rules for agent sessions
 rust/               the firmware — see FIRMWARE.md for the module map;
                     Makefile targets: flash / recover / markers / build gates
