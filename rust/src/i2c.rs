@@ -26,6 +26,12 @@ pub struct I2cErr {
 /* stages (for the ER reply): 1 busy-idle 2 SBSEND(w) 3 ADDSEND(w) 4 TBE
  * 5 BTC(w) 6 SBSEND(r) 7 ADDSEND(r) 8 RBNE 9 BTC(r) 0x0F bad-args */
 const TIMEOUT: u32 = 100_000;
+/* The bus must be idle at transaction start; when it is stuck busy (wedged
+ * slave) that must fail FAST — the sampler ISR pays this wait on every tick,
+ * and the original 100k iterations (~30 ms) starved the thread + USB into a
+ * system-wide freeze (build 65). ~1.5 ms still covers any legitimate
+ * in-flight STOP tail. */
+const BUSY_TIMEOUT: u32 = 5_000;
 
 fn snapshot(stage: u8, i2c: &pac::i2c0::RegisterBlock) -> I2cErr {
     I2cErr {
@@ -35,12 +41,13 @@ fn snapshot(stage: u8, i2c: &pac::i2c0::RegisterBlock) -> I2cErr {
     }
 }
 
-fn wait(
+fn wait_n(
     i2c: &pac::i2c0::RegisterBlock,
     stage: u8,
+    limit: u32,
     cond: impl Fn(&pac::i2c0::stat0::R) -> bool,
 ) -> Result<(), I2cErr> {
-    for _ in 0..TIMEOUT {
+    for _ in 0..limit {
         let s = i2c.stat0().read();
         if cond(&s) {
             return Ok(());
@@ -51,6 +58,14 @@ fn wait(
         }
     }
     Err(snapshot(stage, i2c))
+}
+
+fn wait(
+    i2c: &pac::i2c0::RegisterBlock,
+    stage: u8,
+    cond: impl Fn(&pac::i2c0::stat0::R) -> bool,
+) -> Result<(), I2cErr> {
+    wait_n(i2c, stage, TIMEOUT, cond)
 }
 
 #[inline(never)]
@@ -77,6 +92,30 @@ fn setup(i2c: &pac::i2c0::RegisterBlock) {
     i2c.ctl0().write(|w| w.i2cen().set_bit());
 }
 
+/// Manually clock the bus free: 9 SCL pulses (releases a slave stuck mid-read
+/// driving SDA) then a STOP, PB6/PB7 as plain GPIO. ~120 us, bounded, no
+/// side effects beyond the pins — setup() reclaims them as AF1 afterwards.
+#[inline(never)]
+fn unstick() {
+    let gpiob = unsafe { &*pac::Gpiob::ptr() };
+    gpiob.bop().write(|w| w.bop6().set_bit().bop7().set_bit()); /* both released */
+    gpiob.omode().modify(|_, w| w.om6().open_drain().om7().open_drain());
+    gpiob.ctl().modify(|_, w| w.ctl6().output().ctl7().output());
+    let half = || cortex_m::asm::delay(250); /* ~5 us @ 48 MHz */
+    half();
+    for _ in 0..9 {
+        gpiob.bc().write(|w| w.cr6().set_bit()); /* SCL low */
+        half();
+        gpiob.bop().write(|w| w.bop6().set_bit()); /* SCL high */
+        half();
+    }
+    /* STOP: SDA low -> high while SCL is high */
+    gpiob.bc().write(|w| w.cr7().set_bit());
+    half();
+    gpiob.bop().write(|w| w.bop7().set_bit());
+    half();
+}
+
 /// One transaction: optional register-pointer write (no STOP), then a
 /// repeated-START read of `rbuf.len()` bytes. `wbuf` empty = pure read;
 /// `rbuf` empty = pure write (with STOP).
@@ -85,10 +124,29 @@ pub fn transact(addr7: u8, wbuf: &[u8], rbuf: &mut [u8]) -> Result<(), I2cErr> {
     let i2c = unsafe { &*pac::I2c0::ptr() };
     setup(i2c);
 
-    let r = do_transact(i2c, addr7, wbuf, rbuf);
+    let mut r = do_transact(i2c, addr7, wbuf, rbuf);
+    if let Err(ref e) = r {
+        if e.stage & 0x7F == 1 {
+            /* bus stuck busy before we even started: clock it free and retry
+             * once (self-healing for a slave left mid-transaction) */
+            unstick();
+            setup(i2c);
+            r = do_transact(i2c, addr7, wbuf, rbuf);
+        }
+    }
     if r.is_err() {
         /* abort: force STOP so a next attempt starts from idle */
         i2c.ctl0().modify(|_, w| w.stop().set_bit());
+    }
+    /* Let the final STOP finish on the wires before returning. The caller
+     * may be about to unmask the sampler tick, whose transaction begins
+     * with an SRESET — resetting the peripheral mid-STOP abandons the STOP
+     * and wedges the bus busy (this froze build 65: tick timeouts then
+     * starved the whole system). Bounded, normally a few us. */
+    for _ in 0..2_000 {
+        if i2c.stat1().read().i2cbsy().is_not_busy() {
+            break;
+        }
     }
     r
 }
@@ -99,7 +157,9 @@ fn do_transact(
     wbuf: &[u8],
     rbuf: &mut [u8],
 ) -> Result<(), I2cErr> {
-    wait(i2c, 1, |_| i2c.stat1().read().i2cbsy().is_not_busy())?;
+    wait_n(i2c, 1, BUSY_TIMEOUT, |_| {
+        i2c.stat1().read().i2cbsy().is_not_busy()
+    })?;
 
     if !wbuf.is_empty() {
         i2c.ctl0().modify(|_, w| w.start().set_bit());

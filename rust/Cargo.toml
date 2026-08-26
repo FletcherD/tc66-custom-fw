@@ -30,7 +30,6 @@ cortex-m-rt = { version = "0.7.6", features = ["set-sp"] }
 # device.x PROVIDEs. All other IRQs stay masked.
 gd32f1 = { version = "0.9.2", features = ["gd32f150", "critical-section", "rt"] }
 aes = "0.8"
-libm = "0.2"
 
 # The C reference ships usb.c at -O0 because -Os inlining caused a post-enumeration
 # lockup (reference-c/Makefile). opt-level=1 + inline(never) on the USB path keeps
@@ -43,9 +42,10 @@ panic = "abort"
 debug = true
 
 # Pure-compute crypto, no USB-path code: at opt-level 1 the fixsliced AES makes
-# a getva reply cost ~64 ms (blocks the polled sampler); at 3 it's ~2 ms.
+# a getva reply cost ~64 ms (blocks the polled sampler); at 3 it's ~2 ms; "s"
+# trades a little of that speed back for the flash the PD engine needed.
 [profile.release.package.aes]
-opt-level = 3
+opt-level = "s"
 
 [profile.dev]
 panic = "abort"

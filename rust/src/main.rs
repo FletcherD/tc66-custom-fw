@@ -49,6 +49,8 @@ mod getva;
 mod i2c;
 mod ina;
 mod markers;
+#[cfg(feature = "dev-verbs")]
+mod pd;
 mod powerz;
 mod startup;
 mod tft;
@@ -65,7 +67,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 64;
+const BUILD_ID: u32 = 66;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -242,6 +244,9 @@ fn run() -> ! {
         mk(MK_HEART, mk_get(MK_HEART) + 1);
         /* cal retries + the deferred window-end ADC burst (temp/D±) */
         ina::service();
+        /* FUSB302 PD sink engine — no-op until armed by `pdctl 1` */
+        #[cfg(feature = "dev-verbs")]
+        pd::service();
         let now = ina::ticks();
         let elapsed = now.wrapping_sub(last_ticks);
         last_ticks = now;
@@ -347,6 +352,33 @@ fn on_packet(buf: &[u8]) {
     } else if match5(buf, b"clkrd") {
         #[cfg(feature = "dev-verbs")]
         do_clkrd();
+    } else if match5(buf, b"pdctl") {
+        #[cfg(feature = "dev-verbs")]
+        {
+            /* pdctl 0 = FUSB302 off (SW_RES), pdctl 1 = arm as PD sink */
+            let r = match buf.get(5) {
+                Some(0) => pd::off(),
+                Some(1) => pd::arm(),
+                _ => Err(0x0F),
+            };
+            reply_ok_er(r);
+        }
+    } else if match5(buf, b"pdsta") {
+        #[cfg(feature = "dev-verbs")]
+        do_pdsta();
+    } else if match5(buf, b"pdcap") {
+        #[cfg(feature = "dev-verbs")]
+        do_pdcap();
+    } else if match5(buf, b"pdreq") {
+        #[cfg(feature = "dev-verbs")]
+        {
+            /* pdreq <n>: request source PDO n (1-based, fixed-supply) */
+            let r = match buf.get(5) {
+                Some(&n) => pd::request(n),
+                None => Err(0x0F),
+            };
+            reply_ok_er(r);
+        }
     } else if match5(buf, b"tftfl") {
         #[cfg(feature = "dev-verbs")]
         {
@@ -410,9 +442,14 @@ fn on_packet(buf: &[u8]) {
 
 #[inline(never)]
 fn do_getva() {
-    let mut reply = [0u8; 192];
-    getva::build(&mut reply, &live_fields());
-    write_all(&reply);
+    /* streamed as 3 x 64-B blocks: only one block of reply lives on the
+     * stack under the AES frames (stack-gate; wire bytes unchanged) */
+    let f = live_fields();
+    for b in 0..3 {
+        let mut block = [0u8; 64];
+        getva::build_block(b, &mut block, &f);
+        write_all(&block);
+    }
 }
 
 /// dev verb: dump the TIMER5-veneer PC-profiler ring (markers.rs
@@ -494,6 +531,31 @@ fn do_clkrd() {
     reply[2..6].copy_from_slice(&ctl.to_le_bytes());
     reply[6..10].copy_from_slice(&cfg0.to_le_bytes());
     write_all(&reply);
+}
+
+/// dev verb: pdsta -> "OK" + 14-byte PD engine state (layout: pd::status)
+#[cfg(feature = "dev-verbs")]
+#[inline(never)]
+fn do_pdsta() {
+    let mut reply = [0u8; 16];
+    reply[..2].copy_from_slice(b"OK");
+    let mut st = [0u8; 14];
+    pd::status(&mut st);
+    reply[2..16].copy_from_slice(&st);
+    write_all(&reply);
+}
+
+/// dev verb: pdcap -> "OK" + count + count x 4-byte LE source PDOs
+#[cfg(feature = "dev-verbs")]
+#[inline(never)]
+fn do_pdcap() {
+    let mut reply = [0u8; 31];
+    let mut pdos = [0u8; 28];
+    let n = pd::caps(&mut pdos);
+    reply[..2].copy_from_slice(b"OK");
+    reply[2] = n;
+    reply[3..3 + 4 * n as usize].copy_from_slice(&pdos[..4 * n as usize]);
+    write_all(&reply[..3 + 4 * n as usize]);
 }
 
 /// Snapshot the published measurements + derived values + window seq for a
