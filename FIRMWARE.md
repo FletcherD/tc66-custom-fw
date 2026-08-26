@@ -396,9 +396,11 @@ Related subtleties, all load-bearing:
 
 ## USB-PD sink / voltage trigger (M4, `pd.rs`)
 
-Host-armed FUSB302 PD 2.0 sink — **nothing runs at boot**; `pdctl 1` arms it,
-`pdctl 0` shuts it off. Bench-verified against an Apple 96 W charger
-(5/9/15/20 V triggers, Accept+PS_RDY on every request).
+Host-armed FUSB302 PD 2.0/3.0 sink — **nothing runs at boot**; `pdctl 1` arms
+it, `pdctl 0` shuts it off, `pdctl 2` sends a Hard Reset. Bench-verified
+against an Apple 96 W charger (5/9/15/20 V triggers, Accept+PS_RDY on every
+request; that charger offers only fixed PDOs at PD 2.0, so PPS and the
+rev-3.0 path are code-complete but not yet bench-verified).
 
 - **Structure:** all thread-mode (main-loop `pd::service()` + verb handlers —
   one context, so the `PD` static needs no synchronization). Every FUSB302
@@ -414,19 +416,40 @@ Host-armed FUSB302 PD 2.0 sink — **nothing runs at boot**; `pdctl 1` arms it,
   BMC on the active CC, PD_RESET → collect caps (asking Get_Source_Cap every
   500 ms if none arrive) → **immediately Request PDO 1** (5 V — a sink that
   GoodCRCs caps but never Requests is hard-reset by the source ~30 ms later)
-  → Accept → PS_RDY = contract. `pdreq <n>` renegotiates; hard/soft reset and
-  detach are handled (detach debounce: BC_LVL=0 with no BMC activity for 10
-  polls). Apple VDM spam is ignored (rev 2.0 allows it).
-- **Not yet:** PPS/APDO requests (needs the rev-3.0 header + 20 mV RDO;
-  `pdreq` rejects non-fixed PDOs with ER 0x0E), sink-side QC/FCP/SCP/AFC
-  (that's the separate D+/D− bit-bang engine — PA13/PA14+PB4/PB5, mapped in
-  the RE repo's PD_VBUS_FINDINGS.md), powerz Vcc1/Vcc2 from CC measurements.
+  → Accept → PS_RDY = contract. `pdreq <n> [mv] [ma]` renegotiates; hard/soft
+  reset and detach are handled (detach debounce: BC_LVL=0 with no BMC activity
+  for 10 polls).
+- **Rev negotiation:** the FUSB302 hardware GoodCRC carries a rev field, so we
+  lead with **rev 2.0** in Switches1 (a 3.0-stamped GoodCRC to a 2.0 message
+  makes some sources — the Apple 96 W — soft/hard-reset the link) and upgrade
+  Switches1 + our TX headers to 3.0 only after the source's caps header says
+  3.0. A PD 3.0 port must answer unhandled messages with **Not_Supported**;
+  all such replies (and Get_Sink_Cap) are **tx_pend-gated** — only one TX in
+  flight at a time, or a source's VDM burst (Apple sends ~7) duplicates
+  message ids and flushes a message mid-send.
+- **PPS:** `pdreq <n> <mv> [ma]` on an APDO builds the 20 mV / 50 mA RDO
+  (validated against the APDO's advertised range), and `service()` re-sends
+  the standing RDO every 8 s — a PPS contract dies without a re-Request inside
+  ~10 s. Fixed PDOs ignore mv/ma. `pdreq` rejects a PPS request on a 2.0-only
+  source (ER 0x0E) and an out-of-range setpoint (ER 0x0D).
+- **Vcc1/Vcc2 (powerz):** a 6-bit MDAC comparator binary-search of the CC
+  pin voltage, every ~500 ms while armed. **Only the active CC is measured
+  once attached** — the MEAS_CC switch also feeds the BMC receiver, so
+  flipping it to the idle pin eats an arriving message and drops the contract
+  (bench-hit); both pins are swept only pre-attach. Vdd is the Vrefint ratio
+  (ina.rs ADC burst). See main.rs `powerz_payload`.
+- **Not yet:** sink-side QC/FCP/SCP/AFC — the separate D+/D− bit-bang engine
+  (PA13/PA14 + PB4/PB5, static-level + handshake routines mapped in the RE
+  repo's PD_VBUS_FINDINGS.md; the exact per-mode GPIO set/clear patterns are
+  decoded from stock `set_dpm_trigger_gpio @0x08009b8e`). Needs a QC source
+  to verify a real voltage change; our own ADC ch8/ch9 can confirm the D±
+  lines move.
 - **Timeout gotcha (cost a debug cycle):** state timeouts must compare
   against a **fresh** `ina::ticks()` read, not the poll-entry snapshot — a
   request is stamped mid-poll after ms of I2C, so `entry_now - req_tick`
   wraps negative and fires instantly.
-- Host tool: `tools/pd.py` (`arm/off/status/caps/req/watch`, decodes PDOs and
-  the 20-B `pdsta` reply — field layout in `pd::status`).
+- Host tool: `tools/pd.py` (`arm/off/hardreset/status/caps/req/watch`, decodes
+  PDOs and the 20-B `pdsta` reply — field layout in `pd::status`).
 - **Danger:** a granted request raises the OUT-port voltage. Nothing may be
   attached downstream when triggering; any future always-on/auto policy must
   gate on that.

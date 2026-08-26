@@ -139,10 +139,10 @@ Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the firs
 | `tftfl` | `OK` / `ER`+stage | our dev verb: TFT test pattern (no args) or solid fill (RGB565 LE u16) (tools/tft.py) |
 | `tftbl` | `OK` / `ER`+stage | our dev verb: backlight PWM compare, LE u16 0..=999 (tools/tft.py) |
 | `tftui` | `OK` / `ER`+stage | our dev verb: force a main-screen refresh (tools/tft.py) |
-| `pdctl` | `OK` / `ER`+stage | our dev verb: PD sink engine off (arg 0) / arm (arg 1) (pd.rs, tools/pd.py) |
+| `pdctl` | `OK` / `ER`+stage | our dev verb: PD sink engine off (0) / arm (1) / hard-reset (2) (pd.rs, tools/pd.py) |
 | `pdsta` | `OK`+20 B | our dev verb: PD engine state (layout: `pd::status`) |
 | `pdcap` | `OK`+n+n×4 B | our dev verb: received source PDOs (LE u32 each) |
-| `pdreq` | `OK` / `ER` | our dev verb: request source PDO n (1-based; fixed-supply only) — **raises OUT voltage** |
+| `pdreq` | `OK` / `ER` | our dev verb: `pdreq <n> [mv u16][ma u16]` — request source PDO n (1-based; fixed, or PPS APDO with a setpoint) — **raises OUT voltage** |
 
 Keeping `getva` byte-compatible (same reply) lets existing host tools work
 unchanged. The dev/debug verbs (`i2crd adcrd clkrd tftfl tftbl tftui` — and
