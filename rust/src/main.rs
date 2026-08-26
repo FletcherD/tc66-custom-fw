@@ -40,7 +40,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 38;
+const BUILD_ID: u32 = 39;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 type Serial<'a> = SerialPort<'a, usb_bus::UsbBus>;
@@ -119,9 +119,21 @@ fn main() -> ! {
      * (ui.rs dirty tracking), so an idle refresh costs nothing */
     let mut ui_ticks: u32 = 0;
 
+    /* Screen idle timeout: after 10 min with no measurable input the panel
+     * is blanked (DISPOFF + backlight off) — an overnight static screen
+     * caused real LCD image persistence. Activity = bus voltage above
+     * 2.5 V or current above 1 mA; wake within a second of either. */
+    const IDLE_OFF_SECS: u32 = 600;
+    let mut idle_secs: u32 = 0;
+
     let mut buf = [0u8; 64];
     let mut prev_cnt = p.timer5.cnt().read().cnt().bits();
     let mut tick_acc: u32 = 0;
+    /* powerz arming is gated on Configured: an ep write BEFORE the first bus
+     * reset lands in an EPnR whose address field is still 0 — a second
+     * endpoint-0 claimant that wedges EP0 mid-enumeration (config-descriptor
+     * reads time out; found on the bench, builds 36-38). */
+    let mut usb_up = false;
     loop {
         mk(MK_HEART, mk_get(MK_HEART) + 1);
         let cnt = p.timer5.cnt().read().cnt().bits();
@@ -168,13 +180,27 @@ fn main() -> ! {
                     m.mah = (acc_i_1e5s / 360_000) as u32;
                     m.mwh = (acc_p_1e4s / 36_000) as u32;
                 }
+                if tft_alive {
+                    let m = unsafe { *PUBLISHED.0.get() };
+                    if m.v_1e4 > 25_000 || m.i_1e5 > 100 {
+                        idle_secs = 0;
+                        let _ = tft::screen_on(); /* no-op when already on */
+                    } else if idle_secs < IDLE_OFF_SECS {
+                        idle_secs += 1;
+                        if idle_secs == IDLE_OFF_SECS {
+                            let _ = tft::screen_off();
+                        }
+                    }
+                }
             }
             ui_ticks += 1;
             if ui_ticks >= 125 && tft_alive {
                 ui_ticks = 0;
                 /* re-arm before the draw: it's the longest tick-body path,
                  * and an unarmed IN during it risks the powerz 5 ms deadline */
-                pz.arm();
+                if usb_up {
+                    pz.arm();
+                }
                 let m = unsafe { *PUBLISHED.0.get() };
                 let (pw, _) = ina::derive(m.v_1e4, m.i_1e5);
                 /* a failed draw disables the refresh for this boot (a wedged
@@ -185,11 +211,14 @@ fn main() -> ! {
         /* every pass, not only on USB events: a reply consumed while the
          * loop was busy in tick work must be re-armed at the first
          * opportunity, before the host's next request starts NAK-polling */
-        pz.arm();
+        if usb_up {
+            pz.arm();
+        }
         if !dev.poll(&mut [&mut pz, &mut serial]) {
             continue;
         }
-        if dev.state() == UsbDeviceState::Configured && mk_get(MK_STAGE) < STAGE_CONFIG {
+        usb_up = dev.state() == UsbDeviceState::Configured;
+        if usb_up && mk_get(MK_STAGE) < STAGE_CONFIG {
             mk(MK_STAGE, STAGE_CONFIG);
         }
         pz.poll_cmd();
@@ -264,6 +293,7 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
     } else if match5(buf, b"tftfl") {
         /* dev verb: tftfl -> test pattern; tftfl <lo> <hi> -> solid RGB565 fill
          * -> "OK", or "ER" + stage (1 SPI TBE timeout, 2 shift-idle timeout) */
+        let _ = tft::screen_on(); /* draw verbs wake an idle-off screen */
         let r = if buf.len() >= 7 {
             let color = buf[5] as u16 | (buf[6] as u16) << 8;
             tft::fill_rect(0, 0, tft::WIDTH - 1, tft::HEIGHT - 1, color)
@@ -273,11 +303,13 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
         reply_ok_er(dev, serial, r);
     } else if match5(buf, b"tftui") {
         /* dev verb: draw/refresh the main screen from published values */
+        let _ = tft::screen_on();
         let m = unsafe { *PUBLISHED.0.get() };
         let (p, _) = ina::derive(m.v_1e4, m.i_1e5);
         reply_ok_er(dev, serial, ui::draw(m.v_1e4, m.i_1e5, p));
     } else if match5(buf, b"tftbl") {
         /* dev verb: tftbl <lo> <hi> -> backlight PWM compare 0..=999 */
+        let _ = tft::screen_on();
         let r = if buf.len() >= 7 {
             tft::backlight_set(buf[5] as u16 | (buf[6] as u16) << 8)
         } else {

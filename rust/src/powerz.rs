@@ -156,6 +156,14 @@ impl<B: UsbBus> UsbClass<B> for PowerZ<'_, B> {
         Ok(())
     }
 
+    fn reset(&mut self) {
+        /* bus reset re-initializes the endpoint registers: anything we had
+         * armed or queued is gone from the hardware — forget it, or `arm`
+         * would never rewrite after re-enumeration */
+        self.armed = false;
+        self.pending_len = 0;
+    }
+
     fn endpoint_in_complete(&mut self, addr: EndpointAddress) {
         if addr == self.ep_in.address() {
             self.armed = false;

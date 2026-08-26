@@ -90,6 +90,15 @@ usbd-serial terminates transfers with a short packet, so the 192-B `getva`
 arrives in one read (the stock firmware's stuck-last-block cdc_acm quirk does
 not exist here).
 
+**Never write a data endpoint before the device is Configured.** An
+`ep_in.write` before the first bus reset lands in an EPnR whose endpoint-
+address field is still 0 — a second endpoint-0 claimant that corrupts EP0
+control transfers (enumeration wedges on the config-descriptor read with
+host-side -110 timeouts; cost a K1 recovery to find, builds 36–38). All
+powerz arming is gated on `dev.state() == Configured` in the main loop, and
+the class's `reset()` clears armed/pending state so a bus reset can't strand
+it. Keep any future endpoint writes behind the same gate.
+
 Build profile stays `opt-level = 1`, `lto = false`, `codegen-units = 1`: the
 original C reference had an unexplained post-enumeration lockup when the USB
 path was aggressively inlined at `-Os`; revisit optimization only as an
@@ -197,6 +206,12 @@ subtleties, both load-bearing:
   soft-connect), brightness = TIMER1 CH1 PWM on PB3 (1 kHz, compare 0..=999,
   init 499). Verbs: `tftfl` = test pattern / solid fill, `tftbl` = brightness,
   `tftui` = force a screen refresh (host side: `tools/tft.py`).
+  **Screen idle timeout**: 10 min with no measurable input (V ≤ 2.5 V and
+  I ≤ 1 mA) blanks the panel — DISPOFF (source outputs parked, so no static
+  image is driven into the liquid crystal; an overnight static screen caused
+  real image persistence) plus backlight off. Wakes within 1 s of activity;
+  the tft dev verbs also wake it. GRAM writes still work while blanked, so
+  ui::draw keeps running and content is current at wake.
 - The main screen (`ui.rs` + `font.rs`): three 8-cell lines — V yellow,
   I cyan, P green — at fixed monospace cell positions (18×24 px). Cells are
   always fully overdrawn fg/bg (no clear → no flicker) and only redrawn when

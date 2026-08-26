@@ -24,6 +24,9 @@ const TIMEOUT: u32 = 100_000;
 struct Racy<T>(core::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for Racy<T> {}
 static INITED: Racy<bool> = Racy(core::cell::UnsafeCell::new(false));
+/* screen-off state + the backlight compare to restore on wake */
+static SCREEN_OFF: Racy<bool> = Racy(core::cell::UnsafeCell::new(false));
+static LAST_BL: Racy<u16> = Racy(core::cell::UnsafeCell::new(499));
 
 #[inline(never)]
 fn spi_write_byte(b: u8) -> Result<(), u8> {
@@ -291,12 +294,46 @@ fn backlight_init() {
     tim.ctl0().modify(|_, w| w.cen().enabled());
 }
 
-/// Set backlight PWM compare directly (0 = dark .. 999 = full).
+/// Set backlight PWM compare directly (0 = dark .. 999 = full). Also the
+/// wake-restore value for the idle screen-off.
 #[inline(never)]
 pub fn backlight_set(compare: u16) -> Result<(), u8> {
     ensure_init()?;
     let tim = unsafe { &*pac::Timer1::ptr() };
     let c = if compare > 999 { 999 } else { compare };
+    unsafe { *LAST_BL.0.get() = c };
     tim.ch1cv().write(|w| w.ch1val().bits(c as u32));
+    Ok(())
+}
+
+/// Idle screen-off: DISPOFF (source outputs go to a fixed level — no static
+/// image driven into the liquid crystal, the actual burn-in mechanism) plus
+/// backlight to 0. GRAM writes still work while off, so ui::draw can keep
+/// running; wake is a single DISPON + backlight restore. No-ops when already
+/// in the requested state.
+#[inline(never)]
+pub fn screen_off() -> Result<(), u8> {
+    ensure_init()?;
+    if unsafe { *SCREEN_OFF.0.get() } {
+        return Ok(());
+    }
+    write_command(0x28)?; /* DISPOFF */
+    let tim = unsafe { &*pac::Timer1::ptr() };
+    tim.ch1cv().write(|w| w.ch1val().bits(0)); /* raw: keep LAST_BL intact */
+    unsafe { *SCREEN_OFF.0.get() = true };
+    Ok(())
+}
+
+#[inline(never)]
+pub fn screen_on() -> Result<(), u8> {
+    ensure_init()?;
+    if !unsafe { *SCREEN_OFF.0.get() } {
+        return Ok(());
+    }
+    write_command(0x29)?; /* DISPON */
+    let tim = unsafe { &*pac::Timer1::ptr() };
+    let bl = unsafe { *LAST_BL.0.get() };
+    tim.ch1cv().write(|w| w.ch1val().bits(bl as u32));
+    unsafe { *SCREEN_OFF.0.get() = false };
     Ok(())
 }
