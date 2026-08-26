@@ -69,7 +69,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 76;
+const BUILD_ID: u32 = 79;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -402,6 +402,17 @@ fn on_packet(buf: &[u8]) {
             let r = match buf.get(5) {
                 Some(&m) => qc::trigger(m),
                 None => Err(0x0F),
+            };
+            reply_ok_er(r);
+        }
+    } else if match5(buf, b"qc3ct") {
+        #[cfg(feature = "dev-verbs")]
+        {
+            /* qc3ct <dir> <count>: QC3.0 continuous, dir 0=up 1=down,
+             * count 200 mV steps. First call runs entry (~1.5 s). */
+            let r = match (buf.get(5), buf.get(6)) {
+                (Some(&d), Some(&n)) => qc::qc3(d != 0, n),
+                _ => Err(0x0F),
             };
             reply_ok_er(r);
         }

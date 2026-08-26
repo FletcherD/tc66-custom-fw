@@ -42,6 +42,10 @@ unsafe impl<T> Sync for Racy<T> {}
 /// Thread-exclusive (verb dispatch only): set once QC entry has run, so a
 /// voltage change skips the 1.25 s re-entry. Cleared by `off()`.
 static ENTERED: Racy<bool> = Racy(core::cell::UnsafeCell::new(false));
+/// Set once the QC3.0 continuous base (D+ 0.6 V / D− 3.3 V) is established,
+/// so a repeated `qc3` call keeps stepping instead of re-basing. Cleared by
+/// `off()` and by any discrete `trigger()`.
+static IN_QC3: Racy<bool> = Racy(core::cell::UnsafeCell::new(false));
 
 /// PA13/PA14/PB4/PB5 as push-pull outputs (the drive the resistor network
 /// expects — mirrors the stock config).
@@ -85,6 +89,51 @@ pub fn trigger(mode: u8) -> Result<(), u8> {
         unsafe { *ENTERED.0.get() = true };
     }
     drive(LEVELS[mode as usize]);
+    unsafe { *IN_QC3.0.get() = false };
+    Ok(())
+}
+
+/// A single QC3.0 continuous-mode step. Exact replicas of the stock
+/// `charge_trigger_pulse` pair: `up` = fn1 @0x08009b00 (D+ pulsed high 10 ms
+/// = +200 mV), else fn2 @0x08009b48 (D− dipped low 10 ms = −200 mV). Both
+/// leave the continuous base D+ 0.6 V / D− 3.3 V.
+fn qc3_step(up: bool) {
+    // tuple order: (PA13, PA14, PB4, PB5); D− 0.6 V = PB5 on / PB4 off.
+    if up {
+        drive((true, true, true, true)); // D+ 3.3, D- 3.3
+        crate::board::delay_ms(10);
+        drive((true, false, true, true)); // D+ 0.6, D- 3.3 (base)
+    } else {
+        drive((true, false, false, true)); // D+ 0.6, D- 0.6 (PB5 on, PB4 off)
+        crate::board::delay_ms(10);
+        drive((true, false, true, true)); // D+ 0.6, D- 3.3 (base)
+    }
+}
+
+/// `qc3 <dir> <count>`: QC3.0 continuous fine-stepping. dir 0 = up (+200 mV),
+/// 1 = down. The first call after entry/off runs QC entry (if needed) and
+/// establishes the continuous base (D+ 0.6 V / D− 3.3 V); later calls keep
+/// stepping from where they left off. `qcoff` or any `qctrg` exits QC3.
+pub fn qc3(down: bool, count: u8) -> Result<(), u8> {
+    config_pins();
+    if !unsafe { *ENTERED.0.get() } {
+        drive(LEVELS[0]);
+        crate::board::delay_ms(1500);
+        unsafe { *ENTERED.0.get() = true };
+    }
+    if !unsafe { *IN_QC3.0.get() } {
+        /* enter continuous mode: settle at the base D+ 0.6 V / D− 3.3 V */
+        drive((true, false, true, true));
+        crate::board::delay_ms(100);
+        unsafe { *IN_QC3.0.get() = true };
+    }
+    for _ in 0..count {
+        qc3_step(!down);
+        /* dwell at the base between pulses — back-to-back edges merge into
+         * one and the charger counts a single step (bench-confirmed); the
+         * stock negotiator likewise spaces its pulse calls */
+        crate::board::delay_ms(20);
+    }
     Ok(())
 }
 
@@ -97,6 +146,9 @@ pub fn off() -> Result<(), u8> {
     rcu.ahben().modify(|_, w| w.paen().enabled().pben().enabled());
     gpioa.ctl().modify(|_, w| w.ctl13().input().ctl14().input());
     gpiob.ctl().modify(|_, w| w.ctl4().input().ctl5().input());
-    unsafe { *ENTERED.0.get() = false };
+    unsafe {
+        *ENTERED.0.get() = false;
+        *IN_QC3.0.get() = false;
+    }
     Ok(())
 }

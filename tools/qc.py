@@ -5,6 +5,9 @@
                        for QC entry) — then reads the meter's own bus voltage
   qc.py off            release D+/D- (charger reverts to 5 V), restores SWD
   qc.py sweep          5 -> 9 -> 12 -> 20 -> 5, reading bus at each step
+  qc.py up [n]         QC3.0: +200 mV x n (default 1), reads bus
+  qc.py down [n]       QC3.0: -200 mV x n
+  qc.py qc3            QC3.0 demo: enter, +10 steps, -5 steps, reading bus
 
 DANGER: a QC trigger RAISES THE OUT-PORT VOLTAGE. Nothing downstream.
 Only works with a QC2.0-capable charger on IN (non-PD; a PD source ignores
@@ -69,6 +72,23 @@ def main():
     elif cmd == "sweep":
         for v in (5, 9, 12, 20, 5):
             trig(s, v)
+    elif cmd in ("up", "down"):
+        n = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+        ok(xfer(s, b"qc3ct" + bytes([1 if cmd == "down" else 0, n])), "QC3 %s x%d" % (cmd, n))
+        time.sleep(0.4 + 0.02 * n)
+        print("   bus: %.3f V" % (bus(s) or 0))
+    elif cmd == "qc3":
+        ok(xfer(s, b"qc3ct" + bytes([0, 1])), "QC3 enter+1up")  # entry (~1.5s)
+        time.sleep(0.5)
+        print("   base: %.3f V" % (bus(s) or 0))
+        for _ in range(10):
+            xfer(s, b"qc3ct" + bytes([0, 1]))
+            time.sleep(0.15)
+        print("   after +10 steps: %.3f V" % (bus(s) or 0))
+        for _ in range(5):
+            xfer(s, b"qc3ct" + bytes([1, 1]))
+            time.sleep(0.15)
+        print("   after -5 steps:  %.3f V" % (bus(s) or 0))
     else:
         v = int(cmd)
         if v not in MODES:
