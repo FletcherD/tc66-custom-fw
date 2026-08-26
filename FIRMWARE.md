@@ -27,6 +27,7 @@ the ina.rs module doc.
 | `flasher.rs` | `updat` self-flasher (`.flasher` section, runs from SRAM) |
 | `i2c.rs` | polled I2C0 master (INA226 + EEPROM + FUSB302 bus), `i2crd` dev verb backend, bus-unstick recovery |
 | `pd.rs` | FUSB302 USB-PD sink engine (M4): attach/orientation, source-caps collection, voltage trigger; `pdctl`/`pdsta`/`pdcap`/`pdreq` verb backends |
+| `qc.rs` | Quick Charge 2.0 D+/D− trigger (M4): PA13/PA14 + PB4/PB5 level synthesis, `qctrg`/`qcoff` verb backends |
 | `ina.rs` | the measurement subsystem: TIMER5 250 Hz sampler ISR (interleaved INA226 reads), EEPROM calibration, NTC/D± conversion, published-measurement state (`Meas`/`snapshot()`), `pause()` bus rule |
 | `adc.rs` | polled on-chip ADC (NTC, D+/D−), `adcrd` dev verb backend |
 | `getva.rs` | real `getva` packet builder (template + CRC16/MODBUS + AES-256-ECB) |
@@ -439,12 +440,6 @@ past the ~10 s keepalive deadline).
   flipping it to the idle pin eats an arriving message and drops the contract
   (bench-hit); both pins are swept only pre-attach. Vdd is the Vrefint ratio
   (ina.rs ADC burst). See main.rs `powerz_payload`.
-- **Not yet:** sink-side QC/FCP/SCP/AFC — the separate D+/D− bit-bang engine
-  (PA13/PA14 + PB4/PB5, static-level + handshake routines mapped in the RE
-  repo's PD_VBUS_FINDINGS.md; the exact per-mode GPIO set/clear patterns are
-  decoded from stock `set_dpm_trigger_gpio @0x08009b8e`). Needs a QC source
-  to verify a real voltage change; our own ADC ch8/ch9 can confirm the D±
-  lines move.
 - **Timeout gotcha (cost a debug cycle):** state timeouts must compare
   against a **fresh** `ina::ticks()` read, not the poll-entry snapshot — a
   request is stamped mid-poll after ms of I2C, so `entry_now - req_tick`
@@ -454,6 +449,35 @@ past the ~10 s keepalive deadline).
 - **Danger:** a granted request raises the OUT-port voltage. Nothing may be
   attached downstream when triggering; any future always-on/auto policy must
   gate on that.
+
+## Quick Charge 2.0 trigger (M4, `qc.rs`)
+
+QC is NOT a CC/PD protocol — it raises a charger's output by presenting fixed
+voltages on the pass-through **D+/D−** lines, so it's a wholly separate engine
+from `pd.rs` (different pins, no FUSB302, no CC). Host-armed dev verb,
+GPIO-only (no shared bus, no `ina::pause`), nothing at boot.
+
+- **Level synthesis** (recovered from stock `set_dpm_trigger_gpio
+  @0x08009b8e`): a resistor network driven by four GPIOs — **PA13** = D+
+  0.6 V enable, **PA14** = D+ boost to 3.3 V, **PB5** = D− 0.6 V enable,
+  **PB4** = D− boost. Push-pull outputs, drive high = on. The four QC2 combos:
+  mode 0 = 5 V (D+ 0.6/D− 0), 1 = 9 V (3.3/0.6), 2 = 12 V (0.6/0.6),
+  3 = 20 V (3.3/3.3). Full table in the qc.rs module doc.
+- **Entry:** hold mode 0 (D+ 0.6 V) for 1.5 s so the charger leaves 5 V mode
+  and drops its D+/D− short; then any mode sets the voltage. A static
+  `ENTERED` flag skips re-entry on a later change; `qcoff` clears it and
+  releases the pins (D± float, charger reverts to 5 V, our D± ADC + SWD work
+  again). `qctrg`'s first call blocks ~1.5 s (dev-verb, fine).
+- **PA13/PA14 are SWDIO/SWCLK** — `make markers` is dead while a QC trigger is
+  active; `qcoff` restores SWD.
+- Bench-verified against a Class-A QC2.0 charger: 5.11 / 9.13 / 12.14 V on the
+  meter's own sampler, transitions both directions, clean release. (20 V is
+  requested correctly but a Class-A charger caps at 12 V — that's the source
+  declining, not a firmware limit.) FCP/SCP/AFC (the stock
+  `charge_protocol_handshake` jump table) and QC3.0 continuous ±200 mV
+  (`charge_trigger_pulse`) are the natural next additions on this engine.
+- Host tool: `tools/qc.py` (`5|9|12|20`, `off`, `sweep`).
+- **Danger:** raises the OUT-port voltage — nothing downstream when triggering.
 
 ## Build / flash / debug workflow
 

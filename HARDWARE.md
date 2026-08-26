@@ -143,6 +143,8 @@ Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the firs
 | `pdsta` | `OK`+20 B | our dev verb: PD engine state (layout: `pd::status`) |
 | `pdcap` | `OK`+n+n×4 B | our dev verb: received source PDOs (LE u32 each) |
 | `pdreq` | `OK` / `ER` | our dev verb: `pdreq <n> [mv u16][ma u16]` — request source PDO n (1-based; fixed, or PPS APDO with a setpoint) — **raises OUT voltage** |
+| `qctrg` | `OK` / `ER` | our dev verb: `qctrg <mode>` QC2.0 D+/D− trigger, mode 0/1/2/3 = 5/9/12/20 V (blocks ~1.5 s on first call) — **raises OUT voltage** (qc.rs, tools/qc.py) |
+| `qcoff` | `OK` / `ER` | our dev verb: release the QC D+/D− pins (charger reverts to 5 V; restores D± ADC + SWD) |
 
 Keeping `getva` byte-compatible (same reply) lets existing host tools work
 unchanged. The dev/debug verbs (`i2crd adcrd clkrd tftfl tftbl tftui` — and

@@ -58,16 +58,17 @@ gone) — our own protocol on top of a compatible base, and room to add features
   96 W (fixed PDOs at PD 2.0, 5/9/15/20 V) and a PD 3.0 source with a
   3.3–11 V PPS APDO (rev-3.0 negotiation, PPS fine-stepping across the range,
   keepalive holding the contract). CC-pin voltages (Vcc1/Vcc2) and
-  the logic rail (Vdd) are surfaced in the powerz ADC payload. Nothing runs
-  at boot; a granted request **raises the OUT-port voltage** (trigger with
-  nothing downstream).
+  the logic rail (Vdd) are surfaced in the powerz ADC payload. **Quick
+  Charge 2.0** is a separate D+/D− trigger engine (`rust/src/qc.rs`, verbs
+  `qctrg`/`qcoff`, host tool `tools/qc.py`) — bench-verified 5/9/12 V against
+  a QC2.0 charger. Nothing runs at boot; a granted request **raises the
+  OUT-port voltage** (trigger with nothing downstream).
 - **Next steps** (see also the open items in QUIRKS.md):
   - **M2 — persistence** (real serial/run-count, energy write-back to the
     wear-leveled EEPROM journal, `gtrec` log, EEPROM writes in the I²C
     driver).
-  - **M4 extensions:** verify PPS against a PPS source; the QC2/QC3/FCP/SCP/
-    AFC D+/D− trigger engine (PA13/PA14 + PB4/PB5 — the per-mode GPIO
-    patterns are decoded from the stock RE, needs a QC source to verify);
+  - **M4 extensions:** FCP/SCP/AFC and QC3.0 continuous ±200 mV on the
+    existing D+/D− engine (`qc.rs` — QC2.0 5/9/12 V is bench-verified);
     a KM003C PD-capture attribute.
   - The remaining QUIRKS.md open items (§1 NAK/APB stalls, §2 residual
     event-loss mechanism) and stock-firmware Tier 2 comparison. (Both
