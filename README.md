@@ -54,9 +54,10 @@ gone) — our own protocol on top of a compatible base, and room to add features
   sink engine (`rust/src/pd.rs`, verbs `pdctl`/`pdsta`/`pdcap`/`pdreq`,
   host tool `tools/pd.py`): attach/orientation, source-capability
   collection, rev negotiation, fixed-PDO voltage triggering, PPS/APDO
-  requests, and Hard Reset — bench-verified 5/9/15/20 V against an Apple
-  96 W charger (which offers only fixed PDOs at PD 2.0; the PPS path is
-  code-complete, awaiting a PPS source). CC-pin voltages (Vcc1/Vcc2) and
+  requests, and Hard Reset — bench-verified against two chargers: an Apple
+  96 W (fixed PDOs at PD 2.0, 5/9/15/20 V) and a PD 3.0 source with a
+  3.3–11 V PPS APDO (rev-3.0 negotiation, PPS fine-stepping across the range,
+  keepalive holding the contract). CC-pin voltages (Vcc1/Vcc2) and
   the logic rail (Vdd) are surfaced in the powerz ADC payload. Nothing runs
   at boot; a granted request **raises the OUT-port voltage** (trigger with
   nothing downstream).

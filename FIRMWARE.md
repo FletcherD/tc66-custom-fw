@@ -398,9 +398,10 @@ Related subtleties, all load-bearing:
 
 Host-armed FUSB302 PD 2.0/3.0 sink — **nothing runs at boot**; `pdctl 1` arms
 it, `pdctl 0` shuts it off, `pdctl 2` sends a Hard Reset. Bench-verified
-against an Apple 96 W charger (5/9/15/20 V triggers, Accept+PS_RDY on every
-request; that charger offers only fixed PDOs at PD 2.0, so PPS and the
-rev-3.0 path are code-complete but not yet bench-verified).
+against two chargers: an Apple 96 W (fixed PDOs at PD 2.0, 5/9/15/20 V) and a
+PD 3.0 source with a 3.3–11 V PPS APDO (rev-3.0 negotiation, fixed PDOs, and
+PPS fine-stepping across the whole APDO range, with a 9 V PPS contract held
+past the ~10 s keepalive deadline).
 
 - **Structure:** all thread-mode (main-loop `pd::service()` + verb handlers —
   one context, so the `PD` static needs no synchronization). Every FUSB302
