@@ -23,6 +23,8 @@
 //! sampler pause per 8 ms — the measurement window stretches slightly
 //! while a PD session is active. Idle (state 0, the default): zero cost.
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use crate::i2c;
 use crate::ina;
 
@@ -180,6 +182,120 @@ static PD: Racy<Pd> = Racy(core::cell::UnsafeCell::new(Pd {
 
 fn pd() -> &'static mut Pd {
     unsafe { &mut *PD.0.get() }
+}
+
+/* ---- PD capture (KM003C PdPacket attribute 0x0010) ----
+ *
+ * Every PD message the engine sends/receives, plus connect/disconnect, is
+ * formatted into a KM003C PdPacket EVENT and pushed to a ring. The powerz
+ * ISR drains it into GetData(ATT_PD) replies (powerz.rs). SPSC: the producer
+ * is thread mode (rx_frame/send_frame/attach/detach all run in service() or a
+ * verb — one context), the consumer is the USBD_LP ISR (drain_pd_packet).
+ * head advances only in the producer, tail only in the consumer, and a slot
+ * is written before head publishes it and read only while tail < head, so the
+ * two never touch the same slot. Ring full = drop newest (capture is
+ * best-effort).
+ *
+ * Event wire format (KM003C, github.com/okhsunrog/km003c-protocol-research):
+ *   connect/disconnect (6 B): 0x45, ts LE24, 0x00, code(0x21/0x22)
+ *   wrapped PD msg (6+N B): size_flag=0x80|(N+5), ts LE32, sop=0, N wire bytes
+ * byte0 bit7 distinguishes them (0x45 clear, size_flag set). N ≤ 30
+ * (2-byte header + up to 7 data objects). */
+const CAP_SLOTS: usize = 8;
+const CAP_SLOT_LEN: usize = 40; /* 6 header + 30 wire, rounded */
+struct CapRing {
+    bufs: core::cell::UnsafeCell<[[u8; CAP_SLOT_LEN]; CAP_SLOTS]>,
+    lens: core::cell::UnsafeCell<[u8; CAP_SLOTS]>,
+    head: AtomicU32,
+    tail: AtomicU32,
+}
+unsafe impl Sync for CapRing {}
+static CAP: CapRing = CapRing {
+    bufs: core::cell::UnsafeCell::new([[0; CAP_SLOT_LEN]; CAP_SLOTS]),
+    lens: core::cell::UnsafeCell::new([0; CAP_SLOTS]),
+    head: AtomicU32::new(0),
+    tail: AtomicU32::new(0),
+};
+
+/* Preamble fields (KM003C PD Measurement Block), published by service() in
+ * thread mode and read by the ISR — plain atomics, staleness harmless. */
+static PD_TS_MS: AtomicU32 = AtomicU32::new(0);
+static PD_VBUS_MV: AtomicU32 = AtomicU32::new(0);
+static PD_IBUS_MA: AtomicU32 = AtomicU32::new(0); /* i16 stored as u32 */
+static PD_CC1_MV: AtomicU32 = AtomicU32::new(0);
+static PD_CC2_MV: AtomicU32 = AtomicU32::new(0);
+
+fn now_ms() -> u32 {
+    ina::ticks().wrapping_mul(4) /* 4 ms per sampler tick */
+}
+
+/// Push a pre-formatted event of `len` bytes into the capture ring (thread
+/// mode). Full ring drops the event.
+fn cap_push(bytes: &[u8]) {
+    let h = CAP.head.load(Ordering::Relaxed);
+    let t = CAP.tail.load(Ordering::Acquire);
+    if h.wrapping_sub(t) >= CAP_SLOTS as u32 {
+        return; /* full: drop newest */
+    }
+    let i = h as usize % CAP_SLOTS;
+    let n = bytes.len().min(CAP_SLOT_LEN);
+    unsafe {
+        let slot = &mut (*CAP.bufs.get())[i];
+        slot[..n].copy_from_slice(&bytes[..n]);
+        (*CAP.lens.get())[i] = n as u8;
+    }
+    CAP.head.store(h.wrapping_add(1), Ordering::Release);
+}
+
+/// Capture one PD wire message (header + data objects) as a wrapped event.
+fn cap_msg(hdr: u16, objs: &[u8]) {
+    let wire = 2 + objs.len();
+    let mut e = [0u8; CAP_SLOT_LEN];
+    e[0] = 0x80 | (wire as u8 + 5); /* size_flag: low 6 bits = N+5 */
+    e[1..5].copy_from_slice(&now_ms().to_le_bytes());
+    e[5] = 0; /* SOP */
+    e[6..8].copy_from_slice(&hdr.to_le_bytes());
+    e[8..8 + objs.len()].copy_from_slice(objs);
+    cap_push(&e[..6 + wire]);
+}
+
+/// Capture a connect (0x21) / disconnect (0x22) event.
+fn cap_conn(code: u8) {
+    let ms = now_ms();
+    let e = [0x45, ms as u8, (ms >> 8) as u8, (ms >> 16) as u8, 0x00, code];
+    cap_push(&e);
+}
+
+/// Build a KM003C PdPacket payload into `out` (ISR, single consumer): the
+/// 12-byte measurement preamble, then as many whole events as fit. Returns
+/// the payload length. Drains the events it emits.
+pub fn drain_pd_packet(out: &mut [u8]) -> usize {
+    if out.len() < 12 {
+        return 0;
+    }
+    out[0..4].copy_from_slice(&PD_TS_MS.load(Ordering::Relaxed).to_le_bytes());
+    out[4..6].copy_from_slice(&(PD_VBUS_MV.load(Ordering::Relaxed) as u16).to_le_bytes());
+    out[6..8].copy_from_slice(&(PD_IBUS_MA.load(Ordering::Relaxed) as u16).to_le_bytes());
+    out[8..10].copy_from_slice(&(PD_CC1_MV.load(Ordering::Relaxed) as u16).to_le_bytes());
+    out[10..12].copy_from_slice(&(PD_CC2_MV.load(Ordering::Relaxed) as u16).to_le_bytes());
+    let mut len = 12;
+    loop {
+        let t = CAP.tail.load(Ordering::Relaxed);
+        let h = CAP.head.load(Ordering::Acquire);
+        if h == t {
+            break;
+        }
+        let i = t as usize % CAP_SLOTS;
+        let n = unsafe { (*CAP.lens.get())[i] } as usize;
+        if len + n > out.len() {
+            break; /* next event doesn't fit this packet; leave it queued */
+        }
+        let slot = unsafe { &(*CAP.bufs.get())[i] };
+        out[len..len + n].copy_from_slice(&slot[..n]);
+        len += n;
+        CAP.tail.store(t.wrapping_add(1), Ordering::Release);
+    }
+    len
 }
 
 /* ---- I²C helpers (bus rule: every transaction inside ina::pause) ---- */
@@ -453,6 +569,14 @@ pub fn service() {
             p.err = e;
         }
     }
+    /* publish the KM003C PD-capture preamble (measurement block) */
+    let m = ina::snapshot();
+    PD_TS_MS.store(now_ms(), Ordering::Relaxed);
+    PD_VBUS_MV.store(m.v_1e4 / 10, Ordering::Relaxed); /* 1e-4 V -> mV */
+    PD_IBUS_MA.store((m.i_1e5 / 100) as u16 as u32, Ordering::Relaxed); /* 1e-5 A -> mA */
+    PD_CC1_MV.store(p.vcc1_mv as u32, Ordering::Relaxed);
+    PD_CC2_MV.store(p.vcc2_mv as u32, Ordering::Relaxed);
+
     /* PPS keepalive: a PPS contract dies (source hard-reset) unless the sink
      * re-Requests within ~10 s — re-send the standing RDO every 8 s */
     if p.state == ST_CONTRACT
@@ -507,6 +631,7 @@ fn attach_poll(p: &mut Pd) -> Result<(), u8> {
     p.detach = 0;
     p.state = ST_LISTEN;
     p.cap_ask_tick = ina::ticks();
+    cap_conn(0x21); /* KM003C PD capture: connect */
     Ok(())
 }
 
@@ -558,6 +683,7 @@ fn active_poll(p: &mut Pd, now: u32) -> Result<(), u8> {
             p.req_obj = 0;
             p.state = ST_WAIT_ATTACH;
             wr(R_SWITCHES1, sw1_rev(REV20))?;
+            cap_conn(0x22); /* KM003C PD capture: disconnect */
             return Ok(());
         }
     } else {
@@ -615,6 +741,7 @@ fn rx_frame(p: &mut Pd, now: u32) -> Result<(), u8> {
     let mtype = (hdr & 0x1F) as u8; /* 5-bit in rev 3.0; bit 4 is 0 in 2.0 */
     p.rx_msgs = p.rx_msgs.wrapping_add(1);
     p.rx_hdr = [hdr, p.rx_hdr[0], p.rx_hdr[1]];
+    cap_msg(hdr, &body[..4 * nobj]); /* KM003C PD capture */
 
     if nobj == 0 {
         match mtype {
@@ -737,5 +864,6 @@ fn send_frame(p: &mut Pd, mtype: u8, nobj: u8, objs: &[u8]) -> Result<(), u8> {
     buf[tail..tail + 4].copy_from_slice(&[TK_JAM_CRC, TK_EOP, TK_TXOFF, TK_TXON]);
     wr_buf(&buf[..tail + 4])?;
     p.tx_pend = true;
+    cap_msg(hdr, objs); /* KM003C PD capture (our TX) */
     Ok(())
 }

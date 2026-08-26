@@ -25,9 +25,13 @@ const RSP_REJECT: u8 = 0x06;
 const CMD_GET_DATA: u8 = 0x0C;
 const RSP_PUT_DATA: u8 = 0x41;
 const ATT_ADC: u16 = 0x0001;
+const ATT_PD: u16 = 0x0010; /* KM003C PdPacket (PD capture) */
 
 pub const ADC_PAYLOAD_LEN: usize = 44;
 const ADC_REPLY_LEN: usize = 8 + ADC_PAYLOAD_LEN;
+/* one PD reply per poll fits a single 64-B bulk packet: 8 header + up to 56
+ * payload (12-B preamble + one or two events); the host polls to drain more */
+const PD_REPLY_MAX: usize = 64;
 
 pub struct PowerZ<'a, B: UsbBus> {
     iface: InterfaceNumber,
@@ -37,6 +41,8 @@ pub struct PowerZ<'a, B: UsbBus> {
      * the IN endpoint takes it */
     pending: [u8; 4],
     pending_len: usize,
+    /* pending PD-capture reply length (bytes in PD_REPLY static); 0 = none */
+    pd_pending: usize,
 }
 
 /* The pre-built PutData(ADC) reply lives in a static, NOT in the struct:
@@ -70,6 +76,11 @@ const fn reply_template() -> [u8; ADC_REPLY_LEN] {
 }
 static REPLY: RacyCell<[u8; ADC_REPLY_LEN]> =
     RacyCell(core::cell::UnsafeCell::new(reply_template()));
+/* PD-capture PutData reply, built on demand in poll_cmd (same exclusive
+ * powerz context as REPLY). A static, not a struct field, for the same
+ * stack-budget reason. */
+static PD_REPLY: RacyCell<[u8; PD_REPLY_MAX]> =
+    RacyCell(core::cell::UnsafeCell::new([0; PD_REPLY_MAX]));
 
 impl<'a, B: UsbBus> PowerZ<'a, B> {
     pub fn new(alloc: &'a UsbBusAllocator<B>) -> PowerZ<'a, B> {
@@ -93,11 +104,21 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
                 .unwrap(),
             pending: [0; 4],
             pending_len: 0,
+            pd_pending: 0,
         }
     }
 
-    /// Retry a stashed reply; true once nothing is pending.
+    /// Retry any stashed reply (PD capture first, then a command response);
+    /// true once nothing is pending. PD replies take priority over the
+    /// re-armed ADC packet so a GetData(ATT_PD) is answered with PD data.
     fn flush(&mut self) -> bool {
+        if self.pd_pending > 0 {
+            let r = unsafe { &*PD_REPLY.0.get() };
+            match self.ep_in.write(&r[..self.pd_pending]) {
+                Ok(_) => self.pd_pending = 0,
+                Err(_) => return false,
+            }
+        }
         if self.pending_len == 0 {
             return true;
         }
@@ -167,6 +188,7 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
         let tid = buf[1];
         let attr = (buf[2] as u16 | (buf[3] as u16) << 8) >> 1;
         match cmd {
+            CMD_GET_DATA if attr == ATT_PD => self.build_pd(tid),
             CMD_GET_DATA if attr & ATT_ADC != 0 => {} /* pre-armed reply serves it */
             CMD_CONNECT | CMD_DISCONNECT => {
                 self.queue(&[RSP_ACCEPT, tid, 0, 0]);
@@ -175,6 +197,30 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
                 self.queue(&[RSP_REJECT, tid, 0, 0]);
             }
         }
+    }
+
+    /// Build a PutData(ATT_PD) reply from the pd.rs capture ring into the
+    /// PD_REPLY static and queue it. The host may read the pre-armed ADC
+    /// packet first, then this on its next IN (filter by the ext-header
+    /// attribute) — so the ADC fast-path is untouched. Empty ring still
+    /// returns the 12-byte measurement preamble.
+    fn build_pd(&mut self, tid: u8) {
+        #[cfg(feature = "dev-verbs")]
+        {
+            let reply = unsafe { &mut *PD_REPLY.0.get() };
+            let payload = crate::pd::drain_pd_packet(&mut reply[8..PD_REPLY_MAX]);
+            let words = ((4 + payload + 3) / 4) as u16; /* ext header + payload, in words */
+            reply[0] = RSP_PUT_DATA;
+            reply[1] = tid;
+            reply[2] = words as u8;
+            reply[3] = (words >> 8) as u8;
+            let ext: u32 = ATT_PD as u32 | (payload as u32) << 22;
+            reply[4..8].copy_from_slice(&ext.to_le_bytes());
+            self.pd_pending = 8 + payload;
+            self.flush();
+        }
+        #[cfg(not(feature = "dev-verbs"))]
+        self.queue(&[RSP_REJECT, tid, 0, 0]); /* no PD engine without dev-verbs */
     }
 }
 
@@ -191,6 +237,7 @@ impl<B: UsbBus> UsbClass<B> for PowerZ<'_, B> {
         /* bus reset re-initializes the endpoint registers: a queued command
          * response is gone from the hardware — forget it */
         self.pending_len = 0;
+        self.pd_pending = 0;
     }
 
     fn endpoint_out(&mut self, addr: EndpointAddress) {
