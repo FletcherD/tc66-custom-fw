@@ -62,7 +62,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 61;
+const BUILD_ID: u32 = 63;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -287,14 +287,12 @@ fn run() -> ! {
         if tft_alive && ui::service().is_err() {
             tft_alive = false;
         }
-        /* NO general thread-mode dev.poll sweep here: mixing a second poll
-         * consumer with the ISR makes CDC latency WORSE on this clone
-         * (bench A/B: pure ISR = query 8 ms / rawva 36 ms; with sweeps at
-         * either 4 ms or per-pass cadence = 24 / 93 ms — identical at both
-         * cadences, so the harm is per-transaction event interference, not
-         * timing). The exceptions that DO sweep: write_all (its drain chain
-         * measurably stalls without it) and the grace window (escape-hatch
-         * robustness outranks latency). */
+        /* NO thread-mode dev.poll sweep here — or anywhere in steady
+         * state: the ISR drain loop is the ONE hardware consumer (the
+         * structural property that spares stock from QUIRKS §3; the old
+         * slow-flash A/B measured second-consumer sweeps making latency
+         * 3x worse). The single exception is the grace window, where
+         * escape-hatch robustness outranks everything. */
         /* dispatch commands the ISR queued; replies (AES etc.) are built
          * right here in thread mode with interrupts enabled */
         run_pending_cmds(false);
@@ -338,10 +336,17 @@ fn on_packet(buf: &[u8]) {
         #[cfg(feature = "pcprf")]
         do_pcprf();
     } else if match5(buf, b"i2crd") {
+        #[cfg(feature = "dev-verbs")]
         do_i2crd(buf);
     } else if match5(buf, b"adcrd") {
+        #[cfg(feature = "dev-verbs")]
         do_adcrd(buf);
+    } else if match5(buf, b"clkrd") {
+        #[cfg(feature = "dev-verbs")]
+        do_clkrd();
     } else if match5(buf, b"tftfl") {
+        #[cfg(feature = "dev-verbs")]
+        {
         /* dev verb: tftfl -> test pattern; tftfl <lo> <hi> -> solid RGB565 fill
          * -> "OK", or "ER" + stage (tft.rs: 1 SPI TBE timeout, 2 shift-idle
          * timeout, 3 DMA timeout, 4 DMA error, 5 busy, 6 pump budget) */
@@ -353,7 +358,10 @@ fn on_packet(buf: &[u8]) {
             tft::test_pattern()
         };
         reply_ok_er(r);
+        }
     } else if match5(buf, b"tftui") {
+        #[cfg(feature = "dev-verbs")]
+        {
         /* dev verb: draw/refresh the main screen from published values
          * (kick + pump to completion — dev verbs may block) */
         let _ = tft::screen_on();
@@ -361,7 +369,10 @@ fn on_packet(buf: &[u8]) {
         let (p, _) = ina::derive(m.v_1e4, m.i_1e5);
         ui::draw(m.v_1e4, m.i_1e5, p);
         reply_ok_er(ui::flush());
+        }
     } else if match5(buf, b"tftbl") {
+        #[cfg(feature = "dev-verbs")]
+        {
         /* dev verb: tftbl <lo> <hi> -> backlight PWM compare 0..=999 */
         let _ = tft::screen_on();
         let r = if buf.len() >= 7 {
@@ -370,6 +381,7 @@ fn on_packet(buf: &[u8]) {
             Err(0x0F)
         };
         reply_ok_er(r);
+        }
     } else if match5(buf, b"updat") {
         /* The flasher erases app flash and takes over the CDC endpoint by
          * hand — the USBD ISR must never run again: mask globally AND in the
@@ -431,6 +443,7 @@ fn do_rawva() {
 /// dev/bring-up verb (ours, not stock):
 ///   i2crd <addr7> <wlen 0..=2> <w0> <w1> <rlen 0..=32>
 /// -> "OK" + rlen bytes, or "ER" + [stage, stat0.lo, stat0.hi, stat1.lo]
+#[cfg(feature = "dev-verbs")]
 #[inline(never)]
 fn do_i2crd(buf: &[u8]) {
     let mut reply = [0u8; 34];
@@ -439,6 +452,7 @@ fn do_i2crd(buf: &[u8]) {
 }
 
 /// dev verb: adcrd <ch> -> "OK" + u32 LE sum-of-16, or "ER" + stage
+#[cfg(feature = "dev-verbs")]
 #[inline(never)]
 fn do_adcrd(buf: &[u8]) {
     let mut reply = [0u8; 6];
@@ -461,6 +475,22 @@ fn do_adcrd(buf: &[u8]) {
         3
     };
     write_all(&reply[..n]);
+}
+
+/// dev verb: clkrd -> "OK" + RCU_CTL + RCU_CFG0 (u32 LE each). One-off for
+/// QUIRKS §1's loose end: the bootloader hands off the clock tree and we
+/// never touch the AHB/APB prescalers (CFG0[10:4]) — the UM requires APB1
+/// > 24 MHz for the USBD. Read-only register peek.
+#[cfg(feature = "dev-verbs")]
+#[inline(never)]
+fn do_clkrd() {
+    let mut reply = [0u8; 10];
+    reply[..2].copy_from_slice(b"OK");
+    let ctl = unsafe { core::ptr::read_volatile(0x4002_1000 as *const u32) };
+    let cfg0 = unsafe { core::ptr::read_volatile(0x4002_1004 as *const u32) };
+    reply[2..6].copy_from_slice(&ctl.to_le_bytes());
+    reply[6..10].copy_from_slice(&cfg0.to_le_bytes());
+    write_all(&reply);
 }
 
 /// Snapshot the published measurements + derived values + window seq for a
@@ -753,15 +783,12 @@ fn powerz_payload() -> [u8; powerz::ADC_PAYLOAD_LEN] {
     };
     put16(30, m.dp_1e2 * 100); /* 1e-2 V -> 0.1 mV units */
     put16(32, m.dm_1e2 * 100);
-    /* TEMP diagnosis counters in unused slots (powerz.rs dbg_get):
-     * vcc1/vcc2/vdd (26/28/34) + tail (36..44) */
-    let d = powerz::dbg_get();
-    for (off, i) in [(26, 4), (28, 5), (34, 6), (36, 0), (38, 1), (40, 2), (42, 3)] {
-        p[off..off + 2].copy_from_slice(&d[i].to_le_bytes());
-    }
+    /* vcc1/vcc2/vdd (26/28/34) + tail (36..44) stay 0 until the FUSB302
+     * is brought up (M4) */
     p
 }
 
+#[cfg(feature = "dev-verbs")]
 #[inline(never)]
 fn reply_ok_er(r: Result<(), u8>) {
     match r {
@@ -771,6 +798,7 @@ fn reply_ok_er(r: Result<(), u8>) {
 }
 
 /// Parse + run an `i2crd` packet; fill `reply`, return its length.
+#[cfg(feature = "dev-verbs")]
 #[inline(never)]
 fn i2c_command(buf: &[u8], reply: &mut [u8; 34]) -> usize {
     if buf.len() < 10 {
@@ -819,17 +847,14 @@ fn write_all(data: &[u8]) {
     let mut budget = 200_000u32;
     while budget > 0 {
         budget -= 1;
-        if budget % 64 == 0 {
-            /* this clone drops completion events (~20-30%); when the drain
-             * chain loses its event, nothing re-kicks it until some other
-             * USB traffic arrives. A periodic thread-mode dev.poll runs
-             * usbd-serial's own flush and sweeps any pending ISTR state —
-             * bench-measured: reply drains stalled in ~50 ms steps without
-             * this. */
-            with_usb(|dev, pz, serial| {
-                dev.poll(&mut [&mut *pz, &mut *serial]);
-            });
-        }
+        /* No thread-mode dev.poll sweep here anymore: it existed because
+         * the slow-flash single-pass ISR lost completion events (~20-30%)
+         * and reply drains stalled in ~50 ms steps. The EPxCS drain loop
+         * in the ISR (QUIRKS §2) services those events at the source, and
+         * removing the sweep leaves exactly ONE hardware consumer in
+         * steady state — the structural property that spares the stock
+         * firmware from QUIRKS §3. A/B on build 62 confirmed no drain
+         * stalls and unchanged latency without it. */
         let done = with_usb(|_, _, serial| {
             if sent < data.len() {
                 match serial.write(&data[sent..]) {

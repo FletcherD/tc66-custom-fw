@@ -401,6 +401,11 @@ All wrapped in `rust/Makefile`:
 Bump `BUILD_ID` in `main.rs` when flashing; reading `MK_BUILD` (0x20001060)
 back proves the new image is actually running.
 
+Cargo features (both default-on, droppable for flash space): `dev-verbs`
+(i2crd adcrd clkrd tftfl tftbl tftui — disabled verbs match and silently
+do nothing) and `pcprf` (the PC profiler + its verb). The product protocol
+(query/getva/rawva/updat/powerz) is never gated.
+
 ### Fast-flash placement (`fast.x` + `make fast-gate`)
 
 The GD32F150 fetches zero-wait only below **0x0800_8000**; above it every

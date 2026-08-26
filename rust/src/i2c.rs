@@ -18,6 +18,8 @@ pub struct I2cErr {
     /// which wait timed out; bit7 set = bus error/NACK detected at that stage
     pub stage: u8,
     pub stat0: u16,
+    /* read only by the i2crd verb's ER reply */
+    #[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
     pub stat1: u16,
 }
 

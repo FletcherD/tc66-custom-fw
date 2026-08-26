@@ -71,20 +71,6 @@ const fn reply_template() -> [u8; ADC_REPLY_LEN] {
 static REPLY: RacyCell<[u8; ADC_REPLY_LEN]> =
     RacyCell(core::cell::UnsafeCell::new(reply_template()));
 
-/* TEMP diagnosis counters (payload tail via dbg_get): 0=in_complete,
- * 1=arm write ok, 2=arm write WouldBlock, 3=flush-false in arm,
- * 4=pending queued, 5=last non-GetData cmd byte, 6=GetData count */
-static DBG: RacyCell<[u16; 7]> = RacyCell(core::cell::UnsafeCell::new([0; 7]));
-pub fn dbg_bump(i: usize) {
-    unsafe { (*DBG.0.get())[i] = (*DBG.0.get())[i].wrapping_add(1) };
-}
-pub fn dbg_set(i: usize, v: u16) {
-    unsafe { (*DBG.0.get())[i] = v };
-}
-pub fn dbg_get() -> [u16; 7] {
-    unsafe { *DBG.0.get() }
-}
-
 impl<'a, B: UsbBus> PowerZ<'a, B> {
     pub fn new(alloc: &'a UsbBusAllocator<B>) -> PowerZ<'a, B> {
         PowerZ {
@@ -161,14 +147,10 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
     /// and 54% of host reads timing out. Do not reintroduce a skip flag.
     pub fn arm(&mut self) {
         if !self.flush() {
-            dbg_bump(3);
             return;
         }
         let reply = unsafe { &*REPLY.0.get() };
-        match self.ep_in.write(reply) {
-            Ok(_) => dbg_bump(1),
-            Err(_) => dbg_bump(2),
-        }
+        let _ = self.ep_in.write(reply); /* WouldBlock while armed = cheap no-op */
     }
 
     /// Service the OUT endpoint. GetData needs no action (the pre-armed
@@ -185,15 +167,11 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
         let tid = buf[1];
         let attr = (buf[2] as u16 | (buf[3] as u16) << 8) >> 1;
         match cmd {
-            CMD_GET_DATA if attr & ATT_ADC != 0 => dbg_bump(6),
+            CMD_GET_DATA if attr & ATT_ADC != 0 => {} /* pre-armed reply serves it */
             CMD_CONNECT | CMD_DISCONNECT => {
-                dbg_bump(4);
-                dbg_set(5, cmd as u16);
                 self.queue(&[RSP_ACCEPT, tid, 0, 0]);
             }
             _ => {
-                dbg_bump(4);
-                dbg_set(5, cmd as u16 | 0x8000);
                 self.queue(&[RSP_REJECT, tid, 0, 0]);
             }
         }
@@ -226,7 +204,6 @@ impl<B: UsbBus> UsbClass<B> for PowerZ<'_, B> {
     }
 
     fn endpoint_in_complete(&mut self, addr: EndpointAddress) {
-        dbg_bump(0);
         if addr == self.ep_in.address() && self.flush() {
             /* no command response queued — re-arm the ADC reply right
              * here, before the host's next request can start NAKing (this

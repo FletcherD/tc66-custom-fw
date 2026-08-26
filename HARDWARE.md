@@ -102,11 +102,16 @@ Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the firs
 | `pcprf` | 516 B plaintext | our dev verb: PC-profiler ring dump (u32 counter + 128 u32 PCs; FIRMWARE.md "PC profiler", tools/pcprofile.py) |
 | `i2crd` | `OK`+data / `ER`+diag | our dev verb: raw I²C read (tools/i2cread.py) |
 | `adcrd` | `OK`+u32 / `ER`+stage | our dev verb: ADC sum-of-16 (tools/adcread.py) |
+| `clkrd` | `OK`+RCU_CTL+RCU_CFG0 (u32 LE ×2) | our dev verb: clock-tree peek (verified: AHB/APB1/APB2 all /1 = 48 MHz) |
 | `tftfl` | `OK` / `ER`+stage | our dev verb: TFT test pattern (no args) or solid fill (RGB565 LE u16) (tools/tft.py) |
 | `tftbl` | `OK` / `ER`+stage | our dev verb: backlight PWM compare, LE u16 0..=999 (tools/tft.py) |
 | `tftui` | `OK` / `ER`+stage | our dev verb: force a main-screen refresh (tools/tft.py) |
 
-Keeping `getva` byte-compatible (same reply) lets existing host tools work unchanged.
+Keeping `getva` byte-compatible (same reply) lets existing host tools work
+unchanged. The dev/debug verbs (`i2crd adcrd clkrd tftfl tftbl tftui` — and
+`pcprf` separately) sit behind default-on cargo features (`dev-verbs`,
+`pcprf`) so they can be dropped for flash space; disabled verbs match and
+silently do nothing.
 
 ### `getva` reply (192 B = three 64-byte blocks, AES-256-ECB)
 Key: `5821fa5601b2f02687ff1204622a4fb086f40260816f9a0ba7f106619ab87288`.

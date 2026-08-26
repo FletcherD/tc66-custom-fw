@@ -23,9 +23,9 @@ sustained NAK phase exists for the stall to bite: powerz sustains ~5000
 reads/s with zero timeouts and CDC sits at sub-ms. The underlying stall
 was never explained by anything in the manual (the audit found only the
 PMA-arbitration note, ns-scale) — treat it as errata-like and re-measure
-only if a new traffic pattern reintroduces NAK phases. RCU_CFG0's APB1
-prescaler (inherited from the bootloader; UM requires >24 MHz for USBD)
-remains worth a one-off dev-verb dump.
+only if a new traffic pattern reintroduces NAK phases. The clock tree is
+exonerated: `clkrd` (2026-08-26) reads RCU_CFG0 = 0x0068000A — AHB/APB1/
+APB2 all /1, so APB1 = 48 MHz, double the UM's 24 MHz USBD minimum.
 
 **Original findings:** while a host
 NAK-polls any of our bulk endpoints (IN awaiting data, or OUT awaiting
@@ -104,24 +104,32 @@ unconditionally (never trusts a software armed-latch), `write_all` runs a
 thread-mode `dev.poll` sweep every 64 spins, the grace window sweeps
 every pass.
 
-## 3. Two poll consumers interfere destructively
+## 3. Two poll consumers interfere destructively — CLOSED STRUCTURALLY
 
-**Confidence: measured effect, unknown mechanism.** A/B on the ISR
-architecture: pure ISR gives query 8 ms / rawva 36 ms round-trips; adding
-thread-mode `dev.poll` sweeps gives 24 / 93 ms — *identical* at 4 ms-cadence
-and per-pass cadence, so the harm is per-transaction (some stateful
-ISTR/EPnR interaction between contexts), not timing contention. This is why
-the main loop deliberately does NOT sweep (see the comment in main.rs).
-Manual note (2026-08-25 audit): UM §22.6.2 flatly forbids touching an
-enabled endpoint's EPxCS/COUNT until its STIF event — a restriction STM32
-doesn't have and the whole stm32-usbd toggle-write model ignores.
+**Status (2026-08-26): the second consumer is gone** (build 62). With the
+ISR drain loop (§2) servicing events at the source, `write_all`'s
+thread-mode `dev.poll` sweep — the last steady-state second consumer,
+kept because reply drains stalled in ~50 ms steps without it on the old
+single-pass ISR — was removed and A/B'd: latency identical (query 0.7 /
+rawva 1.2 / getva 3.1 ms), the 516-B `pcprf` reply drains in 4 ms with no
+stalls, powerz 6.5 k reads/s with zero timeouts. Steady state now has
+**exactly one hardware consumer** — the same structural property that
+spares the stock firmware from this quirk (its superloop never touches
+ISTR/EPnR). The only remaining thread-mode sweep is the grace window,
+where escape-hatch robustness outranks everything. The interference
+mechanism itself was never identified (candidates: UM §22.6.2's
+don't-touch-enabled-EPxCS rule, which STM32 lacks and stm32-usbd's
+toggle-write model ignores; or ISTR read-sensitivity, §2) — with no
+second consumer it no longer matters. RULE THAT REMAINS: never add
+another `dev.poll` caller outside the ISR.
 
-**~8 ms quantization: RESOLVED (2026-08-25).** The residual latency
-staircase was slow-flash instruction fetch (§4), not a host NAK-retry
-schedule: with the USB path in the fast region (build 55+), query fell
-8 → 0.2 ms, rawva 36 → 0.7 ms, getva 48 → 2.3 ms — the quanta are gone
-entirely. Whether the two-consumer harm itself persists on a fast-flash
-build has not been re-measured (the absorptions stay in place).
+**Original findings:** A/B on the (slow-flash) ISR architecture: pure ISR
+gave query 8 ms / rawva 36 ms round-trips; adding thread-mode `dev.poll`
+sweeps gave 24 / 93 ms — *identical* at 4 ms-cadence and per-pass cadence,
+so the harm was per-transaction, not timing contention. The residual
+~8 ms staircase was RESOLVED separately as slow-flash instruction fetch
+(§4): with the USB path in the fast region (build 55+), query fell
+8 → 0.2 ms, rawva 36 → 0.7 ms, getva 48 → 2.3 ms.
 
 ## 4. Soft AES-256 is ~20 ms when ~1–5 ms is expected — RESOLVED
 
