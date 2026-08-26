@@ -37,8 +37,6 @@ pub struct PowerZ<'a, B: UsbBus> {
      * the IN endpoint takes it */
     pending: [u8; 4],
     pending_len: usize,
-    /* whether REPLY is armed on the IN endpoint */
-    armed: bool,
 }
 
 /* The pre-built PutData(ADC) reply lives in a static, NOT in the struct:
@@ -49,6 +47,20 @@ pub struct PowerZ<'a, B: UsbBus> {
 struct RacyCell<T>(core::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for RacyCell<T> {}
 static REPLY: RacyCell<[u8; ADC_REPLY_LEN]> = RacyCell(core::cell::UnsafeCell::new([0; ADC_REPLY_LEN]));
+
+/* TEMP diagnosis counters (payload tail via dbg_get): 0=in_complete,
+ * 1=arm write ok, 2=arm write WouldBlock, 3=flush-false in arm,
+ * 4=pending queued, 5=last non-GetData cmd byte, 6=GetData count */
+static DBG: RacyCell<[u16; 7]> = RacyCell(core::cell::UnsafeCell::new([0; 7]));
+pub fn dbg_bump(i: usize) {
+    unsafe { (*DBG.0.get())[i] = (*DBG.0.get())[i].wrapping_add(1) };
+}
+pub fn dbg_set(i: usize, v: u16) {
+    unsafe { (*DBG.0.get())[i] = v };
+}
+pub fn dbg_get() -> [u16; 7] {
+    unsafe { *DBG.0.get() }
+}
 
 impl<'a, B: UsbBus> PowerZ<'a, B> {
     pub fn new(alloc: &'a UsbBusAllocator<B>) -> PowerZ<'a, B> {
@@ -72,7 +84,6 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
                 .unwrap(),
             pending: [0; 4],
             pending_len: 0,
-            armed: false,
         }
     }
 
@@ -117,13 +128,24 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
     /// build-on-demand reply blows the powerz driver's 5 ms URB timeout.
     /// The armed packet is at most one host poll interval stale; every read
     /// after the first in a burst gets tick-fresh data. A queued command
-    /// response takes priority. No-op while already armed (cheap per-pass).
+    /// response takes priority.
+    ///
+    /// The write is UNCONDITIONAL (WouldBlock while armed is the cheap
+    /// no-op): tracking armed-ness in software does not work, because
+    /// endpoint_in_complete events are silently dropped ~20% of the time on
+    /// this stack/clone (bench-measured 320 callbacks for ~400 consumed
+    /// replies) — a stale "armed" latch left the endpoint chronically empty
+    /// and 54% of host reads timing out. Do not reintroduce a skip flag.
     pub fn arm(&mut self) {
-        if self.armed || !self.flush() {
+        if !self.flush() {
+            dbg_bump(3);
             return;
         }
         let reply = unsafe { &*REPLY.0.get() };
-        self.armed = self.ep_in.write(reply).is_ok();
+        match self.ep_in.write(reply) {
+            Ok(_) => dbg_bump(1),
+            Err(_) => dbg_bump(2),
+        }
     }
 
     /// Service the OUT endpoint. GetData needs no action (the pre-armed
@@ -140,9 +162,17 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
         let tid = buf[1];
         let attr = (buf[2] as u16 | (buf[3] as u16) << 8) >> 1;
         match cmd {
-            CMD_GET_DATA if attr & ATT_ADC != 0 => {}
-            CMD_CONNECT | CMD_DISCONNECT => self.queue(&[RSP_ACCEPT, tid, 0, 0]),
-            _ => self.queue(&[RSP_REJECT, tid, 0, 0]),
+            CMD_GET_DATA if attr & ATT_ADC != 0 => dbg_bump(6),
+            CMD_CONNECT | CMD_DISCONNECT => {
+                dbg_bump(4);
+                dbg_set(5, cmd as u16);
+                self.queue(&[RSP_ACCEPT, tid, 0, 0]);
+            }
+            _ => {
+                dbg_bump(4);
+                dbg_set(5, cmd as u16 | 0x8000);
+                self.queue(&[RSP_REJECT, tid, 0, 0]);
+            }
         }
     }
 }
@@ -157,22 +187,30 @@ impl<B: UsbBus> UsbClass<B> for PowerZ<'_, B> {
     }
 
     fn reset(&mut self) {
-        /* bus reset re-initializes the endpoint registers: anything we had
-         * armed or queued is gone from the hardware — forget it, or `arm`
-         * would never rewrite after re-enumeration */
-        self.armed = false;
+        /* bus reset re-initializes the endpoint registers: a queued command
+         * response is gone from the hardware — forget it */
         self.pending_len = 0;
     }
 
+    fn endpoint_out(&mut self, addr: EndpointAddress) {
+        if addr == self.ep_out.address() {
+            /* serve + re-arm the command endpoint the moment the packet
+             * lands (inside dev.poll): the host retries a NAKed command
+             * write for only 5 ms, and waiting for a main-loop pass to
+             * read it loses that race under storm-degraded loop speed */
+            self.poll_cmd();
+        }
+    }
+
     fn endpoint_in_complete(&mut self, addr: EndpointAddress) {
-        if addr == self.ep_in.address() {
-            self.armed = false;
-            if self.flush() {
-                /* no command response queued — re-arm the ADC reply right
-                 * here, before the host's next request can start NAKing */
-                let reply = unsafe { &*REPLY.0.get() };
-                self.armed = self.ep_in.write(reply).is_ok();
-            }
+        dbg_bump(0);
+        if addr == self.ep_in.address() && self.flush() {
+            /* no command response queued — re-arm the ADC reply right
+             * here, before the host's next request can start NAKing (this
+             * callback is best-effort: see arm() on why the per-pass
+             * unconditional write is the actual guarantee) */
+            let reply = unsafe { &*REPLY.0.get() };
+            let _ = self.ep_in.write(reply);
         }
     }
 }

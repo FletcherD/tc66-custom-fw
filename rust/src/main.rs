@@ -40,7 +40,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 40;
+const BUILD_ID: u32 = 44;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 type Serial<'a> = SerialPort<'a, usb_bus::UsbBus>;
@@ -88,17 +88,19 @@ fn main() -> ! {
 
     board::pa9_high(&p.gpioa);
 
-    /* TIMER5 (basic timer, no pins) free-runs at 10 kHz: first it times the
-     * grace window below, then it is the sampler timebase — 40 counts = one
-     * 4 ms tick, 250 ticks/s, elapsed ticks accrued from CNT deltas each
-     * loop pass so blocked time is caught up, never lost (SysTick's
-     * COUNTFLAG latched a single wrap). 16-bit @ 10 kHz wraps at 6.55 s,
-     * beyond the longest blocking path (write_all's absent-host budget). */
-    p.rcu.apb1en().modify(|_, w| w.timer5en().enabled());
-    p.timer5.psc().write(|w| w.psc().bits(4799)); /* 48 MHz -> 10 kHz */
-    p.timer5.car().write(|w| w.car().bits(0xFFFF));
-    p.timer5.swevg().write(|w| w.upg().set_bit()); /* latch PSC now */
-    p.timer5.ctl0().modify(|_, w| w.cen().enabled());
+    /* SysTick free-runs over its full 24 bits as the timebase: elapsed
+     * CYCLES accrue from CVR deltas each loop pass, so blocked time is
+     * caught up, never lost. SysTick is CORE-internal — reads never stall.
+     * That matters: TIMER5 sits on APB1 with the USBD, and during host
+     * NAK storms every APB access stalls ~1-5 ms; a timebase read per loop
+     * pass made the loop itself storm-degraded (~70 passes/s, bench-
+     * measured), a self-sustaining failure. 24 bits @ 48 MHz wraps at
+     * 349 ms, far beyond any loop pass. One tick = 192_000 cycles = 4 ms. */
+    let mut syst = cortex_m::Peripherals::take().unwrap().SYST;
+    syst.set_clock_source(cortex_m::peripheral::syst::SystClkSource::Core);
+    syst.set_reload(0x00FF_FFFF);
+    syst.clear_current();
+    syst.enable_counter();
 
     /* ---- pseudo-bootloader grace window (dev escape hatch) ----
      * 10 s serving ONLY `query`->firm and `updat` before any feature starts:
@@ -109,13 +111,13 @@ fn main() -> ! {
     mk(MK_PROBE, 0x6ACE_6ACE);
     {
         let mut acc: u32 = 0;
-        let mut prev = p.timer5.cnt().read().cnt().bits();
+        let mut prev = cortex_m::peripheral::SYST::get_current();
         let mut gbuf = [0u8; 64];
-        while acc < 100_000 {
-            /* 10 s of 10 kHz counts */
+        while acc < 480_000_000 {
+            /* 10 s of core cycles */
             mk(MK_HEART, mk_get(MK_HEART) + 1);
-            let c = p.timer5.cnt().read().cnt().bits();
-            acc += c.wrapping_sub(prev) as u32;
+            let c = cortex_m::peripheral::SYST::get_current();
+            acc += prev.wrapping_sub(c) & 0x00FF_FFFF; /* down-counter */
             prev = c;
             if !dev.poll(&mut [&mut pz, &mut serial]) {
                 continue;
@@ -160,7 +162,7 @@ fn main() -> ! {
     let mut idle_secs: u32 = 0;
 
     let mut buf = [0u8; 64];
-    let mut prev_cnt = p.timer5.cnt().read().cnt().bits();
+    let mut prev_cnt = cortex_m::peripheral::SYST::get_current();
     let mut tick_acc: u32 = 0;
     /* powerz arming is gated on Configured: an ep write BEFORE the first bus
      * reset lands in an EPnR whose address field is still 0 — a second
@@ -169,11 +171,11 @@ fn main() -> ! {
     let mut usb_up = false;
     loop {
         mk(MK_HEART, mk_get(MK_HEART) + 1);
-        let cnt = p.timer5.cnt().read().cnt().bits();
-        tick_acc += cnt.wrapping_sub(prev_cnt) as u32;
+        let cnt = cortex_m::peripheral::SYST::get_current();
+        tick_acc += prev_cnt.wrapping_sub(cnt) & 0x00FF_FFFF; /* down-counter */
         prev_cnt = cnt;
-        while tick_acc >= 40 {
-            tick_acc -= 40;
+        while tick_acc >= 192_000 {
+            tick_acc -= 192_000;
             if let Some(rd) = sampler.tick() {
                 unsafe {
                     let m = &mut *PUBLISHED.0.get();
@@ -241,12 +243,12 @@ fn main() -> ! {
                 tft_alive = ui::draw(m.v_1e4, m.i_1e5, pw).is_ok();
             }
         }
-        /* every pass, not only on USB events: a reply consumed while the
-         * loop was busy in tick work must be re-armed at the first
-         * opportunity, before the host's next request starts NAK-polling */
-        if usb_up {
-            pz.arm();
-        }
+        /* USB work only on event passes: every powerz endpoint access is a
+         * stalled bus transaction during a NAK storm, and per-pass accesses
+         * made the loop itself storm-degraded (~70 passes/s). Consumption
+         * and command arrival re-arm/serve immediately via the class
+         * callbacks inside dev.poll; the calls below are the backup for
+         * dropped events (this clone loses ~20% of completion callbacks). */
         if !dev.poll(&mut [&mut pz, &mut serial]) {
             continue;
         }
@@ -255,6 +257,9 @@ fn main() -> ! {
             mk(MK_STAGE, STAGE_CONFIG);
         }
         pz.poll_cmd();
+        if usb_up {
+            pz.arm();
+        }
         if let Ok(n) = serial.read(&mut buf) {
             if n > 0 {
                 on_packet(&mut dev, &mut serial, &buf[..n]);
@@ -441,6 +446,12 @@ fn powerz_payload() -> [u8; powerz::ADC_PAYLOAD_LEN] {
     };
     put16(30, m.dp_1e2 * 100); /* 1e-2 V -> 0.1 mV units */
     put16(32, m.dm_1e2 * 100);
+    /* TEMP diagnosis counters in unused slots (powerz.rs dbg_get):
+     * vcc1/vcc2/vdd (26/28/34) + tail (36..44) */
+    let d = powerz::dbg_get();
+    for (off, i) in [(26, 4), (28, 5), (34, 6), (36, 0), (38, 1), (40, 2), (42, 3)] {
+        p[off..off + 2].copy_from_slice(&d[i].to_le_bytes());
+    }
     p
 }
 
