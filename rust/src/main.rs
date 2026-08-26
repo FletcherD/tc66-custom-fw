@@ -19,10 +19,14 @@
 //! blocking main-loop work (TFT draws, getva's ~20 ms AES) can never starve
 //! the bus. The main loop consumes CMD_RING, builds replies in thread mode,
 //! and pushes them into usbd-serial under short critical sections
-//! (with_usb). Only USBD_LP is ever unmasked; it is enabled late in main(),
-//! after every static the ISR touches is initialized. Shared-state
-//! soundness arguments live next to each item (UsbPtrs, CmdRing,
-//! powerz::REPLY).
+//! (with_usb). The sampler runs from the TIMER5 interrupt (250 Hz, one
+//! interleaved INA226 read per tick — ina.rs), immune to main-loop blocking.
+//! Exactly TWO interrupts are ever unmasked (USBD_LP + TIMER5_DAC), both at
+//! one NVIC priority so they never nest (the stack-gate charges the max
+//! handler chain, not the sum). USBD_LP is enabled late in run(), after
+//! every static its ISR touches is initialized; the sampler tick starts
+//! only after the grace window. Shared-state soundness arguments live next
+//! to each item (UsbPtrs, CmdRing, powerz::REPLY, the ina.rs module doc).
 //!
 //! The first ~10 s after the unmask are the GRACE WINDOW (pseudo-bootloader
 //! escape hatch): the thread dispatches ONLY `query`/`updat` and no feature
@@ -56,7 +60,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 49;
+const BUILD_ID: u32 = 50;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 type Serial<'a> = SerialPort<'a, usb_bus::UsbBus>;
@@ -64,6 +68,16 @@ type Pz<'a> = powerz::PowerZ<'a, usb_bus::UsbBus>;
 
 #[entry]
 fn main() -> ! {
+    /* Deep one-shot init under THIS shallow frame, not run()'s ~2 KB of
+     * locals: the stack budget must also carry the sampler ISR chain on top
+     * of the deepest thread path (stack-gate). Pure compute — safe before
+     * clock init. */
+    getva::init();
+    run()
+}
+
+#[inline(never)]
+fn run() -> ! {
     mk(MK_BOOT, 0xB007_B007);
     mk(MK_BUILD, BUILD_ID);
     mk(MK_HEART, 0);
@@ -105,26 +119,16 @@ fn main() -> ! {
 
     board::pa9_high(&p.gpioa);
 
-    /* SysTick free-runs over its full 24 bits as the timebase: elapsed
-     * CYCLES accrue from CVR deltas each loop pass, so blocked time is
-     * caught up, never lost. SysTick is CORE-internal — reads never stall.
-     * That matters: TIMER5 sits on APB1 with the USBD, and during host NAK
-     * storms every APB access stalls ~1-5 ms; a timebase read per loop pass
-     * made the polled loop itself storm-degraded (~70 passes/s, bench-
-     * measured). 24 bits @ 48 MHz wraps at 349 ms, far beyond any loop
-     * pass. One tick = 192_000 cycles = 4 ms. */
+    /* SysTick free-runs over its full 24 bits as the grace-window timebase
+     * (CORE-internal — reads never stall during host NAK storms, unlike
+     * APB peripherals). 24 bits @ 48 MHz wraps at 349 ms, far beyond any
+     * loop pass. The steady-state loop paces itself off the TIMER5 ISR's
+     * tick counter instead (ina::ticks). */
     let mut syst = cortex_m::Peripherals::take().unwrap().SYST;
     syst.set_clock_source(cortex_m::peripheral::syst::SystClkSource::Core);
     syst.set_reload(0x00FF_FFFF);
     syst.clear_current();
     syst.enable_counter();
-
-    /* AES key schedule now: the stack is shallow AND the USBD IRQ is still
-     * masked — tools/stack_gate.py relies on getva::init's deep chain never
-     * running with the ISR enabled (PRE_IRQ_ROOTS). Keep it before the
-     * unmask below. */
-    getva::init();
-    let mut sampler = ina::Sampler::new();
 
     /* Hand the USB objects to the ISR and open the gate. main() never
      * returns, so the locals live forever and the raw pointers stay valid.
@@ -183,6 +187,11 @@ fn main() -> ! {
     }
     mk(MK_PROBE, 0);
 
+    /* Sampler: reprogram TIMER5 as the 250 Hz tick ISR and unmask its NVIC
+     * line (ina.rs) — deliberately only now, after the grace window, so a
+     * sampler/I2C fault stays escapable by power-cycle + `make flash`. */
+    ina::start(&p.rcu, &p.timer5);
+
     /* TFT init + first frame (the ~400 ms of init delays are harmless now
      * that enumeration finished during the grace window). On error the
      * display is left off for this boot (verbs can still retry it). */
@@ -206,61 +215,34 @@ fn main() -> ! {
     const IDLE_OFF_SECS: u32 = 600;
     let mut idle_secs: u32 = 0;
 
-    let mut prev_cnt = cortex_m::peripheral::SYST::get_current();
-    let mut tick_acc: u32 = 0;
+    let mut last_ticks = ina::ticks();
     loop {
         mk(MK_HEART, mk_get(MK_HEART) + 1);
-        let cnt = cortex_m::peripheral::SYST::get_current();
-        tick_acc += prev_cnt.wrapping_sub(cnt) & 0x00FF_FFFF; /* down-counter */
-        prev_cnt = cnt;
-        while tick_acc >= 192_000 {
-            tick_acc -= 192_000;
-            if let Some(rd) = sampler.tick() {
-                unsafe {
-                    let m = &mut *PUBLISHED.0.get();
-                    m.v_1e4 = rd.v_1e4;
-                    m.i_1e5 = rd.i_1e5;
-                    m.dp_1e2 = rd.dp_1e2;
-                    m.dm_1e2 = rd.dm_1e2;
-                    m.temp_c = rd.temp_c;
-                }
-            }
-            if let Some((iv, ii)) = sampler.instant() {
-                unsafe {
-                    let m = &mut *PUBLISHED.0.get();
-                    m.inst_v_1e4 = iv;
-                    m.inst_i_1e5 = ii;
-                }
-            }
-            /* refresh the pre-built powerz reply each tick; built in thread
-             * mode, copied into powerz::REPLY inside the critical section */
+        /* cal retries + the deferred window-end ADC burst (temp/D±) */
+        ina::service();
+        let now = ina::ticks();
+        let elapsed = now.wrapping_sub(last_ticks);
+        last_ticks = now;
+        if elapsed > 0 {
+            /* refresh the pre-built powerz reply at tick cadence; built in
+             * thread mode, copied into powerz::REPLY inside the critical
+             * section */
             let pl = powerz_payload();
             with_usb(|_, pz, _| pz.set_payload(&pl));
-            sec_ticks += 1;
-            if sec_ticks >= 250 {
-                sec_ticks = 0;
-                if let Some(avg) = sampler.drain_second() {
-                    unsafe {
-                        let m = &mut *PUBLISHED.0.get();
-                        m.avg_v_1e4 = avg.v_1e4;
-                        m.avg_i_1e5 = avg.i_1e5;
-                        m.ori_uv = avg.ori_uv;
-                        m.ori_ua = avg.ori_ua;
-                    }
-                }
-                unsafe {
-                    let m = &mut *PUBLISHED.0.get();
-                    let (p, _) = ina::derive(m.v_1e4, m.i_1e5);
-                    acc_i_1e5s += m.i_1e5 as u64;
-                    acc_p_1e4s += p as u64;
-                    m.mah = (acc_i_1e5s / 360_000) as u32;
-                    m.mwh = (acc_p_1e4s / 36_000) as u32;
-                }
+            sec_ticks += elapsed;
+            while sec_ticks >= 250 {
+                sec_ticks -= 250;
+                /* v/i only, not a whole-Meas snapshot: those cost ~56 B of
+                 * main-frame each at opt-1 (stack-gate budget) */
+                let (v, i) = ina::snapshot_vi();
+                let (pw, _) = ina::derive(v, i);
+                acc_i_1e5s += i as u64;
+                acc_p_1e4s += pw as u64;
+                ina::set_energy(
+                    (acc_i_1e5s / 360_000) as u32,
+                    (acc_p_1e4s / 36_000) as u32,
+                );
                 if tft_alive {
-                    /* borrow, not copy: whole-Meas copies cost 56 B of
-                     * main-frame each at opt-1 (stack-gate budget) */
-                    let (v, i) =
-                        unsafe { let m = &*PUBLISHED.0.get(); (m.v_1e4, m.i_1e5) };
                     if v > 25_000 || i > 100 {
                         idle_secs = 0;
                         let _ = tft::screen_on(); /* no-op when already on */
@@ -272,13 +254,12 @@ fn main() -> ! {
                     }
                 }
             }
-            ui_ticks += 1;
+            ui_ticks += elapsed;
             if ui_ticks >= 125 && tft_alive {
                 ui_ticks = 0;
-                /* the draw may block for a while, but the ISR keeps the
-                 * powerz reply armed throughout — no pre-arm needed */
-                let (v, i) =
-                    unsafe { let m = &*PUBLISHED.0.get(); (m.v_1e4, m.i_1e5) };
+                /* the draw may block for a while, but the USBD ISR keeps
+                 * the powerz reply armed throughout — no pre-arm needed */
+                let (v, i) = ina::snapshot_vi();
                 let (pw, _) = ina::derive(v, i);
                 /* a failed draw disables the refresh for this boot (a wedged
                  * SPI wait would otherwise slow every 0.5 s cycle) */
@@ -351,7 +332,7 @@ fn on_packet(buf: &[u8]) {
     } else if match5(buf, b"tftui") {
         /* dev verb: draw/refresh the main screen from published values */
         let _ = tft::screen_on();
-        let m = unsafe { *PUBLISHED.0.get() };
+        let m = ina::snapshot();
         let (p, _) = ina::derive(m.v_1e4, m.i_1e5);
         reply_ok_er(ui::draw(m.v_1e4, m.i_1e5, p));
     } else if match5(buf, b"tftbl") {
@@ -441,7 +422,7 @@ fn do_adcrd(buf: &[u8]) {
 /// getva/rawva reply.
 #[inline(never)]
 fn live_fields() -> getva::Fields {
-    let m = unsafe { *PUBLISHED.0.get() };
+    let m = ina::snapshot();
     let (p, r) = ina::derive(m.v_1e4, m.i_1e5);
     getva::Fields {
         v: m.v_1e4,
@@ -457,11 +438,6 @@ fn live_fields() -> getva::Fields {
     }
 }
 
-/* Latest published measurement set from the timer-paced sampler + 1 Hz energy
- * integrator; zeros until first window. Soundness: written and read ONLY from
- * thread mode (main loop) — the USBD_LP ISR never touches PUBLISHED (the ISR's
- * measurement data comes from powerz::REPLY, refreshed per tick), so the
- * multi-word struct needs no locking. */
 struct Racy<T>(core::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for Racy<T> {}
 
@@ -470,8 +446,9 @@ unsafe impl<T> Sync for Racy<T> {}
  * The UsbDevice/PowerZ/SerialPort trio is ONE ownership unit living in
  * main()'s frame (main never returns). Raw pointers to them are published
  * here once, before the USBD_LP IRQ is unmasked. Access rules:
- *  - the ISR derives &muts directly (it cannot preempt itself: only USBD_LP
- *    is unmasked, and NVIC never nests same-priority IRQs);
+ *  - the ISR derives &muts directly (it cannot preempt itself: NVIC never
+ *    nests same-priority IRQs, and the only other unmasked IRQ — the TIMER5
+ *    sampler tick, same priority — never touches the USB objects);
  *  - thread mode derives &muts only inside with_usb (PRIMASK set), so the
  *    ISR cannot run while they exist;
  *  - after publishing, main's locals are shadowed — the pointers are the
@@ -648,47 +625,13 @@ fn USBD_LP() {
     mk(MK_USB_STATE, 0);
 }
 
-#[derive(Clone, Copy)]
-struct Meas {
-    v_1e4: u32,
-    i_1e5: u32,
-    dp_1e2: u32,
-    dm_1e2: u32,
-    temp_c: i32,
-    mah: u32,
-    mwh: u32,
-    /* powerz fields: latest single conversion, 1 s calibrated average,
-     * 1 s nominal-scale ("original") average */
-    inst_v_1e4: u32,
-    inst_i_1e5: i32,
-    avg_v_1e4: u32,
-    avg_i_1e5: i32,
-    ori_uv: u32,
-    ori_ua: i32,
-}
-static PUBLISHED: Racy<Meas> = Racy(core::cell::UnsafeCell::new(Meas {
-    v_1e4: 0,
-    i_1e5: 0,
-    dp_1e2: 0,
-    dm_1e2: 0,
-    temp_c: 0,
-    mah: 0,
-    mwh: 0,
-    inst_v_1e4: 0,
-    inst_i_1e5: 0,
-    avg_v_1e4: 0,
-    avg_i_1e5: 0,
-    ori_uv: 0,
-    ori_ua: 0,
-}));
-
 /// Build the 44-byte powerz ADC payload (layout: powerz.rs / HARDWARE.md).
 /// All uV/uA are our wire units scaled up (1e-4 V -> x100 uV, 1e-5 A ->
 /// x10 uA); Vcc1/Vcc2/Vdd are 0 until the FUSB302 is brought up (M4); temp
 /// is clamped at 0 (the kernel driver's byte pair can't encode sub-zero).
 #[inline(never)]
 fn powerz_payload() -> [u8; powerz::ADC_PAYLOAD_LEN] {
-    let m = unsafe { *PUBLISHED.0.get() };
+    let m = ina::snapshot();
     let mut p = [0u8; powerz::ADC_PAYLOAD_LEN];
     let mut put = |off: usize, v: i32| p[off..off + 4].copy_from_slice(&v.to_le_bytes());
     put(0, m.inst_v_1e4 as i32 * 100);
@@ -741,7 +684,9 @@ fn i2c_command(buf: &[u8], reply: &mut [u8; 34]) -> usize {
         return 3;
     }
     let mut rbuf = [0u8; 32];
-    match i2c::transact(addr7, &wbuf[..wlen], &mut rbuf[..rlen]) {
+    /* thread-mode I2C must never race the sampler ISR's transactions —
+     * pause the tick for the duration (ina.rs bus rule) */
+    match ina::pause(|| i2c::transact(addr7, &wbuf[..wlen], &mut rbuf[..rlen])) {
         Ok(()) => {
             reply[..2].copy_from_slice(b"OK");
             reply[2..2 + rlen].copy_from_slice(&rbuf[..rlen]);

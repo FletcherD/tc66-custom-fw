@@ -21,8 +21,12 @@ pub const MK_SPEXIT: usize = 0x2000_1048; // SP at usb::poll exit
 pub const MK_PANIC: usize = 0x2000_1058; // 0xDEADC0DE on Rust panic
 pub const MK_PANIC_LINE: usize = 0x2000_105c; // panicking source line
 pub const MK_BUILD: usize = 0x2000_1060; // build id (self-hosting proof)
-pub const MK_I2CERR: usize = 0x2000_1064; // sampler I2C error count
-pub const MK_WINDOWS: usize = 0x2000_1068; // completed sample windows (~10 Hz)
+pub const MK_I2CERR: usize = 0x2000_1064; // sampler I2C error count (ISR; the
+                                          // thread's cal-retry bumps run with
+                                          // the sampler IRQ paused, so the
+                                          // read-modify-write never races)
+pub const MK_WINDOWS: usize = 0x2000_1068; // completed sample windows, ~10.4 Hz
+                                          // (written by the TIMER5 ISR)
 
 /* ---- Per-subsystem diagnostic blocks (12 words each) ----
  * Convention: word 0 = state/heartbeat (bump it in your service path so a
@@ -51,8 +55,37 @@ pub const MK_USB_SPUR: usize = MK_USB_BASE + 0x14; // ISR entries before the USB
                                                    // stay 0 — nonzero means the IRQ
                                                    // was unmasked too early)
 // +0x18..+0x2c reserved for the USB block
-/* sampler interrupt-path block (sampler refactor) */
-pub const MK_SMP_BASE: usize = 0x2000_10a0; // +0 state, +4 irq count, +8 status
+
+/* Sampler interrupt block (ina.rs: TIMER5_DAC ISR @ 250 Hz + its main-loop
+ * `service()` half). Writers noted per word; single-writer per word except
+ * MK_I2CERR (see below). */
+pub const MK_SMP_BASE: usize = 0x2000_10a0;
+/// +0x00 (ISR) live state: (tick_count << 8) | code. A frozen value locates
+/// a wedge by its low byte:
+///   0x03        idle tick — waiting for thread-mode cal load
+///   0x10+step   starting the I2C read for window step 0..=23
+///               (step % 3: 0,1 = shunt, 2 = bus)
+///   0x40        window publish (calibrate + PUBLISHED write, step 24)
+///   0x50        1 s average drain (every 250 ticks)
+///   0x02        ISR exit (healthy resting value)
+pub const MK_SMP_STATE: usize = MK_SMP_BASE;
+/// +0x04 (ISR) total TIMER5 ISR entries == 4 ms ticks (expect +250/s; also
+/// mirrored by the AtomicU32 the main loop derives its cadences from)
+pub const MK_SMP_IRQS: usize = MK_SMP_BASE + 0x04;
+/// +0x08 (ISR) last in-window I2C failure:
+/// (i2c stage << 24) | (STAT0 << 8) | window step
+pub const MK_SMP_I2CE: usize = MK_SMP_BASE + 0x08;
+/// +0x0c (ISR) seconds drained into the powerz averages (expect +1/s)
+pub const MK_SMP_SECS: usize = MK_SMP_BASE + 0x0c;
+/// +0x10 (thread, sampler paused) cal status: (attempts << 8) | loaded(0/1)
+pub const MK_SMP_CAL: usize = MK_SMP_BASE + 0x10;
+/// +0x14 (thread) deferred window-end ADC bursts serviced — should track
+/// MK_WINDOWS; a growing gap means the main loop is starved/blocked
+pub const MK_SMP_ADCB: usize = MK_SMP_BASE + 0x14;
+/// +0x18 (thread) ADC burst failures: (count << 8) | last adc stage
+pub const MK_SMP_ADCE: usize = MK_SMP_BASE + 0x18;
+/* +0x1c..+0x2c free (5 words) */
+
 /* display/DMA block (spi-dma refactor) */
 pub const MK_DSP_BASE: usize = 0x2000_10d0; // +0 state, +4 evt count, +8 status
 
