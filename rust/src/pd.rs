@@ -210,6 +210,9 @@ struct CapRing {
     tail: AtomicU32,
 }
 unsafe impl Sync for CapRing {}
+/* .hibss: high-RAM, manually zeroed at main() start (memory.x) — the ring
+ * relies on head/tail starting 0, and nothing runs pd code before that. */
+#[link_section = ".hibss"]
 static CAP: CapRing = CapRing {
     bufs: core::cell::UnsafeCell::new([[0; CAP_SLOT_LEN]; CAP_SLOTS]),
     lens: core::cell::UnsafeCell::new([0; CAP_SLOTS]),

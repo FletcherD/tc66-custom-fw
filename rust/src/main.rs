@@ -69,7 +69,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 80;
+const BUILD_ID: u32 = 81;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -82,6 +82,22 @@ type Pz<'a> = powerz::PowerZ<'a, usb_bus::UsbBus>;
 
 #[entry]
 fn main() -> ! {
+    /* Zero .hibss (high-RAM statics, memory.x) FIRST: cortex-m-rt's Reset
+     * only initializes .data/.bss inside RAM, and the CAP ring's head/tail
+     * must start 0. MUST precede getva::init() — CIPHER lives there — and
+     * runs with both interrupts still masked. */
+    unsafe {
+        extern "C" {
+            static mut __shibss: u32;
+            static mut __ehibss: u32;
+        }
+        let mut w = core::ptr::addr_of_mut!(__shibss);
+        let end = core::ptr::addr_of_mut!(__ehibss);
+        while w < end {
+            core::ptr::write_volatile(w, 0);
+            w = w.add(1);
+        }
+    }
     /* Deep one-shot init under THIS shallow frame, not run()'s ~2 KB of
      * locals: the stack budget must also carry the sampler ISR chain on top
      * of the deepest thread path (stack-gate). Pure compute — safe before

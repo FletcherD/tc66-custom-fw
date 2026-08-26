@@ -22,6 +22,9 @@ unsafe impl<T> Sync for RacyCell<T> {}
  * 480-B key schedule straight into the static (sret) instead of via a
  * stack temporary — that temporary put the boot-time init chain over the
  * stack budget (stack-gate). */
+/* .hibss: high-RAM, manually zeroed at main() start (memory.x). Contents are
+ * only read behind CIPHER_OK, which init() sets after the full write. */
+#[link_section = ".hibss"]
 static CIPHER: RacyCell<core::mem::MaybeUninit<Aes256Enc>> =
     RacyCell(core::cell::UnsafeCell::new(core::mem::MaybeUninit::uninit()));
 static CIPHER_OK: RacyCell<bool> = RacyCell(core::cell::UnsafeCell::new(false));

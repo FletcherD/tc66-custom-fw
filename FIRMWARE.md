@@ -64,6 +64,17 @@ handlers — `USBD_LP` in main.rs, `TIMER5_DAC` in ina.rs). Board specifics:
   stacked-PC capture reads the hardware frame at MSP; `HardFault` uses
   `#[exception]` + `ExceptionFrame`. Both write fixed SRAM capture windows —
   `markers.rs` has the full map.
+- **`.hibss` — high-RAM statics** (`HIRAM`, `0x20001C00..0x20002000`, the
+  1 KB above flasher SRAM): large statics tagged `#[link_section = ".hibss"]`
+  live here, *outside* the fenced stack region, so every byte parked here
+  raises the stack budget (`STACK_TOP − __ebss`) byte-for-byte. Currently
+  `getva::CIPHER` (480 B) and `pd::CAP` (336 B). Rules: cortex-m-rt's Reset
+  does **not** touch this region — `main()` zeroes `__shibss..__ehibss` as
+  its *first act*, before `getva::init()`; statics here must be
+  all-zero/`MaybeUninit` at rest and untouched before that loop. The section
+  is `INSERT AFTER .uninit`, NOT `.bss` — link.x's trailing `__ebss = .`
+  would otherwise ride up to HIRAM and Reset would smear-zero the marker
+  window and flasher SRAM in between (init-gate catches exactly this).
 
 ### Boot-path gotchas (cost real debugging time — do not rediscover)
 
