@@ -1,7 +1,19 @@
 [build]
 target = "thumbv7m-none-eabi"
 
+# Nightly size build: recompile core so panics lower straight to abort.
+# WHAT THIS COSTS: the #[panic_handler] in startup.rs is dead code on this
+# branch — a panic never writes MK_PANIC/MK_PANIC_LINE; it hits UDF and lands
+# in the HardFault handler instead (PC/LR/CFSR markers still recorded).
+[unstable]
+build-std = ["core"]
+build-std-features = ["compiler-builtins-mem"]
+
 [target.thumbv7m-none-eabi]
 # fast.x must precede link.x: input-section patterns claim in script order,
 # and .fasttext has to steal its hot functions before link.x's .text glob.
-rustflags = ["-C", "link-arg=-Tfast.x", "-C", "link-arg=-Tlink.x", "-C", "link-arg=-Tflasher.x"]
+# -Cpanic=immediate-abort is target-scoped on purpose: host build scripts
+# must keep the default panic strategy.
+# location-detail=none drops #[track_caller] Location path strings (~1 KB);
+# free here because no panic handler ever reads them on this branch.
+rustflags = ["-C", "link-arg=-Tfast.x", "-C", "link-arg=-Tlink.x", "-C", "link-arg=-Tflasher.x", "-Z", "unstable-options", "-C", "panic=immediate-abort", "-Z", "location-detail=none"]
