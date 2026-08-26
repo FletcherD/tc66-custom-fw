@@ -48,6 +48,7 @@
 
 mod adc;
 mod board;
+mod bt;
 mod flasher;
 mod font;
 mod getva;
@@ -76,7 +77,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 105;
+const BUILD_ID: u32 = 106;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -124,6 +125,11 @@ fn run() -> ! {
     mk(MK_WINDOWS, 0);
     for i in 0..6 {
         mk(MK_DSP_BASE + 4 * i, 0); /* display/DMA diagnostic block */
+    }
+    for i in 0..4 {
+        /* BT block — MK_BT_STATE especially: the marker window is outside
+         * .bss, and bt::mode() must read 0 (uninitialized) at power-on */
+        mk(MK_BT_BASE + 4 * i, 0);
     }
 
     let p = pac::Peripherals::take().unwrap();
@@ -381,6 +387,9 @@ fn run() -> ! {
         /* dispatch commands the ISR queued; replies (AES etc.) are built
          * right here in thread mode with interrupts enabled */
         run_pending_cmds(false);
+        /* BLE link pump: drain the RX DMA ring, dispatch complete b-verb
+         * lines (no-op until bt::init has run — dev verbs for now) */
+        bt::service(on_ble_line);
         /* recovery drain: packets that arrived while the ring was full sit
          * in usbd-serial's buffer with no further IRQ coming for them */
         with_usb(|_, _, serial| drain_serial(serial));
@@ -537,6 +546,31 @@ fn on_packet(buf: &[u8]) {
     } else if match5(buf, b"qcoff") {
         #[cfg(feature = "dev-verbs")]
         reply_ok_er(qc::off());
+    } else if match5(buf, b"btini") {
+        #[cfg(feature = "dev-verbs")]
+        {
+            /* dev verb: bring up the BLE UART in raw mode; `btini 9` uses
+             * the module's 9600 power-on default (TTM re-provisioning) */
+            bt::init(buf.len() >= 7 && buf[6] == b'9');
+            write_all(b"OK");
+        }
+    } else if match5(buf, b"btcmd") {
+        #[cfg(feature = "dev-verbs")]
+        do_btcmd(buf);
+    } else if match5(buf, b"btget") {
+        #[cfg(feature = "dev-verbs")]
+        do_btget();
+    } else if match5(buf, b"btrun") {
+        #[cfg(feature = "dev-verbs")]
+        {
+            /* dev verb: switch the BLE link to b-verb dispatch mode */
+            if mk_get(MK_BT_STATE) == 0 {
+                write_all(&[b'E', b'R', 3]);
+            } else {
+                bt::set_dispatch();
+                write_all(b"OK");
+            }
+        }
     } else if match5(buf, b"tftfl") {
         #[cfg(feature = "dev-verbs")]
         {
@@ -645,6 +679,61 @@ fn do_rawva() {
     let mut reply = [0u8; getva::RAW_LEN];
     getva::build_raw(&mut reply, &live_fields());
     write_all(&reply);
+}
+
+/// BLE line dispatcher (bt::service callback): the stock `b`-prefix verbs
+/// plus our own additions. Unknown lines — bnextp/blastp/brotat and module
+/// status chatter — are silently ignored, like the stock firmware.
+#[inline(never)]
+fn on_ble_line(line: &[u8]) {
+    if line == b"bgetva" {
+        do_bgetva();
+    } else if line == b"bquery" {
+        /* ours, not stock: liveness probe over BLE */
+        let _ = bt::send(b"firm");
+    } else if line == b"brawva" {
+        /* ours, not stock: the plaintext streaming reply over BLE */
+        do_brawva();
+    }
+}
+
+/// `bgetva` -> the same 192-B encrypted packet as USB, out the module UART
+/// (~17 ms blocking at 115200 — the tick-delta cadences absorb it).
+#[inline(never)]
+fn do_bgetva() {
+    let mut reply = [0u8; 192];
+    getva::build(&mut reply, &live_fields());
+    let _ = bt::send(&reply);
+}
+
+#[inline(never)]
+fn do_brawva() {
+    let mut reply = [0u8; getva::RAW_LEN];
+    getva::build_raw(&mut reply, &live_fields());
+    let _ = bt::send(&reply);
+}
+
+/// dev verb: `btcmd <bytes>` — forward raw bytes (TTM commands) to the
+/// BLE module. -> "OK", or "ER" + bt::send stage.
+#[cfg(feature = "dev-verbs")]
+#[inline(never)]
+fn do_btcmd(buf: &[u8]) {
+    if buf.len() < 7 || buf[5] != b' ' {
+        write_all(&[b'E', b'R', 0x0F]);
+        return;
+    }
+    reply_ok_er(bt::send(&buf[6..]));
+}
+
+/// dev verb: `btget` -> "OK" + whatever raw bytes the module sent (up to
+/// 32) — bring-up visibility without a BLE connection.
+#[cfg(feature = "dev-verbs")]
+#[inline(never)]
+fn do_btget() {
+    let mut reply = [0u8; 34];
+    reply[..2].copy_from_slice(b"OK");
+    let n = bt::read_raw(&mut reply[2..]);
+    write_all(&reply[..2 + n]);
 }
 
 /// dev/bring-up verb (ours, not stock):
@@ -805,11 +894,11 @@ fn with_usb<R>(f: impl FnOnce(&mut Dev, &mut Pz, &mut Serial) -> R) -> Option<R>
  * loss. Main re-runs drain_serial after freeing a slot (no IRQ will fire for
  * already-buffered bytes). */
 const CMD_SLOTS: usize = 2;
-/* 16 B per slot: commands use at most 10 bytes (i2crd); a host write longer
- * than a slot arrives as fragments, and non-verb fragments are silently
- * dropped by dispatch — our protocol never sends any. Small slots keep bss
- * inside the stack-gate budget. */
-const CMD_SLOT_LEN: usize = 16;
+/* 24 B per slot: the longest command is `btcmd ` + a TTM provisioning
+ * string (20 B); a host write longer than a slot arrives as fragments, and
+ * non-verb fragments are silently dropped by dispatch — our protocol never
+ * sends any. Small slots keep bss inside the stack-gate budget. */
+const CMD_SLOT_LEN: usize = 24;
 struct CmdRing {
     bufs: core::cell::UnsafeCell<[[u8; CMD_SLOT_LEN]; CMD_SLOTS]>,
     lens: core::cell::UnsafeCell<[u8; CMD_SLOTS]>,
@@ -878,10 +967,10 @@ fn run_pending_cmds(grace_only: bool) {
         }
         let i = t as usize % CMD_SLOTS;
         let len = unsafe { (*CMD_RING.lens.get())[i] } as usize;
-        /* commands use at most 10 bytes (i2crd); the copy lets `tail`
-         * advance (and the ISR unpark) before slow dispatch, and 16 B
-         * keeps main's frame under the stack-gate budget */
-        let mut pkt = [0u8; 16];
+        /* one slot's worth; the copy lets `tail` advance (and the ISR
+         * unpark) before slow dispatch, and the small fixed size keeps
+         * main's frame under the stack-gate budget */
+        let mut pkt = [0u8; CMD_SLOT_LEN];
         let len = len.min(pkt.len());
         let slot: &[u8; CMD_SLOT_LEN] = unsafe { &(*CMD_RING.bufs.get())[i] };
         pkt[..len].copy_from_slice(&slot[..len]);

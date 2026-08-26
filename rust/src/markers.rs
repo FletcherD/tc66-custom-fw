@@ -108,7 +108,7 @@ pub const MK_SMP_ADCE: usize = MK_SMP_BASE + 0x18;
  * +12 MK_DSP_DONE   jobs completed (engine returned to idle cleanly)
  * +16 MK_DSP_GLYPHS glyph jobs started
  * +20 MK_DSP_FILLS  fill jobs started
- * +24..+44 unclaimed */
+ * +24..+44 claimed by the BT block below */
 pub const MK_DSP_BASE: usize = 0x2000_10d0;
 pub const MK_DSP_STATE: usize = MK_DSP_BASE;
 pub const MK_DSP_KICKS: usize = MK_DSP_BASE + 4;
@@ -116,6 +116,18 @@ pub const MK_DSP_ERR: usize = MK_DSP_BASE + 8;
 pub const MK_DSP_DONE: usize = MK_DSP_BASE + 12;
 pub const MK_DSP_GLYPHS: usize = MK_DSP_BASE + 16;
 pub const MK_DSP_FILLS: usize = MK_DSP_BASE + 20;
+
+/* BLE/UART block (bt.rs — DX-BT24-M on USART1, RX ring on DMA ch4). All
+ * words thread-mode single-writer.
+ * +0  MK_BT_STATE  0 uninitialized, 1 raw (bring-up), 2 dispatch
+ * +4  MK_BT_RX     bytes consumed from the RX ring
+ * +8  MK_BT_TX     bytes sent to the module
+ * +12 MK_BT_LINES  complete lines handed to the b-verb dispatcher */
+pub const MK_BT_BASE: usize = 0x2000_10e8;
+pub const MK_BT_STATE: usize = MK_BT_BASE;
+pub const MK_BT_RX: usize = MK_BT_BASE + 4;
+pub const MK_BT_TX: usize = MK_BT_BASE + 8;
+pub const MK_BT_LINES: usize = MK_BT_BASE + 12;
 
 /* PC-profiler ring (the TIMER5_DAC entry veneer in ina.rs — address is
  * hardcoded in its asm): +0 = total-samples counter, +4..+0x204 = 128-entry
