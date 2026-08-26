@@ -53,7 +53,23 @@ pub struct PowerZ<'a, B: UsbBus> {
  * a whole, untorn payload. */
 struct RacyCell<T>(core::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for RacyCell<T> {}
-static REPLY: RacyCell<[u8; ADC_REPLY_LEN]> = RacyCell(core::cell::UnsafeCell::new([0; ADC_REPLY_LEN]));
+/* header pre-baked so the first arms (grace window, before any set_payload)
+ * already send a well-formed PutData reply with zero fields */
+const fn reply_template() -> [u8; ADC_REPLY_LEN] {
+    let mut r = [0u8; ADC_REPLY_LEN];
+    r[0] = RSP_PUT_DATA;
+    let words = ((4 + ADC_PAYLOAD_LEN) / 4) as u16;
+    r[2] = words as u8;
+    r[3] = (words >> 8) as u8;
+    let ext: u32 = ATT_ADC as u32 | (ADC_PAYLOAD_LEN as u32) << 22;
+    r[4] = ext as u8;
+    r[5] = (ext >> 8) as u8;
+    r[6] = (ext >> 16) as u8;
+    r[7] = (ext >> 24) as u8;
+    r
+}
+static REPLY: RacyCell<[u8; ADC_REPLY_LEN]> =
+    RacyCell(core::cell::UnsafeCell::new(reply_template()));
 
 /* TEMP diagnosis counters (payload tail via dbg_get): 0=in_complete,
  * 1=arm write ok, 2=arm write WouldBlock, 3=flush-false in arm,
