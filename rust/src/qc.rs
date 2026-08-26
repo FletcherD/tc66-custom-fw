@@ -172,8 +172,37 @@ fn afc_bit(one: bool) {
 }
 
 /// Send one byte as a stock proto_send_word: start pattern, 8 data bits
+/// Set the D− pins (PB4/PB5) push-pull (drive) or open-drain (release so the
+/// charger can pull the line for its ACK). D+ (PA13/PA14) stays push-pull.
+fn dminus_open_drain(open: bool) {
+    let gpiob = unsafe { &*pac::Gpiob::ptr() };
+    if open {
+        gpiob
+            .omode()
+            .modify(|_, w| w.om4().open_drain().om5().open_drain());
+    } else {
+        gpiob
+            .omode()
+            .modify(|_, w| w.om4().push_pull().om5().push_pull());
+    }
+}
+
+/// Stock `proto_line_idle @0x08004760`: drive D− to the mark level (PB4 high /
+/// PB5 low) push-pull for 2.5 ms, then flip PB4/PB5 to open-drain — releasing
+/// the strong drive (PB4 ODR=1 → hi-Z, PB5 ODR=0 → weak low) so the charger
+/// can drive the line to ACK. `proto_send_word` brackets every byte with this;
+/// it was the missing piece — a byte held push-pull throughout never lets the
+/// charger respond.
+fn proto_line_idle() {
+    dminus_open_drain(false); /* push-pull */
+    drive((true, false, true, false)); /* D+ 0.6 V, D− mark = PB4 hi/PB5 lo */
+    us(2500);
+    dminus_open_drain(true); /* release: PB4 hi-Z, PB5 weak low */
+}
+
 /// MSB-first, odd-parity 9th bit, stop.
 fn afc_byte(b: u8) {
+    dminus_open_drain(false); /* push-pull for the bits (was open-drain after idle) */
     /* start pattern: D− 1 (24 µs) / 0 (32 µs) / 1 (32 µs) */
     drive((true, false, true, false));
     us(24);
@@ -210,18 +239,22 @@ pub fn afc(cmd: u8, reps: u8) -> Result<(), u8> {
         unsafe { *ENTERED.0.get() = true };
         unsafe { *IN_QC3.0.get() = false };
     }
-    /* AFC (stock FUN_080034e4): send the request byte ×3 with 10 ms gaps —
-     * NO sync pings (those are FCP/SCP only; the disassembly's mode-4 path
-     * goes straight from the 2050 ms hold to proto_send_word(cmd) ×3). */
+    /* AFC (stock FUN_080034e4): proto_send_word(cmd) ×3 with 10 ms gaps — NO
+     * sync pings. proto_send_word = proto_line_idle (mark 2.5 ms + open-drain
+     * release) before AND after the byte, so the charger can ACK. */
     let n = if reps == 0 { 3 } else { reps };
     for k in 0..n {
+        proto_line_idle();
         afc_byte(cmd);
+        proto_line_idle();
         if k + 1 < n {
             crate::board::delay_ms(10);
         }
     }
-    /* park D− back at 3.3 V (AFC idle between requests) */
-    drive((true, false, true, true));
+    /* leave D− released (open-drain) at the mark — the charger holds 9 V while
+     * D+ stays at 0.6 V (push-pull); don't clobber it back to a hard 3.3 V */
+    dminus_open_drain(false);
+    drive((true, false, true, false));
     Ok(())
 }
 
