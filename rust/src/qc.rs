@@ -137,6 +137,83 @@ pub fn qc3(down: bool, count: u8) -> Result<(), u8> {
     Ok(())
 }
 
+/* ---- Samsung AFC (Adaptive Fast Charging, stock handshake mode 4) ----
+ *
+ * AFC is a serial protocol on D− (D+ held at 0.6 V throughout), NOT a level
+ * table. Framing recovered from the stock `proto_send_byte @0x080047b4`:
+ *   serial "1" = D− PB4 high / PB5 low; "0" = both low.
+ *   8 data bits MSB-first, ~152 µs each, then a 9th ODD-parity bit (set so the
+ *   total number of 1-bits incl. parity is odd), then a stop.
+ * Entry (stock mode-4): 200 ms D+3.3/D−3.3 preamble, D+→0.6 V held ~2050 ms
+ * (D− 3.3 V), then the request byte framed on D−, repeated.
+ * Request byte = voltage nibble << 4 | current nibble (public AFC spec):
+ *   5V=0x00, 9V=0x46, 12V=0x66 (current nibble 6 ≈ 1.65 A). Host passes it.
+ * (CHARGE_TRIGGER_FINDINGS.md; the command byte is per the public AFC spec —
+ * the stock builds it in RAM cfg+0x279.) */
+
+const BIT_US: u32 = 152; /* delay_bit_period @0x08003d42 */
+
+fn us(n: u32) {
+    cortex_m::asm::delay(n * 48); /* 48 MHz -> 48 cycles/µs */
+}
+
+/// One serial bit on D− (D+ stays 0.6 V). "1" = PB4 high only, "0" = both low.
+fn afc_bit(one: bool) {
+    drive((true, false, one, false));
+    us(BIT_US);
+}
+
+/// Send one byte as a stock proto_send_word: start pattern, 8 data bits
+/// MSB-first, odd-parity 9th bit, stop.
+fn afc_byte(b: u8) {
+    /* start pattern: D− 1 (24 µs) / 0 (32 µs) / 1 (32 µs) */
+    drive((true, false, true, false));
+    us(24);
+    drive((true, false, false, false));
+    us(32);
+    drive((true, false, true, false));
+    us(32);
+    let mut ones = 0u32;
+    for i in (0..8).rev() {
+        let one = (b >> i) & 1 != 0;
+        if one {
+            ones += 1;
+        }
+        afc_bit(one);
+    }
+    /* 9th bit = odd parity: make the total count of 1-bits odd */
+    afc_bit(ones % 2 == 0);
+    /* stop: D− high then a 180 µs gap (i2c_bit_delay(180)) */
+    drive((true, false, true, false));
+    us(180);
+}
+
+/// `afctr <byte> [reps]`: Samsung AFC request. First call after entry/off runs
+/// the ~2.25 s AFC entry, then frames the request byte `reps` times (default 3,
+/// 10 ms apart). Later calls re-send without re-entry (fast voltage change).
+pub fn afc(cmd: u8, reps: u8) -> Result<(), u8> {
+    config_pins();
+    if !unsafe { *ENTERED.0.get() } {
+        /* mode-4 entry: 3.3/3.3 preamble, then D+ 0.6 V held with D− 3.3 V */
+        drive((true, true, true, true));
+        crate::board::delay_ms(200);
+        drive((true, false, true, true)); /* D+ 0.6 V, D− 3.3 V */
+        crate::board::delay_ms(2050);
+        unsafe { *ENTERED.0.get() = true };
+        unsafe { *IN_QC3.0.get() = false };
+    }
+    let n = if reps == 0 { 3 } else { reps };
+    for k in 0..n {
+        afc_byte(cmd);
+        if k + 1 < n {
+            crate::board::delay_ms(10);
+        }
+    }
+    /* park D− back at 3.3 V (AFC idle between requests) */
+    drive((true, false, true, true));
+    Ok(())
+}
+
 /// `qcoff`: release D+/D− (pins back to floating input) and forget entry.
 /// The charger reverts to 5 V on its own timeout; our D± ADC read works again.
 pub fn off() -> Result<(), u8> {

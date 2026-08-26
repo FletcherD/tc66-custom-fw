@@ -69,7 +69,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 81;
+const BUILD_ID: u32 = 82;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -429,6 +429,17 @@ fn on_packet(buf: &[u8]) {
             let r = match (buf.get(5), buf.get(6)) {
                 (Some(&d), Some(&n)) => qc::qc3(d != 0, n),
                 _ => Err(0x0F),
+            };
+            reply_ok_er(r);
+        }
+    } else if match5(buf, b"afctr") {
+        #[cfg(feature = "dev-verbs")]
+        {
+            /* afctr <byte> [reps]: Samsung AFC serial request (byte = voltage
+             * nibble<<4|current nibble; 9V=0x46). First call blocks ~2.25 s. */
+            let r = match buf.get(5) {
+                Some(&b) => qc::afc(b, *buf.get(6).unwrap_or(&0)),
+                None => Err(0x0F),
             };
             reply_ok_er(r);
         }
