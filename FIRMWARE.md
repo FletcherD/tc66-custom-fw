@@ -4,15 +4,19 @@ How the firmware (`rust/`) is put together, the hard-won gotchas, and the
 build/flash/debug workflow. Read `HARDWARE.md` first for the board facts
 (memory map, pins, peripherals, command protocol, calibration model).
 
-The firmware is fully polled — interrupts stay masked from reset onward.
-Everything runs off the main loop: USB servicing, the TIMER5-paced sampler,
-and command dispatch.
+Exactly one interrupt runs: **USBD_LP (IRQ 37)** services the USB peripheral
+(so host traffic never waits on blocking main-loop work). Everything else is
+polled from the main loop: the TIMER5-paced sampler, command dispatch and
+reply building, energy integration, and the UI. All other IRQs stay masked
+from reset onward (`__pre_init`), and PRIMASK stays set until `main()`
+finishes initializing every static the ISR touches. See "USB" below for the
+ISR/thread split and the soundness rules for shared state.
 
 ## Module map (`rust/src/`)
 
 | Module | Role |
 |---|---|
-| `main.rs` | entry, USB device setup, poll loop, command dispatch, 1 Hz energy integration, published-measurement state |
+| `main.rs` | entry, USB device setup, the USBD_LP ISR + command ring, main loop, command dispatch, 1 Hz energy integration, published-measurement state |
 | `startup.rs` | `__pre_init` (cpsid/VTOR/NVIC-clear), asm `DefaultHandler` + `HardFault` SRAM capture, panic handler |
 | `board.rs` | 48 MHz clock bring-up, PA9 D+ soft-connect choreography |
 | `usb_bus.rs` | stm32-usbd `UsbPeripheral` impl for the GD32 USBD |
@@ -28,9 +32,10 @@ and command dispatch.
 
 ## Startup / linker
 
-**`cortex-m-rt` 0.7** provides the vector table (240 IRQ entries, all
-`DefaultHandler` — no PAC `device` feature needed), `.data`/`.bss` init, and the
-reset handler. Board specifics:
+**`cortex-m-rt` 0.7** provides `.data`/`.bss` init and the reset handler; the
+**gd32f1 PAC's `rt` feature** (which enables `cortex-m-rt/device`) provides
+the device vector table so `#[interrupt] fn USBD_LP()` lands in slot 37 —
+every other IRQ entry PROVIDEs to our `DefaultHandler`. Board specifics:
 
 - `memory.x`: `FLASH ORIGIN 0x08002C00 LENGTH 51840` (the exact flashable image
   size, so the linker fails before the pad step would) and `RAM LENGTH 0xE40` —
@@ -44,8 +49,10 @@ reset handler. Board specifics:
   live, a bootloader-armed pending IRQ must vector through the bootloader's
   valid table, not into our spinning DefaultHandler. `__pre_init` also
   masks+clears all NVIC IRQs (ICER0/1, ICPR0/1; the bootloader can leave the
-  USBD IRQ enabled+pending). The `#[pre_init]` attribute is deprecated; a
-  strong `__pre_init` asm symbol is the sanctioned hook.
+  USBD IRQ enabled+pending). PRIMASK stays set until late in `main()`, which
+  unmasks **only** USBD_LP once the ISR's statics are initialized (see USB).
+  The `#[pre_init]` attribute is deprecated; a strong `__pre_init` asm symbol
+  is the sanctioned hook.
 - `DefaultHandler` is overridden in `global_asm!` (not `#[exception]`) so the
   stacked-PC capture reads the hardware frame at MSP; `HardFault` uses
   `#[exception]` + `ExceptionFrame`. Both write fixed SRAM capture windows —
@@ -90,14 +97,73 @@ usbd-serial terminates transfers with a short packet, so the 192-B `getva`
 arrives in one read (the stock firmware's stuck-last-block cdc_acm quirk does
 not exist here).
 
-**Never write a data endpoint before the device is Configured.** An
-`ep_in.write` before the first bus reset lands in an EPnR whose endpoint-
+**Never write a data endpoint before the first bus reset has been
+processed.** An `ep_in.write` before that lands in an EPnR whose endpoint-
 address field is still 0 — a second endpoint-0 claimant that corrupts EP0
 control transfers (enumeration wedges on the config-descriptor read with
-host-side -110 timeouts; cost a K1 recovery to find, builds 36–38). All
-powerz arming is gated on `dev.state() == Configured` in the main loop, and
-the class's `reset()` clears armed/pending state so a bus reset can't strand
-it. Keep any future endpoint writes behind the same gate.
+host-side -110 timeouts; cost a K1 recovery to find, builds 36–38). In the
+ISR architecture this holds by construction: the ISR only runs on USB
+events, and any reset is processed by `dev.poll` (which programs the EPnR
+address fields) before `poll_cmd`/`arm` touch an endpoint. The grace window
+serves only CDC (no powerz endpoint writes). Keep it that way.
+
+### Boot phase 1: the grace window (pseudo-bootloader)
+
+The first ~10 s after boot serve ONLY `query`→`firm` and `updat`, with USB
+POLLED and all interrupts masked — no TFT, sampler, or powerz service. A
+fault in anything that starts later is recovered by power-cycling and
+running `make flash` inside the window (no K1): the flash path never
+depends on the ISR machinery. `MK_PROBE` reads `0x6ACE6ACE` while the
+window is open. Standalone (no host) boots just wait out the 10 s.
+
+### Boot phase 2: interrupt-driven servicing (the USBD_LP ISR)
+
+After the grace window, USB is serviced from **`USBD_LP` (IRQ 37)** — the
+only unmasked interrupt — so blocking main-loop work (an ADC burst ~1 ms,
+TFT draws, getva's ~20 ms AES) can never starve the bus; the powerz
+driver's 5 ms URB budget is met regardless of what the loop is doing.
+stm32-usbd's `enable()` sets the CNTR masks (CTRM/RESETM/SUSPM/WKUPM — no
+SOF, so the ISR is event-driven); `main()` publishes the USB object
+pointers, unmasks USBD_LP in the NVIC, and clears PRIMASK as its last init
+step. The split:
+
+- **ISR** (short, bounded): `dev.poll` (control pipe + endpoint callbacks),
+  powerz `poll_cmd`/`arm` (`endpoint_in_complete` re-arms the pre-built ADC
+  reply inside the poll), then drains complete CDC packets into `CMD_RING`
+  (reading straight into the ring slot — no scratch buffer). Phase markers
+  in the MK_USB block locate a wedge (markers.rs).
+- **Thread mode** (main loop): pops `CMD_RING`, dispatches commands and
+  builds replies (AES etc.) with interrupts enabled, then feeds the bytes to
+  usbd-serial under **short critical sections** (`with_usb`) — one buffer
+  copy or endpoint write each, never held across slow work. `serial.write`
+  kicks the first packet itself; the ISR's `endpoint_in_complete` flush
+  drains the rest.
+
+Shared-state soundness (full arguments live next to each item in the code):
+
+| Item | Rule |
+|---|---|
+| `UsbPtrs` (dev/pz/serial) | one ownership unit in `main`'s frame (main never returns); ISR derives `&mut`s freely (single IRQ, no nesting), thread mode only inside `with_usb` (PRIMASK) — the two contexts are mutually exclusive, and main's locals are shadowed after publishing |
+| `CMD_RING` | SPSC slot ring; producer (`drain_serial`) runs in the ISR *or* under `interrupt::free`, consumer only in the thread loop; head/tail are single-word atomics with acquire/release pairing; a full ring stops reading usbd-serial → bytes back up and NAK the endpoint (backpressure, not loss), and main re-drains after freeing a slot |
+| `powerz::REPLY` (52 B) | multi-word, but only reachable through `PowerZ` methods, which are only reachable via the mutually-exclusive contexts above — `set_payload` (thread, in CS) can never tear an `arm` read (ISR) |
+| `PUBLISHED` (`Meas`) | thread-mode only — the ISR's data comes from `REPLY`, refreshed once per 4 ms tick |
+| markers | single-word volatile writes (naturally atomic on M3); every counter has a single writer context (see markers.rs) |
+
+`updat` freezes the world before the flasher handoff: `cpsid i` + NVIC-mask
+USBD_LP, *then* `find_bulk_ep()` + `flasher::launch` — nothing can touch
+endpoint state between discovery and the SRAM takeover (and the erase can
+never be interrupted). On a refused `updat` (no bulk EP) both are restored.
+
+Keep the ISR shallow: its whole call subtree is charged on top of the
+thread-mode worst case by the stack gate (below), and headroom is thin.
+
+Two clone quirks the design absorbs (both bench-measured): sustained NAK
+traffic stalls CPU APB/USBD accesses ~1-5 ms each (hence the SysTick — core-
+internal — timebase, and why the polled architecture could not reliably meet
+the 5 ms budget under gap-free host polling), and endpoint completion
+callbacks are silently dropped ~20-30% of the time (hence `arm()` writes
+unconditionally — WouldBlock is the cheap no-op — and never trusts a
+software armed-latch).
 
 Build profile stays `opt-level = 1`, `lto = false`, `codegen-units = 1`: the
 original C reference had an unexplained post-enumeration lockup when the USB
@@ -145,9 +211,18 @@ and main()'s frame alone is ~2 KB, and a boot-path overflow hardfaults
 shipped once, as build 35). The gate computes a conservative static
 worst-case stack depth (disassembly call graph; multi-path frames and tail
 calls overestimated; `blx rN` trait dispatch charged the max UsbClass-impl
-subtree; recursion is a hard error) and fails the build unless worst + one
-exception frame + 192 B margin fits `STACK_TOP − __ebss`. Two related
-subtleties, both load-bearing:
+subtree; recursion is a hard error). Because the USBD_LP ISR runs real code,
+the gate discovers every handler from the `.vector_table` section and checks
+**two phases** against `STACK_TOP − __ebss` (+192 B margin):
+*boot* (PRIMASK set: thread worst + one exception frame + the fault-handler
+chain) and *run* (USBD unmasked: thread worst **with pre-unmask-only chains
+pruned** + exception frame + the deepest IRQ-handler chain + a second
+exception frame + the fault chain — single IRQ, no nesting, faults spin).
+The pruned chains are `PRE_IRQ_ROOTS` in stack_gate.py (today: `getva::init`);
+the gate verifies each is called exactly once from the main body and is
+unreachable from any handler, but *the call staying before `NVIC::unmask` is
+a code invariant* — keep it that way (comments at the call site).
+Related subtleties, all load-bearing:
 - **The runtime stack top (0x20001000) is raised in `__pre_init`**
   (startup.rs), not in the linker: the flash header's initial SP must stay
   at the bootloader-proven `0x20000E40` (the bootloader faults on some SP
@@ -155,10 +230,11 @@ subtleties, both load-bearing:
   stack_gate.py must match the asm constant.
 - **Deep one-shot work runs at boot, not under the deepest chain**: the AES
   key schedule (~1.1 KB of chain) runs once from `getva::init()` before the
-  main loop; `build()` only reads the cached cipher. Keep new expensive
-  init work on that pattern, and never put a call cycle in the graph (the
-  tft `fill_rect`/`ensure_init` cycle was broken with `fill_rect_raw` for
-  exactly this).
+  main loop *and before the USBD unmask* (which is what lets the gate prune
+  it from the run phase); `build()` only reads the cached cipher. Keep new
+  expensive init work on that pattern, and never put a call cycle in the
+  graph (the tft `fill_rect`/`ensure_init` cycle was broken with
+  `fill_rect_raw` for exactly this).
 
 ## Measurement (M1)
 

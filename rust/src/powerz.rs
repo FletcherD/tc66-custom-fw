@@ -42,8 +42,15 @@ pub struct PowerZ<'a, B: UsbBus> {
 /* The pre-built PutData(ADC) reply lives in a static, NOT in the struct:
  * main()'s stack frame is within ~100 B of overflowing the deliberately
  * fenced RAM region (memory.x), and a boot-path overflow hardfaults before
- * the D+ pull-up — an invisible dead board needing K1 recovery. Single-core,
- * IRQs masked -> Racy ok. */
+ * the D+ pull-up — an invisible dead board needing K1 recovery.
+ *
+ * Soundness (multi-word buffer shared with the USBD_LP ISR): REPLY is only
+ * reached through PowerZ's methods, and the PowerZ object itself is only
+ * reachable from the ISR or from thread mode under interrupt::free
+ * (with_usb in main.rs). Those contexts are mutually exclusive, so a
+ * set_payload copy (thread, in a critical section) can never interleave
+ * with an arm/endpoint_in_complete read (ISR) — the armed packet is always
+ * a whole, untorn payload. */
 struct RacyCell<T>(core::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for RacyCell<T> {}
 static REPLY: RacyCell<[u8; ADC_REPLY_LEN]> = RacyCell(core::cell::UnsafeCell::new([0; ADC_REPLY_LEN]));

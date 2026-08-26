@@ -12,8 +12,22 @@
 //! hard-codes 0x01/0x81); the CDC endpoints are whatever the stack allocates
 //! next (expected: EP2 = interrupt IN, EP3 = bulk OUT+IN). `updat` discovers
 //! the CDC bulk endpoint by scanning EPnR (skipping EP1) and the flasher
-//! reads its PMA buffers from the BTABLE. Interrupts stay masked
-//! (startup.rs); everything runs off dev.poll().
+//! reads its PMA buffers from the BTABLE.
+//!
+//! Boot phases:
+//!  1. GRACE WINDOW (~10 s): USB is POLLED, interrupts fully masked, only
+//!     `query`/`updat` served — the pseudo-bootloader escape hatch. A fault
+//!     in anything later is recovered by power-cycle + `make flash` inside
+//!     the window; the flash path never depends on the ISR machinery.
+//!  2. RUN: USB is serviced from the USBD_LP ISR (IRQ 37): dev.poll, the
+//!     powerz command/arm path, and moving CDC packets into CMD_RING all run
+//!     there, so blocking main-loop work (TFT draws, getva's ~20 ms AES) can
+//!     no longer starve the bus. The main loop consumes CMD_RING, builds
+//!     replies in thread mode, and pushes them into usbd-serial under short
+//!     critical sections (with_usb). Only USBD_LP is ever unmasked; it is
+//!     enabled late in main(), after every static the ISR touches is
+//!     initialized. Shared-state soundness arguments live next to each item
+//!     (UsbPtrs, CmdRing, powerz::REPLY).
 
 #![no_std]
 #![no_main]
@@ -32,18 +46,21 @@ mod tft;
 mod ui;
 mod usb_bus;
 
+use core::sync::atomic::{AtomicU32, Ordering};
 use cortex_m_rt::entry;
 use gd32f1::gd32f150 as pac;
 use markers::*;
+use pac::interrupt;
 use usb_device::device::{StringDescriptors, UsbDeviceBuilder, UsbRev, UsbVidPid};
 use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 44;
+const BUILD_ID: u32 = 45;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 type Serial<'a> = SerialPort<'a, usb_bus::UsbBus>;
+type Pz<'a> = powerz::PowerZ<'a, usb_bus::UsbBus>;
 
 #[entry]
 fn main() -> ! {
@@ -91,11 +108,11 @@ fn main() -> ! {
     /* SysTick free-runs over its full 24 bits as the timebase: elapsed
      * CYCLES accrue from CVR deltas each loop pass, so blocked time is
      * caught up, never lost. SysTick is CORE-internal — reads never stall.
-     * That matters: TIMER5 sits on APB1 with the USBD, and during host
-     * NAK storms every APB access stalls ~1-5 ms; a timebase read per loop
-     * pass made the loop itself storm-degraded (~70 passes/s, bench-
-     * measured), a self-sustaining failure. 24 bits @ 48 MHz wraps at
-     * 349 ms, far beyond any loop pass. One tick = 192_000 cycles = 4 ms. */
+     * That matters: TIMER5 sits on APB1 with the USBD, and during host NAK
+     * storms every APB access stalls ~1-5 ms; a timebase read per loop pass
+     * made the polled loop itself storm-degraded (~70 passes/s, bench-
+     * measured). 24 bits @ 48 MHz wraps at 349 ms, far beyond any loop
+     * pass. One tick = 192_000 cycles = 4 ms. */
     let mut syst = cortex_m::Peripherals::take().unwrap().SYST;
     syst.set_clock_source(cortex_m::peripheral::syst::SystClkSource::Core);
     syst.set_reload(0x00FF_FFFF);
@@ -104,10 +121,10 @@ fn main() -> ! {
 
     /* ---- pseudo-bootloader grace window (dev escape hatch) ----
      * 10 s serving ONLY `query`->firm and `updat` before any feature starts:
-     * no TFT, no sampler/I2C/ADC, no powerz service. A fault in anything
-     * that comes after is escaped by power-cycling and running `make flash`
-     * inside this window — no K1 needed. MK_PROBE reads 0x6ACE6ACE while
-     * the window is open. Standalone (no host) boots just wait out the 10 s. */
+     * no TFT, no sampler/I2C/ADC, no powerz service, POLLED USB with all
+     * interrupts still masked — the flash path never depends on the ISR
+     * machinery that starts below. MK_PROBE reads 0x6ACE6ACE while the
+     * window is open. Standalone (no host) boots just wait out the 10 s. */
     mk(MK_PROBE, 0x6ACE_6ACE);
     {
         let mut acc: u32 = 0;
@@ -124,7 +141,8 @@ fn main() -> ! {
             }
             if let Ok(n) = serial.read(&mut gbuf) {
                 if match5(&gbuf[..n], b"query") {
-                    write_all(&mut dev, &mut serial, b"firm");
+                    /* drained by the dev.poll of subsequent passes */
+                    let _ = serial.write(b"firm");
                 } else if match5(&gbuf[..n], b"updat") {
                     if let Some(ep) = find_bulk_ep() {
                         flasher::launch(ep); /* does not return */
@@ -140,8 +158,38 @@ fn main() -> ! {
      * display is left off for this boot (verbs can still retry it). */
     let mut tft_alive = ui::draw(0, 0, 0).is_ok();
 
-    getva::init(); /* AES key schedule now, while the stack is shallow */
+    /* AES key schedule now: the stack is shallow AND the USBD IRQ is still
+     * masked — tools/stack_gate.py relies on getva::init's deep chain never
+     * running with the ISR enabled (PRE_IRQ_ROOTS). Keep it before the
+     * unmask below. */
+    getva::init();
     let mut sampler = ina::Sampler::new();
+
+    /* Hand the USB objects to the ISR and open the gate. main() never
+     * returns, so the locals live forever and the raw pointers stay valid.
+     * Publish them BEFORE unmasking; from here on main touches dev/pz/serial
+     * only through with_usb() (critical sections) — the locals are shadowed
+     * below so direct access is a compile error. PRIMASK has been set since
+     * __pre_init; clearing it last releases any events that accumulated in
+     * ISTR since pa9_high (the mask bits in CNTR — CTRM/RESETM/SUSPM/WKUPM —
+     * were set by stm32-usbd's enable()). */
+    unsafe {
+        *USB.0.get() = UsbPtrs {
+            dev: &mut dev as *mut Dev as *mut Dev<'static>,
+            pz: &mut pz as *mut Pz as *mut Pz<'static>,
+            serial: &mut serial as *mut Serial as *mut Serial<'static>,
+        };
+        mk(MK_USB_STATE, 0);
+        mk(MK_USB_IRQS, 0);
+        mk(MK_USB_ISTR, 0);
+        mk(MK_USB_FULL, 0);
+        mk(MK_USB_CMDS, 0);
+        mk(MK_USB_SPUR, 0);
+        cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USBD_LP);
+        cortex_m::interrupt::enable();
+    }
+    #[allow(unused_variables)]
+    let (dev, pz, serial) = ((), (), ());
 
     /* 1 Hz energy integration (RAM only, starts at 0; persistence is M2):
      * every 250 ticks accumulate published I and P for one second.
@@ -161,14 +209,8 @@ fn main() -> ! {
     const IDLE_OFF_SECS: u32 = 600;
     let mut idle_secs: u32 = 0;
 
-    let mut buf = [0u8; 64];
     let mut prev_cnt = cortex_m::peripheral::SYST::get_current();
     let mut tick_acc: u32 = 0;
-    /* powerz arming is gated on Configured: an ep write BEFORE the first bus
-     * reset lands in an EPnR whose address field is still 0 — a second
-     * endpoint-0 claimant that wedges EP0 mid-enumeration (config-descriptor
-     * reads time out; found on the bench, builds 36-38). */
-    let mut usb_up = false;
     loop {
         mk(MK_HEART, mk_get(MK_HEART) + 1);
         let cnt = cortex_m::peripheral::SYST::get_current();
@@ -193,8 +235,10 @@ fn main() -> ! {
                     m.inst_i_1e5 = ii;
                 }
             }
-            /* refresh the pre-built powerz reply each tick (calm context) */
-            pz.set_payload(&powerz_payload());
+            /* refresh the pre-built powerz reply each tick; built in thread
+             * mode, copied into powerz::REPLY inside the critical section */
+            let pl = powerz_payload();
+            with_usb(|_, pz, _| pz.set_payload(&pl));
             sec_ticks += 1;
             if sec_ticks >= 250 {
                 sec_ticks = 0;
@@ -231,11 +275,8 @@ fn main() -> ! {
             ui_ticks += 1;
             if ui_ticks >= 125 && tft_alive {
                 ui_ticks = 0;
-                /* re-arm before the draw: it's the longest tick-body path,
-                 * and an unarmed IN during it risks the powerz 5 ms deadline */
-                if usb_up {
-                    pz.arm();
-                }
+                /* the draw may block for a while, but the ISR keeps the
+                 * powerz reply armed throughout — no pre-arm needed */
                 let m = unsafe { *PUBLISHED.0.get() };
                 let (pw, _) = ina::derive(m.v_1e4, m.i_1e5);
                 /* a failed draw disables the refresh for this boot (a wedged
@@ -243,27 +284,16 @@ fn main() -> ! {
                 tft_alive = ui::draw(m.v_1e4, m.i_1e5, pw).is_ok();
             }
         }
-        /* USB work only on event passes: every powerz endpoint access is a
-         * stalled bus transaction during a NAK storm, and per-pass accesses
-         * made the loop itself storm-degraded (~70 passes/s). Consumption
-         * and command arrival re-arm/serve immediately via the class
-         * callbacks inside dev.poll; the calls below are the backup for
-         * dropped events (this clone loses ~20% of completion callbacks). */
-        if !dev.poll(&mut [&mut pz, &mut serial]) {
-            continue;
-        }
-        usb_up = dev.state() == UsbDeviceState::Configured;
-        if usb_up && mk_get(MK_STAGE) < STAGE_CONFIG {
+        /* dispatch commands the ISR queued; replies (AES etc.) are built
+         * right here in thread mode with interrupts enabled */
+        run_pending_cmds();
+        /* recovery drain: packets that arrived while the ring was full sit
+         * in usbd-serial's buffer with no further IRQ coming for them */
+        with_usb(|_, _, serial| drain_serial(serial));
+        if mk_get(MK_STAGE) < STAGE_CONFIG
+            && with_usb(|dev, _, _| dev.state()) == Some(UsbDeviceState::Configured)
+        {
             mk(MK_STAGE, STAGE_CONFIG);
-        }
-        pz.poll_cmd();
-        if usb_up {
-            pz.arm();
-        }
-        if let Ok(n) = serial.read(&mut buf) {
-            if n > 0 {
-                on_packet(&mut dev, &mut serial, &buf[..n]);
-            }
         }
     }
 }
@@ -274,7 +304,7 @@ fn match5(b: &[u8], cmd: &[u8; 5]) -> bool {
 }
 
 #[inline(never)]
-fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
+fn on_packet(buf: &[u8]) {
     if buf.len() >= 4 {
         mk(
             MK_CMD,
@@ -287,25 +317,25 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
     }
 
     if match5(buf, b"query") {
-        write_all(dev, serial, b"firm");
+        write_all(b"firm");
         mk(MK_STAGE, STAGE_QUERY);
     } else if match5(buf, b"getva") {
         let mut reply = [0u8; 192];
         getva::build(&mut reply, &live_fields());
-        write_all(dev, serial, &reply);
+        write_all(&reply);
     } else if match5(buf, b"rawva") {
         /* dev verb: same fields as getva, plaintext + CRC16, no AES — for
          * fast host streaming (layout in getva.rs; tools/rawva.py) */
         let mut reply = [0u8; getva::RAW_LEN];
         getva::build_raw(&mut reply, &live_fields());
-        write_all(dev, serial, &reply);
+        write_all(&reply);
     } else if match5(buf, b"i2crd") {
         /* dev/bring-up verb (ours, not stock):
          *   i2crd <addr7> <wlen 0..=2> <w0> <w1> <rlen 0..=32>
          * -> "OK" + rlen bytes, or "ER" + [stage, stat0.lo, stat0.hi, stat1.lo] */
         let mut reply = [0u8; 34];
         let n = i2c_command(buf, &mut reply);
-        write_all(dev, serial, &reply[..n]);
+        write_all(&reply[..n]);
     } else if match5(buf, b"adcrd") {
         /* dev verb: adcrd <ch> -> "OK" + u32 LE sum-of-16, or "ER" + stage */
         let mut reply = [0u8; 6];
@@ -327,7 +357,7 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
             reply[2] = 0x0F;
             3
         };
-        write_all(dev, serial, &reply[..n]);
+        write_all(&reply[..n]);
     } else if match5(buf, b"tftfl") {
         /* dev verb: tftfl -> test pattern; tftfl <lo> <hi> -> solid RGB565 fill
          * -> "OK", or "ER" + stage (1 SPI TBE timeout, 2 shift-idle timeout) */
@@ -338,13 +368,13 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
         } else {
             tft::test_pattern()
         };
-        reply_ok_er(dev, serial, r);
+        reply_ok_er(r);
     } else if match5(buf, b"tftui") {
         /* dev verb: draw/refresh the main screen from published values */
         let _ = tft::screen_on();
         let m = unsafe { *PUBLISHED.0.get() };
         let (p, _) = ina::derive(m.v_1e4, m.i_1e5);
-        reply_ok_er(dev, serial, ui::draw(m.v_1e4, m.i_1e5, p));
+        reply_ok_er(ui::draw(m.v_1e4, m.i_1e5, p));
     } else if match5(buf, b"tftbl") {
         /* dev verb: tftbl <lo> <hi> -> backlight PWM compare 0..=999 */
         let _ = tft::screen_on();
@@ -353,12 +383,22 @@ fn on_packet(dev: &mut Dev, serial: &mut Serial, buf: &[u8]) {
         } else {
             Err(0x0F)
         };
-        reply_ok_er(dev, serial, r);
+        reply_ok_er(r);
     } else if match5(buf, b"updat") {
+        /* The flasher erases app flash and takes over the CDC endpoint by
+         * hand — the USBD ISR must never run again: mask globally AND in the
+         * NVIC before touching anything, so nothing can preempt between
+         * endpoint discovery and the SRAM handoff. */
+        cortex_m::interrupt::disable();
+        cortex_m::peripheral::NVIC::mask(pac::Interrupt::USBD_LP);
         if let Some(ep) = find_bulk_ep() {
             flasher::launch(ep); /* does not return */
         }
         mk(MK_PROBE, 0xBAD_EB); /* no bulk endpoint found — refuse, host times out */
+        unsafe {
+            cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USBD_LP);
+            cortex_m::interrupt::enable();
+        }
     }
     /* rotat / nextp / lastp / unknown -> silent */
 }
@@ -384,9 +424,158 @@ fn live_fields() -> getva::Fields {
 }
 
 /* Latest published measurement set from the timer-paced sampler + 1 Hz energy
- * integrator; zeros until first window. Single-core, IRQs masked -> Racy ok. */
+ * integrator; zeros until first window. Soundness: written and read ONLY from
+ * thread mode (main loop) — the USBD_LP ISR never touches PUBLISHED (the ISR's
+ * measurement data comes from powerz::REPLY, refreshed per tick), so the
+ * multi-word struct needs no locking. */
 struct Racy<T>(core::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for Racy<T> {}
+
+/* ---- USB object sharing (thread mode <-> USBD_LP ISR) ----
+ *
+ * The UsbDevice/PowerZ/SerialPort trio is ONE ownership unit living in
+ * main()'s frame (main never returns). Raw pointers to them are published
+ * here once, before the USBD_LP IRQ is unmasked. Access rules:
+ *  - the ISR derives &muts directly (it cannot preempt itself: only USBD_LP
+ *    is unmasked, and NVIC never nests same-priority IRQs);
+ *  - thread mode derives &muts only inside with_usb (PRIMASK set), so the
+ *    ISR cannot run while they exist;
+ *  - after publishing, main's locals are shadowed — the pointers are the
+ *    only remaining access path.
+ * Together: no two &muts to these objects can ever coexist. */
+struct UsbPtrs {
+    dev: *mut Dev<'static>,
+    pz: *mut Pz<'static>,
+    serial: *mut Serial<'static>,
+}
+static USB: Racy<UsbPtrs> = Racy(core::cell::UnsafeCell::new(UsbPtrs {
+    dev: core::ptr::null_mut(),
+    pz: core::ptr::null_mut(),
+    serial: core::ptr::null_mut(),
+}));
+
+/// Run `f` on the USB objects with the USBD_LP ISR held off (PRIMASK).
+/// KEEP THE CLOSURES SHORT — a buffer copy or one endpoint write, never AES
+/// or TFT work: powerz replies must be re-armable within the Linux driver's
+/// 5 ms URB budget. Never nest with_usb calls (double &mut). None before
+/// the pointers are published (nothing calls it that early).
+#[inline(never)]
+fn with_usb<R>(f: impl FnOnce(&mut Dev, &mut Pz, &mut Serial) -> R) -> Option<R> {
+    cortex_m::interrupt::free(|_| {
+        let u = unsafe { &*USB.0.get() };
+        if u.dev.is_null() {
+            return None;
+        }
+        Some(unsafe { f(&mut *u.dev, &mut *u.pz, &mut *u.serial) })
+    })
+}
+
+/* ---- Command ring (ISR/producer -> main loop/consumer) ----
+ *
+ * Fixed slots so a CDC packet is handed over whole. Soundness:
+ *  - push (drain_serial) runs in the ISR or in thread mode under
+ *    interrupt::free — mutually exclusive contexts, so there is exactly one
+ *    producer at a time and `head` updates never race;
+ *  - pop (run_pending_cmds) runs only in thread-mode main loop — single
+ *    consumer for `tail`;
+ *  - head/tail are single u32 atomics (naturally atomic on M3; the
+ *    Acquire/Release pairs stop compiler reordering vs the slot data);
+ *  - a slot is written only while head-tail < SLOTS and read only while
+ *    tail < head, so producer and consumer never touch the same slot.
+ * When the ring is full the producer simply stops reading usbd-serial: bytes
+ * back up in its 128-B buffer and then NAK the endpoint — backpressure, not
+ * loss. Main re-runs drain_serial after freeing a slot (no IRQ will fire for
+ * already-buffered bytes). */
+const CMD_SLOTS: usize = 2;
+struct CmdRing {
+    bufs: core::cell::UnsafeCell<[[u8; 64]; CMD_SLOTS]>,
+    lens: core::cell::UnsafeCell<[u8; CMD_SLOTS]>,
+    head: AtomicU32,
+    tail: AtomicU32,
+}
+unsafe impl Sync for CmdRing {}
+static CMD_RING: CmdRing = CmdRing {
+    bufs: core::cell::UnsafeCell::new([[0; 64]; CMD_SLOTS]),
+    lens: core::cell::UnsafeCell::new([0; CMD_SLOTS]),
+    head: AtomicU32::new(0),
+    tail: AtomicU32::new(0),
+};
+
+/// Move buffered CDC packets into CMD_RING (reads straight into the slot —
+/// no scratch buffer on the ISR stack). ISR context, or thread mode under
+/// interrupt::free.
+#[inline(never)]
+fn drain_serial(serial: &mut Serial) {
+    loop {
+        let h = CMD_RING.head.load(Ordering::Relaxed);
+        let t = CMD_RING.tail.load(Ordering::Acquire);
+        if h.wrapping_sub(t) >= CMD_SLOTS as u32 {
+            mk(MK_USB_FULL, mk_get(MK_USB_FULL) + 1);
+            return;
+        }
+        let i = h as usize % CMD_SLOTS;
+        let slot = unsafe { &mut (*CMD_RING.bufs.get())[i] };
+        match serial.read(slot) {
+            Ok(n) if n > 0 => {
+                unsafe { (*CMD_RING.lens.get())[i] = n as u8 };
+                CMD_RING.head.store(h.wrapping_add(1), Ordering::Release);
+                mk(MK_USB_CMDS, mk_get(MK_USB_CMDS) + 1);
+            }
+            _ => return,
+        }
+    }
+}
+
+/// Dispatch every queued command packet. Thread mode only. The slot is read
+/// in place (the producer cannot reuse it until `tail` advances), so a slow
+/// reply (getva AES) runs with interrupts enabled and zero extra copies.
+#[inline(never)]
+fn run_pending_cmds() {
+    loop {
+        let t = CMD_RING.tail.load(Ordering::Relaxed);
+        let h = CMD_RING.head.load(Ordering::Acquire);
+        if h == t {
+            return;
+        }
+        let i = t as usize % CMD_SLOTS;
+        let len = unsafe { (*CMD_RING.lens.get())[i] } as usize;
+        {
+            let slot = unsafe { &(*CMD_RING.bufs.get())[i] };
+            on_packet(&slot[..len]);
+        }
+        CMD_RING.tail.store(t.wrapping_add(1), Ordering::Release);
+    }
+}
+
+/// USBD_LP (IRQ 37): the only unmasked interrupt. Keeps the bus serviced no
+/// matter what the main loop is doing. Everything here is bounded and short
+/// (stm32-usbd/usbd-serial never busy-wait); the long work (AES replies)
+/// stays in thread mode. MK_USB_STATE phases localize a wedge; see markers.rs.
+#[interrupt]
+fn USBD_LP() {
+    mk(MK_USB_IRQS, mk_get(MK_USB_IRQS) + 1);
+    mk(MK_USB_STATE, 1);
+    /* USBD_INTF (ISTR) snapshot before poll clears it: base+0x44 */
+    mk(MK_USB_ISTR, unsafe { core::ptr::read_volatile(0x4000_5C44 as *const u32) });
+    let u = unsafe { &*USB.0.get() };
+    if u.dev.is_null() {
+        mk(MK_USB_SPUR, mk_get(MK_USB_SPUR) + 1);
+        mk(MK_USB_STATE, 0);
+        return;
+    }
+    let (dev, pz, serial) = unsafe { (&mut *u.dev, &mut *u.pz, &mut *u.serial) };
+    dev.poll(&mut [&mut *pz, &mut *serial]);
+    mk(MK_USB_STATE, 2);
+    /* powerz: answer Connect/Disconnect, then make sure the pre-built ADC
+     * reply is armed (endpoint_in_complete re-arms inside poll; this covers
+     * the first arm and queued-command-reply handoffs) */
+    pz.poll_cmd();
+    pz.arm();
+    mk(MK_USB_STATE, 3);
+    drain_serial(serial);
+    mk(MK_USB_STATE, 4);
+    mk(MK_USB_STATE, 0);
+}
 
 #[derive(Clone, Copy)]
 struct Meas {
@@ -456,10 +645,10 @@ fn powerz_payload() -> [u8; powerz::ADC_PAYLOAD_LEN] {
 }
 
 #[inline(never)]
-fn reply_ok_er(dev: &mut Dev, serial: &mut Serial, r: Result<(), u8>) {
+fn reply_ok_er(r: Result<(), u8>) {
     match r {
-        Ok(()) => write_all(dev, serial, b"OK"),
-        Err(stage) => write_all(dev, serial, &[b'E', b'R', stage]),
+        Ok(()) => write_all(b"OK"),
+        Err(stage) => write_all(&[b'E', b'R', stage]),
     }
 }
 
@@ -498,28 +687,39 @@ fn i2c_command(buf: &[u8], reply: &mut [u8; 34]) -> usize {
     }
 }
 
-/// Blocking-ish write with an absent-host bound (the C had the same bounded wait):
-/// push bytes into usbd-serial's buffer and keep polling until it drains.
+/// Blocking-ish write with an absent-host bound (the C had the same bounded
+/// wait): feed usbd-serial's buffer under short critical sections — one
+/// buffer copy / endpoint write each, never held across slow work. The USBD
+/// ISR kicks and continues the actual bus traffic (serial.write starts a
+/// packet itself; endpoint_in_complete flushes the rest), so WouldBlock here
+/// just means "wait for the ISR to drain some".
 #[inline(never)]
-fn write_all(dev: &mut Dev, serial: &mut Serial, data: &[u8]) {
-    let mut rest = data;
+fn write_all(data: &[u8]) {
+    let mut sent = 0usize;
     let mut budget = 200_000u32;
     while budget > 0 {
         budget -= 1;
-        if !rest.is_empty() {
-            match serial.write(rest) {
-                Ok(n) => rest = &rest[n..],
-                Err(UsbError::WouldBlock) => {}
-                Err(_) => return,
+        let done = with_usb(|_, _, serial| {
+            if sent < data.len() {
+                match serial.write(&data[sent..]) {
+                    Ok(n) => {
+                        sent += n;
+                        false
+                    }
+                    Err(UsbError::WouldBlock) => false,
+                    Err(_) => true,
+                }
+            } else {
+                match serial.flush() {
+                    Ok(()) => true,
+                    Err(UsbError::WouldBlock) => false,
+                    Err(_) => true,
+                }
             }
-        } else {
-            match serial.flush() {
-                Ok(()) => return,
-                Err(UsbError::WouldBlock) => {}
-                Err(_) => return,
-            }
+        });
+        if done != Some(false) {
+            return; /* finished, hard error, or USB not published yet */
         }
-        dev.poll(&mut [serial]);
     }
 }
 

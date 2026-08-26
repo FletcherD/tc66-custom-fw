@@ -47,8 +47,11 @@ The board is on the bench hub, port **b2** — power-cycle it with the
   `i2crd`/`adcrd`): nothing at boot, bounded waits, staged error replies.
   Move it into the always-on path only once proven. This keeps every failure
   recoverable by power-cycle instead of K1.
-- Interrupts stay masked; everything is polled from the main loop. Keep the
-  build profile conservative (`opt-level = 1`, no LTO) — see FIRMWARE.md.
+- Exactly one interrupt is unmasked: **USBD_LP services USB** (ISR/thread
+  split, shared-state rules and the with_usb critical-section discipline:
+  FIRMWARE.md "USB"). Everything else stays masked and polled from the main
+  loop; long work (AES, TFT) never runs in the ISR. Keep the build profile
+  conservative (`opt-level = 1`, no LTO) — see FIRMWARE.md.
 - The `.flasher` section must stay self-contained (no calls/literals into app
   flash); the `flasher-gate`/`init-gate`/`stack-gate` Makefile gates enforce
   this (and the static worst-case stack budget — a boot-path stack overflow
