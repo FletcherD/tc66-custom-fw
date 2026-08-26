@@ -202,6 +202,15 @@ pub fn afc(cmd: u8, reps: u8) -> Result<(), u8> {
         unsafe { *ENTERED.0.get() = true };
         unsafe { *IN_QC3.0.get() = false };
     }
+    /* 3 sync pings (0x01) at 900 µs — the common FCP/SCP/AFC preamble that
+     * locks the charger onto our serial framing before the command (was
+     * omitted in the first attempt) */
+    for k in 0..3 {
+        afc_byte(0x01);
+        if k < 2 {
+            us(900);
+        }
+    }
     let n = if reps == 0 { 3 } else { reps };
     for k in 0..n {
         afc_byte(cmd);
