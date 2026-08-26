@@ -86,7 +86,40 @@ touch the bootloader or the config page.
   `openocd -f openocd.cfg -c "mdw 0x20001000 8" -c shutdown` (no halt).
   This is the primary debug loop — see README.
 
-## Host command protocol (USB CDC)
+## Host protocols
+
+The device is a composite with two host protocols. **The powerz vendor
+protocol is the PRIORITY path** — it is what the mainline Linux driver
+speaks and what new features should serve first. The CDC verb protocol
+(getva etc.) is kept **for compatibility** with existing TC66 host tools
+plus our dev verbs and `updat`.
+
+### powerz vendor protocol (interface 0 — the priority path)
+
+The ChargerLAB POWER-Z KM003C protocol subset the mainline Linux `powerz`
+hwmon driver uses, on the fixed bulk pair **0x01 OUT / 0x81 IN** (the
+driver hard-codes them). Requests are 4-B headers: `cmd, tid, attr<<1`
+LE; `GetData` (0x0C) with `ATT_ADC` (0x0001) fetches measurements. The
+reply is 52 B: an 8-B `PutData` (0x41) + extended header, then the 44-B
+ADC payload (built in `powerz_payload()`, main.rs):
+
+| Offset | Field (LE) |
+|---|---|
+| 0 / 4 | instantaneous Vbus µV (i32) / Ibus µA (i32) |
+| 8 / 12 | 1 s average µV / µA |
+| 16 / 20 | 1 s nominal-scale ("original") µV / µA |
+| 24, 25 | temp: 1/128 °C units, 2 °C units (clamped ≥ 0) |
+| 26, 28, 34 | Vcc1/Vcc2/Vdd — 0 until the FUSB302 (M4) |
+| 30 / 32 | D+ / D− in 0.1 mV units (u16) |
+| 36..44 | reserved, 0 |
+
+The reply is **pre-armed** on the IN endpoint (rebuilt at the 250 Hz tick,
+re-armed unconditionally per ISR pass) so a host read completes without
+NAK-polling — the driver's 5 ms URB budget is the design constraint.
+`Connect`/`Disconnect` (0x02/0x03) get Accept; other commands Reject.
+Bench: >5000 reads/s sustained with zero timeouts.
+
+### CDC verb protocol (interfaces 1+2 — compatibility + dev)
 
 Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the first
 5 bytes of each USB packet against a command table. Standard verbs:

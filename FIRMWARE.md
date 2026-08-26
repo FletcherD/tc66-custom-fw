@@ -130,10 +130,12 @@ K1 recovery remains for.
 
 ### Interrupt-driven servicing (the USBD_LP ISR)
 
-USB is serviced from **`USBD_LP` (IRQ 37)**, so blocking main-loop work
-(an ADC burst ~1 ms, TFT flushes, getva's AES) can never starve the bus;
-the powerz driver's 5 ms URB budget is met regardless of what the loop is
-doing. stm32-usbd's `enable()` sets the CNTR masks (CTRM/RESETM/SUSPM/
+**The powerz vendor path (interface 0) is the priority**: its pre-armed
+reply must always meet the Linux driver's 5 ms URB budget — that budget is
+the design constraint everything below serves. The CDC verbs are the
+compatibility/dev channel and are allowed to be slower. USB is serviced
+from **`USBD_LP` (IRQ 37)**, so blocking main-loop work (an ADC burst
+~1 ms, TFT flushes, getva's AES) can never starve the bus. stm32-usbd's `enable()` sets the CNTR masks (CTRM/RESETM/SUSPM/
 WKUPM — no SOF, so the ISR is event-driven); `run()` publishes the USB
 object pointers, unmasks USBD_LP in the NVIC, and clears PRIMASK. The
 split:

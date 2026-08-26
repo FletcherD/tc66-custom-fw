@@ -76,7 +76,19 @@ SECTIONS
     *(.text.__aeabi_uldivmod .text.__udivmoddi4);
     *(.text.__aeabi_uidiv* .text.__udivsi3 .text.__umodsi3);
 
-    /* --- tier 3: the getva/rawva reply path (the ~20 ms AES fix) --- */
+    /* --- tier 3: main loop shell + the powerz data path (powerz is the
+     * PRIORITY protocol — its 250 Hz payload refresh and the loop that
+     * paces it outrank the compatibility verbs below) --- */
+    *(.text.*7tc66_fw3run*);
+    *(.text.*22refresh_powerz_payload*);
+    *(.text.*14powerz_payload*);
+    *(.text.*16run_pending_cmds*);
+    *(.text.*9write_all*);
+    *(.text.*9on_packet* .text.*6match5*);
+
+    /* --- tier 4: the getva/rawva reply path (COMPATIBILITY — the ~20 ms
+     * AES fix lives here; ordered so a future squeeze spills do_getva/
+     * do_rawva's thin wrappers before the AES inner loops) --- */
     *(.text.*14aes256_encrypt*);
     *(.text.*9sub_bytes*);
     *(.text.*13mix_columns_*);
@@ -85,15 +97,9 @@ SECTIONS
     *(.text.*7tc66_fw5getva*);          /* build, build_raw (init is 56 B) */
     *(.text.*8do_getva* .text.*8do_rawva*);
 
-    /* --- tier 4: main loop shell + dispatch --- */
-    /* (NOT the TFT loops, despite their ~31% profile share when slow: the
-     * polled SPI path is about to be replaced by DMA — refactor/spi-dma —
-     * so it doesn't get fast-region budget) */
-    *(.text.*7tc66_fw3run*);
-    *(.text.*16run_pending_cmds*);
-    *(.text.*9write_all*);
-    *(.text.*14powerz_payload*);
-    *(.text.*9on_packet* .text.*6match5*);
+    /* (No TFT loops anywhere above, despite their profile share when they
+     * sat slow: the display is DMA-driven now and gets no fast-region
+     * budget.) */
 
     /* --- tier 5: per-command helpers (spill fodder — fine either side) --- */
     *(.text.*11live_fields* .text.*11reply_ok_er*);

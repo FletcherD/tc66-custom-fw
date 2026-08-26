@@ -1,9 +1,12 @@
 //! TC66 custom firmware — M0 on the ecosystem USB stack.
 //!
-//! usb-device + usbd-serial + stm32-usbd (via the small UsbPeripheral impl in
-//! usb_bus.rs) provide a composite device: interface 0 = POWER-Z KM003C
+//! usb-device + usbd-serial + stm32-usbd (via the small UsbPeripheral impl
+//! in usb_bus.rs) provide a composite device. Interface 0 = POWER-Z KM003C
 //! vendor emulation (powerz.rs, binds the mainline Linux `powerz` hwmon
-//! driver), interfaces 1+2 = CDC-ACM with the bare-5-byte commands:
+//! driver) — **the PRIORITY protocol**: its pre-armed reply must always
+//! meet the driver's 5 ms URB budget. Interfaces 1+2 = CDC-ACM, kept for
+//! COMPATIBILITY with stock TC66 host tools + our dev channel, with the
+//! bare-5-byte commands:
 //!   query -> "firm", getva -> 192-B encrypted packet, rawva -> 46-B
 //!   plaintext, updat -> Rust SRAM flasher (flasher.rs), dev verbs,
 //!   rotat/nextp/lastp -> silent no-ops.
@@ -62,7 +65,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 63;
+const BUILD_ID: u32 = 64;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B

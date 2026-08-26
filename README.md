@@ -38,15 +38,18 @@ gone) — our own protocol on top of a compatible base, and room to add features
   rawva 0.6 ms, getva 2.3 ms round-trip (were 4.5/9/49); powerz sustains
   >5000 reads/s. Profile-guided via the on-device 250 Hz PC sampler
   (`pcprf` verb + `tools/pcprofile.py` — the chip's DWT is a stub).
-- **USB architecture: interrupt-serviced, bench-verified.** The USBD_LP ISR
-  keeps the bus served regardless of main-loop work; the device is a
-  composite that also emulates a ChargerLAB POWER-Z KM003C, so the mainline
-  Linux `powerz` hwmon driver binds it and `sensors` just works (0 failures
-  in 2000 gap-free reads). The first ~10 s of every boot are a
+- **USB architecture: interrupt-serviced, bench-verified.** The device
+  leads with its **POWER-Z KM003C emulation — the priority protocol**: the
+  mainline Linux `powerz` hwmon driver binds it, `sensors` just works, and
+  the pre-armed reply path sustains >5000 reads/s with zero timeouts. The
+  legacy TC66 CDC verbs (`getva` etc.) ride along **for compatibility**
+  with existing host tools, plus our dev verbs and the `updat` reflash.
+  The USBD_LP ISR (with an EPxCS-conditioned drain loop) keeps the bus
+  served regardless of main-loop work. The first ~10 s of every boot are a
   **pseudo-bootloader grace window** (only `query`/`updat` served): a fault
   in any later feature is recovered by power-cycle + `make flash` inside the
-  window — no button press. The chip fights back in strange ways; QUIRKS.md
-  is the measured catalog.
+  window — no button press. The chip fought back in strange ways; QUIRKS.md
+  is the measured catalog (all entries now closed).
 - **Next steps** (see also the open items in QUIRKS.md):
   - **M2 — persistence** (real serial/run-count, energy write-back to the
     wear-leveled EEPROM journal, `gtrec` log, EEPROM writes in the I²C
