@@ -67,7 +67,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 69;
+const BUILD_ID: u32 = 71;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -826,8 +826,9 @@ fn refresh_powerz_payload() {
 
 /// Build the 44-byte powerz ADC payload (layout: powerz.rs / HARDWARE.md).
 /// All uV/uA are our wire units scaled up (1e-4 V -> x100 uV, 1e-5 A ->
-/// x10 uA); Vcc1/Vcc2/Vdd are 0 until the FUSB302 is brought up (M4); temp
-/// is clamped at 0 (the kernel driver's byte pair can't encode sub-zero).
+/// x10 uA); Vcc1/Vcc2 come from the PD engine's CC sweep (live while armed,
+/// else 0), Vdd from the Vrefint ratio; temp is clamped at 0 (the kernel
+/// driver's byte pair can't encode sub-zero).
 #[inline(never)]
 fn powerz_payload() -> [u8; powerz::ADC_PAYLOAD_LEN] {
     let m = ina::snapshot();
@@ -848,8 +849,16 @@ fn powerz_payload() -> [u8; powerz::ADC_PAYLOAD_LEN] {
     };
     put16(30, m.dp_1e2 * 100); /* 1e-2 V -> 0.1 mV units */
     put16(32, m.dm_1e2 * 100);
-    /* vcc1/vcc2/vdd (26/28/34) + tail (36..44) stay 0 until the FUSB302
-     * is brought up (M4) */
+    /* Vcc1/Vcc2: CC-pin voltages from the PD engine's MDAC sweep — live
+     * while the engine is armed (`pdctl 1`), 0 otherwise. Vdd: logic rail
+     * via the Vrefint ratio (each window's ADC burst). */
+    #[cfg(feature = "dev-verbs")]
+    let (c1, c2) = pd::cc_mv();
+    #[cfg(not(feature = "dev-verbs"))]
+    let (c1, c2) = (0u16, 0u16);
+    put16(26, c1 as u32 * 10); /* mV -> 0.1 mV units */
+    put16(28, c2 as u32 * 10);
+    put16(34, m.vdd_mv * 10);
     p
 }
 

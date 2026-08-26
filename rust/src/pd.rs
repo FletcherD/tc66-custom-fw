@@ -31,6 +31,7 @@ const ADDR: u8 = 0x22;
 /* registers */
 const R_SWITCHES0: u8 = 0x02;
 const R_SWITCHES1: u8 = 0x03;
+const R_MEASURE: u8 = 0x04; /* bit6 MEAS_VBUS, bits5:0 MDAC */
 const R_CONTROL0: u8 = 0x06;
 const R_CONTROL1: u8 = 0x07;
 const R_CONTROL3: u8 = 0x09;
@@ -66,6 +67,7 @@ const IA_TXSENT: u8 = 0x04;
 const IA_HARDRST: u8 = 0x01;
 /* Status0 / Status1 (VBUSOK is Status0 bit7, reported raw via pdsta) */
 const S0_ACTIVITY: u8 = 0x40;
+const S0_COMP: u8 = 0x20; /* CC above the MDAC threshold */
 const S0_BC_LVL: u8 = 0x03;
 const S1_RX_EMPTY: u8 = 0x20;
 
@@ -121,9 +123,12 @@ pub struct Pd {
     detach: u8,    /* consecutive quiet BC_LVL=0 polls */
     rx_msgs: u16,
     rx_hdr: [u16; 3], /* last 3 received SOP headers, newest first (pdsta) */
+    vcc1_mv: u16, /* CC pin voltages from the MDAC sweep (powerz Vcc1/Vcc2) */
+    vcc2_mv: u16,
     poll_tick: u32,
     req_tick: u32,
     cap_ask_tick: u32,
+    vcc_tick: u32,
 }
 
 struct Racy<T>(core::cell::UnsafeCell<T>);
@@ -146,9 +151,12 @@ static PD: Racy<Pd> = Racy(core::cell::UnsafeCell::new(Pd {
     detach: 0,
     rx_msgs: 0,
     rx_hdr: [0; 3],
+    vcc1_mv: 0,
+    vcc2_mv: 0,
     poll_tick: 0,
     req_tick: 0,
     cap_ask_tick: 0,
+    vcc_tick: 0,
 }));
 
 fn pd() -> &'static mut Pd {
@@ -213,9 +221,12 @@ pub fn arm() -> Result<(), u8> {
         detach: 0,
         rx_msgs: 0,
         rx_hdr: [0; 3],
+        vcc1_mv: 0,
+        vcc2_mv: 0,
         poll_tick: ina::ticks(),
         req_tick: ina::ticks(), /* ST_RD_CYCLE start */
         cap_ask_tick: 0,
+        vcc_tick: 0,
     };
     Ok(())
 }
@@ -276,6 +287,59 @@ pub fn request(idx: u8) -> Result<(), u8> {
     send_request(p, idx, pdo)
 }
 
+/// Latest CC pin voltages in mV (0 when the engine is off / nothing
+/// measured yet) — feeds the powerz Vcc1/Vcc2 fields. Thread mode only.
+pub fn cc_mv() -> (u16, u16) {
+    let p = pd();
+    (p.vcc1_mv, p.vcc2_mv)
+}
+
+/// Binary-search the 6-bit MDAC comparator against the currently selected
+/// CC pin. Returns the highest MDAC code whose threshold ((code+1)·42 mV)
+/// the pin still exceeds; 0 covers everything below 84 mV (reported as 0 V —
+/// fine for a floating CC).
+fn mdac_search() -> Result<u8, u8> {
+    let mut code: u8 = 0;
+    for bit in (0..6).rev() {
+        let t = code | 1 << bit;
+        wr(R_MEASURE, t)?;
+        cortex_m::asm::delay(5_000); /* ~100 us comparator settle */
+        let mut s = [0u8; 1];
+        rd(R_STATUS0, &mut s)?;
+        if s[0] & S0_COMP != 0 {
+            code = t;
+        }
+    }
+    Ok(code)
+}
+
+/// Measure both CC pins via the MDAC (~5 ms of paused I2C), then restore
+/// the MEAS switch for the active CC. VCONN above the DAC range clamps to
+/// ~2.7 V. Runs every ~500 ms while armed (not during the Rd-cycle — it
+/// must not re-present the pulldowns early).
+fn vcc_sweep(p: &mut Pd) -> Result<(), u8> {
+    wr(R_SWITCHES0, SW0_PDWN | SW0_MEAS_CC1)?;
+    let m1 = mdac_search()?;
+    wr(R_SWITCHES0, SW0_PDWN | SW0_MEAS_CC2)?;
+    let m2 = mdac_search()?;
+    let restore = match p.cc {
+        1 => SW0_MEAS_CC1,
+        2 => SW0_MEAS_CC2,
+        _ => 0,
+    };
+    wr(R_SWITCHES0, SW0_PDWN | restore)?;
+    let mv = |m: u8| -> u16 {
+        if m == 0 {
+            0
+        } else {
+            (m as u16 + 1) * 42 + 21 /* midpoint of the found step */
+        }
+    };
+    p.vcc1_mv = mv(m1);
+    p.vcc2_mv = mv(m2);
+    Ok(())
+}
+
 /* ---- the engine (called from the main loop every pass) ---- */
 
 #[inline(never)]
@@ -308,6 +372,14 @@ pub fn service() {
     };
     if let Err(e) = r {
         p.err = e; /* sticky I²C diagnosis; keep polling — self-heals */
+    }
+    /* CC-voltage sweep for powerz Vcc1/Vcc2, every ~500 ms while armed
+     * (never during the Rd-cycle — the sweep re-presents the pulldowns) */
+    if p.state != ST_OFF && p.state != ST_RD_CYCLE && now.wrapping_sub(p.vcc_tick) >= 125 {
+        p.vcc_tick = now;
+        if let Err(e) = vcc_sweep(p) {
+            p.err = e;
+        }
     }
 }
 

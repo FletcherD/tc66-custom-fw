@@ -109,7 +109,7 @@ ADC payload (built in `powerz_payload()`, main.rs):
 | 8 / 12 | 1 s average µV / µA |
 | 16 / 20 | 1 s nominal-scale ("original") µV / µA |
 | 24, 25 | temp: 1/128 °C units, 2 °C units (clamped ≥ 0) |
-| 26, 28, 34 | Vcc1/Vcc2/Vdd — 0 until the FUSB302 (M4) |
+| 26, 28, 34 | Vcc1/Vcc2 (CC pins, FUSB302 MDAC sweep — live while the PD engine is armed, else 0) / Vdd (logic rail via Vrefint) — u16, 0.1 mV |
 | 30 / 32 | D+ / D− in 0.1 mV units (u16) |
 | 36..44 | reserved, 0 |
 

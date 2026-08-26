@@ -97,6 +97,7 @@ pub struct Cal {
 const CH_NTC: u8 = 1;
 const CH_DP: u8 = 8;
 const CH_DM: u8 = 9;
+const CH_VREF: u8 = 17; /* internal 1.2 V reference -> Vdd for powerz */
 
 /// D± wire value per HARDWARE.md: sum-of-16 * 330 / 65520 -> 1e-2 V.
 fn d_line_1e2(sum16: u32) -> u32 {
@@ -254,6 +255,8 @@ pub struct Meas {
     pub avg_i_1e5: i32,
     pub ori_uv: u32,
     pub ori_ua: i32,
+    /// logic-rail voltage from the Vrefint ratio (thread-written, powerz Vdd)
+    pub vdd_mv: u32,
 }
 
 static PUBLISHED: Racy<Meas> = Racy(core::cell::UnsafeCell::new(Meas {
@@ -270,6 +273,7 @@ static PUBLISHED: Racy<Meas> = Racy(core::cell::UnsafeCell::new(Meas {
     avg_i_1e5: 0,
     ori_uv: 0,
     ori_ua: 0,
+    vdd_mv: 0,
 }));
 
 /// 4 ms ticks since `start()` (ISR increments; thread derives every cadence
@@ -416,15 +420,24 @@ fn adc_burst() {
     let ntc = crate::adc::read_sum16(CH_NTC);
     let dp = crate::adc::read_sum16(CH_DP);
     let dm = crate::adc::read_sum16(CH_DM);
-    if let Err(stage) = ntc.and(dp).and(dm) {
+    let vref = crate::adc::read_sum16(CH_VREF);
+    if let Err(stage) = ntc.and(dp).and(dm).and(vref) {
         let n = (mk_get(MK_SMP_ADCE) >> 8).wrapping_add(1);
         mk(MK_SMP_ADCE, (n << 8) | stage as u32);
     }
+    /* Vdd from the internal reference ratio: Vdd = 4095·1200 mV / avg(vref)
+     * (avg = sum/16; 1.2 V nominal, uncalibrated per part — ~2%, fine for
+     * the powerz Vdd display field) */
+    let vdd = match vref {
+        Ok(s) if s > 0 => (16u64 * 4095 * 1200 / s as u64) as u32,
+        _ => 0,
+    };
     cortex_m::interrupt::free(|_| unsafe {
         let m = &mut *PUBLISHED.0.get();
         m.dp_1e2 = dp.map(d_line_1e2).unwrap_or(0);
         m.dm_1e2 = dm.map(d_line_1e2).unwrap_or(0);
         m.temp_c = ntc.map(ntc_temp_c).unwrap_or(0);
+        m.vdd_mv = vdd;
     });
     mk(MK_SMP_ADCB, mk_get(MK_SMP_ADCB) + 1);
 }
