@@ -29,7 +29,7 @@ def decode_pd(wire):
     nobj = (hdr >> 12) & 7
     typ = hdr & 0x1F
     role = "SRC" if hdr & (1 << 8) else "SNK"
-    rev = {0: "1.0", 1: "2.0", 2: "3.0"}.get((hdr >> 13) & 3, "?")
+    rev = {0: "1.0", 1: "2.0", 2: "3.0"}.get((hdr >> 6) & 3, "?")
     name = (DAT if nobj else CTL).get(typ & 0x0F if nobj else typ, "type%d" % typ)
     objs = ["%08x" % (int.from_bytes(wire[2 + 4 * i:6 + 4 * i], "little")) for i in range(nobj)]
     return "%-14s [%s r%s id%d]%s" % (name, role, rev, (hdr >> 9) & 7,
