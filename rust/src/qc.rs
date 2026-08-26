@@ -153,8 +153,16 @@ pub fn qc3(down: bool, count: u8) -> Result<(), u8> {
 
 const BIT_US: u32 = 152; /* delay_bit_period @0x08003d42 */
 
+/// Microsecond delay off the free-running SysTick (24-bit, 48 MHz, set up in
+/// main). MUST be used for the serial bit timing rather than
+/// `cortex_m::asm::delay`: that's a busy-loop and qc.rs lives in slow flash
+/// (above the 0x0800_8000 zero-wait boundary), so its loop fetches stretch
+/// ~7-10x and the bit period is unpredictable. SysTick counts real time
+/// regardless of fetch speed. Max ~349 ms (24-bit wrap) — fine for µs.
 fn us(n: u32) {
-    cortex_m::asm::delay(n * 48); /* 48 MHz -> 48 cycles/µs */
+    let cyc = n * 48; /* 48 cycles/µs */
+    let start = cortex_m::peripheral::SYST::get_current();
+    while start.wrapping_sub(cortex_m::peripheral::SYST::get_current()) & 0x00FF_FFFF < cyc {}
 }
 
 /// One serial bit on D− (D+ stays 0.6 V). "1" = PB4 high only, "0" = both low.
@@ -202,15 +210,9 @@ pub fn afc(cmd: u8, reps: u8) -> Result<(), u8> {
         unsafe { *ENTERED.0.get() = true };
         unsafe { *IN_QC3.0.get() = false };
     }
-    /* 3 sync pings (0x01) at 900 µs — the common FCP/SCP/AFC preamble that
-     * locks the charger onto our serial framing before the command (was
-     * omitted in the first attempt) */
-    for k in 0..3 {
-        afc_byte(0x01);
-        if k < 2 {
-            us(900);
-        }
-    }
+    /* AFC (stock FUN_080034e4): send the request byte ×3 with 10 ms gaps —
+     * NO sync pings (those are FCP/SCP only; the disassembly's mode-4 path
+     * goes straight from the 2050 ms hold to proto_send_word(cmd) ×3). */
     let n = if reps == 0 { 3 } else { reps };
     for k in 0..n {
         afc_byte(cmd);
