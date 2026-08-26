@@ -40,7 +40,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 39;
+const BUILD_ID: u32 = 40;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 type Serial<'a> = SerialPort<'a, usb_bus::UsbBus>;
@@ -86,25 +86,58 @@ fn main() -> ! {
         .build(); /* build() enables the peripheral (CNTR power-up, BTABLE=0) */
     mk(MK_STAGE, STAGE_USB_INIT);
 
-    /* TFT init + first frame now, while D+ is still low — the init sequence
-     * has ~400 ms of fixed delays that must not stall enumeration. On error
-     * the display is left off for this boot (verbs can still retry it). */
-    let mut tft_alive = ui::draw(0, 0, 0).is_ok();
-
     board::pa9_high(&p.gpioa);
 
-    /* TIMER5 (basic timer, no pins) free-runs at 10 kHz as the sampler
-     * timebase: 40 counts = one 4 ms tick, 250 ticks/s. Elapsed ticks accrue
-     * from CNT deltas each loop pass, so time spent blocked (a getva reply is
-     * ~21 ms of AES) is caught up, never lost — SysTick's COUNTFLAG latched a
-     * single wrap and dropped the rest, stalling sampler + energy clock under
-     * fast host polling. 16-bit @ 10 kHz wraps at 6.55 s, far beyond the
-     * longest blocking path (write_all's absent-host budget, ~0.5 s). */
+    /* TIMER5 (basic timer, no pins) free-runs at 10 kHz: first it times the
+     * grace window below, then it is the sampler timebase — 40 counts = one
+     * 4 ms tick, 250 ticks/s, elapsed ticks accrued from CNT deltas each
+     * loop pass so blocked time is caught up, never lost (SysTick's
+     * COUNTFLAG latched a single wrap). 16-bit @ 10 kHz wraps at 6.55 s,
+     * beyond the longest blocking path (write_all's absent-host budget). */
     p.rcu.apb1en().modify(|_, w| w.timer5en().enabled());
     p.timer5.psc().write(|w| w.psc().bits(4799)); /* 48 MHz -> 10 kHz */
     p.timer5.car().write(|w| w.car().bits(0xFFFF));
     p.timer5.swevg().write(|w| w.upg().set_bit()); /* latch PSC now */
     p.timer5.ctl0().modify(|_, w| w.cen().enabled());
+
+    /* ---- pseudo-bootloader grace window (dev escape hatch) ----
+     * 10 s serving ONLY `query`->firm and `updat` before any feature starts:
+     * no TFT, no sampler/I2C/ADC, no powerz service. A fault in anything
+     * that comes after is escaped by power-cycling and running `make flash`
+     * inside this window — no K1 needed. MK_PROBE reads 0x6ACE6ACE while
+     * the window is open. Standalone (no host) boots just wait out the 10 s. */
+    mk(MK_PROBE, 0x6ACE_6ACE);
+    {
+        let mut acc: u32 = 0;
+        let mut prev = p.timer5.cnt().read().cnt().bits();
+        let mut gbuf = [0u8; 64];
+        while acc < 100_000 {
+            /* 10 s of 10 kHz counts */
+            mk(MK_HEART, mk_get(MK_HEART) + 1);
+            let c = p.timer5.cnt().read().cnt().bits();
+            acc += c.wrapping_sub(prev) as u32;
+            prev = c;
+            if !dev.poll(&mut [&mut pz, &mut serial]) {
+                continue;
+            }
+            if let Ok(n) = serial.read(&mut gbuf) {
+                if match5(&gbuf[..n], b"query") {
+                    write_all(&mut dev, &mut serial, b"firm");
+                } else if match5(&gbuf[..n], b"updat") {
+                    if let Some(ep) = find_bulk_ep() {
+                        flasher::launch(ep); /* does not return */
+                    }
+                }
+            }
+        }
+    }
+    mk(MK_PROBE, 0);
+
+    /* TFT init + first frame (the ~400 ms of init delays are harmless now
+     * that enumeration finished during the grace window). On error the
+     * display is left off for this boot (verbs can still retry it). */
+    let mut tft_alive = ui::draw(0, 0, 0).is_ok();
+
     getva::init(); /* AES key schedule now, while the stack is shallow */
     let mut sampler = ina::Sampler::new();
 
