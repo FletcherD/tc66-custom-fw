@@ -473,10 +473,25 @@ GPIO-only (no shared bus, no `ina::pause`), nothing at boot.
 - Bench-verified against a Class-A QC2.0 charger: 5.11 / 9.13 / 12.14 V on the
   meter's own sampler, transitions both directions, clean release. (20 V is
   requested correctly but a Class-A charger caps at 12 V — that's the source
-  declining, not a firmware limit.) FCP/SCP/AFC (the stock
-  `charge_protocol_handshake` jump table) and QC3.0 continuous ±200 mV
-  (`charge_trigger_pulse`) are the natural next additions on this engine.
-- Host tool: `tools/qc.py` (`5|9|12|20`, `off`, `sweep`).
+  declining, not a firmware limit.)
+- **QC3.0 continuous** (`qc3`, verb `qc3ct <dir> <count>`): fine ±200 mV
+  stepping. Base = D+ 0.6 V / D− 3.3 V (a 5th combo the discrete table never
+  sets); a step pulses D+ high for +200 mV (`charge_trigger_pulse` fn1
+  @0x08009b00) or dips D− low for −200 mV (fn2 @0x08009b48), each returning to
+  base. **Two gotchas cost bench cycles:** (1) back-to-back pulses merge into
+  a single edge — a **20 ms base dwell between steps** is required for the
+  charger to count each one; (2) the D− dip must be PB5-on/PB4-off (D− 0.6 V);
+  a swapped PB4/PB5 drives an invalid level and the charger ignores it.
+  Verified: base 5.31 V, +10 → 7.30 V (exactly 200 mV × 10), −10 → back to
+  5.31 V, bidirectional.
+- **Not enforced / not yet:** QC3.0 min/max bounds (spec: 3.6 V floor, 12 V
+  Class-A / 20 V Class-B ceiling) — we step open-loop and rely on the charger
+  to clamp (it does), so a soft floor is a TODO if this goes user-facing. The
+  entry handshake is a simplified 1.5 s D+ 0.6 V hold (the stock adds a 200 ms
+  D+3.3/D−3.3 preamble). FCP/SCP/AFC (`charge_protocol_handshake` modes 1–4)
+  are the natural next additions.
+- Host tool: `tools/qc.py` (`5|9|12|20`, `up [n]`, `down [n]`, `qc3`, `off`,
+  `sweep`).
 - **Danger:** raises the OUT-port voltage — nothing downstream when triggering.
 
 ## Build / flash / debug workflow

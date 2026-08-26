@@ -59,16 +59,17 @@ gone) — our own protocol on top of a compatible base, and room to add features
   3.3–11 V PPS APDO (rev-3.0 negotiation, PPS fine-stepping across the range,
   keepalive holding the contract). CC-pin voltages (Vcc1/Vcc2) and
   the logic rail (Vdd) are surfaced in the powerz ADC payload. **Quick
-  Charge 2.0** is a separate D+/D− trigger engine (`rust/src/qc.rs`, verbs
-  `qctrg`/`qcoff`, host tool `tools/qc.py`) — bench-verified 5/9/12 V against
-  a QC2.0 charger. Nothing runs at boot; a granted request **raises the
-  OUT-port voltage** (trigger with nothing downstream).
+  Charge 2.0/3.0** is a separate D+/D− trigger engine (`rust/src/qc.rs`,
+  verbs `qctrg`/`qc3ct`/`qcoff`, host tool `tools/qc.py`) — bench-verified
+  QC2.0 discrete 5/9/12 V and QC3.0 continuous ±200 mV fine-stepping
+  (bidirectional) against real chargers. Nothing runs at boot; a granted
+  request **raises the OUT-port voltage** (trigger with nothing downstream).
 - **Next steps** (see also the open items in QUIRKS.md):
   - **M2 — persistence** (real serial/run-count, energy write-back to the
     wear-leveled EEPROM journal, `gtrec` log, EEPROM writes in the I²C
     driver).
-  - **M4 extensions:** FCP/SCP/AFC and QC3.0 continuous ±200 mV on the
-    existing D+/D− engine (`qc.rs` — QC2.0 5/9/12 V is bench-verified);
+  - **M4 extensions:** FCP/SCP/AFC on the existing D+/D− engine
+    (`charge_protocol_handshake` modes 1–4); a QC3.0 min-voltage clamp;
     a KM003C PD-capture attribute.
   - The remaining QUIRKS.md open items (§1 NAK/APB stalls, §2 residual
     event-loss mechanism) and stock-firmware Tier 2 comparison. (Both
