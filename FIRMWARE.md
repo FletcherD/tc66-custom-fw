@@ -125,9 +125,13 @@ events, and any reset is processed by `dev.poll` (which programs the EPnR
 address fields) before `poll_cmd`/`arm` touch an endpoint. The grace window
 serves only CDC (no powerz endpoint writes). Keep it that way.
 
-### The grace window (pseudo-bootloader)
+### The grace window (pseudo-bootloader, `grace` feature — OFF by default)
 
-The first ~10 s after the IRQ unmask dispatch ONLY `query`→`firm` and
+Feature-gated off since build 98 (the always-on path is bench-verified):
+default builds dispatch the full verb set immediately, start the sampler
+right after the IRQ unmask, and rely on K1 + `make recover` for boot-path
+faults. Build `--features grace` when bringing up risky new always-on
+code. With it on: the first ~10 s after the IRQ unmask dispatch ONLY `query`→`firm` and
 `updat` — no sampler, I2C/ADC, or full command set. (The display's DMA
 first frame runs even earlier, pre-enumeration: every wait in that path is
 bounded and error-returning, and K1 remains the backstop for a hard fault

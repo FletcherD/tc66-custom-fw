@@ -28,15 +28,20 @@
 //! one NVIC priority so they never nest (the stack-gate charges the max
 //! handler chain, not the sum). USBD_LP is enabled late in run(), after
 //! every static its ISR touches is initialized; the sampler tick starts
-//! only after the grace window. Shared-state soundness arguments live next
+//! right after (or, with the `grace` feature, only once the grace window
+//! closes). Shared-state soundness arguments live next
 //! to each item (UsbPtrs, CmdRing, powerz::REPLY, the ina.rs module doc).
 //!
-//! The first ~10 s after the unmask are the GRACE WINDOW (pseudo-bootloader
-//! escape hatch): the thread dispatches ONLY `query`/`updat` and no
-//! measurement feature (sampler/I2C/ADC) has started — a fault in anything
-//! later is recovered by power-cycle + `make flash` inside the window, no
-//! K1. (The display's DMA first frame runs even earlier, pre-enumeration —
-//! bounded-error throughout; K1 is the backstop for a hard fault there.)
+//! The GRACE WINDOW (pseudo-bootloader escape hatch) is behind the `grace`
+//! cargo feature, OFF by default since build 98 (everything in the always-on
+//! path is bench-verified): with it on, the first ~10 s after the unmask
+//! dispatch ONLY `query`/`updat` and no measurement feature (sampler/I2C/
+//! ADC) has started — a fault in anything later is recovered by power-cycle
+//! + `make flash` inside the window, no K1. Build `--features grace` when
+//! bringing up risky new always-on code; without it, K1 + `make recover` is
+//! the only escape from a boot-path fault. (The display's DMA first frame
+//! runs even earlier, pre-enumeration — bounded-error throughout; K1 is the
+//! backstop for a hard fault there.)
 
 #![no_std]
 #![no_main]
@@ -69,7 +74,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 97;
+const BUILD_ID: u32 = 98;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -167,12 +172,16 @@ fn run() -> ! {
      * (CORE-internal — reads never stall during host NAK storms, unlike
      * APB peripherals). 24 bits @ 48 MHz wraps at 349 ms, far beyond any
      * loop pass. The steady-state loop paces itself off the TIMER5 ISR's
-     * tick counter instead (ina::ticks). */
-    let mut syst = cortex_m::Peripherals::take().unwrap().SYST;
-    syst.set_clock_source(cortex_m::peripheral::syst::SystClkSource::Core);
-    syst.set_reload(0x00FF_FFFF);
-    syst.clear_current();
-    syst.enable_counter();
+     * tick counter instead (ina::ticks) — so SysTick has no consumer
+     * without the grace feature. */
+    #[cfg(feature = "grace")]
+    {
+        let mut syst = cortex_m::Peripherals::take().unwrap().SYST;
+        syst.set_clock_source(cortex_m::peripheral::syst::SystClkSource::Core);
+        syst.set_reload(0x00FF_FFFF);
+        syst.clear_current();
+        syst.enable_counter();
+    }
 
     /* Hand the USB objects to the ISR and open the gate. main() never
      * returns, so the locals live forever and the raw pointers stay valid.
@@ -203,17 +212,20 @@ fn run() -> ! {
     let (dev, pz, serial) = ((), (), ());
 
     /* ---- pseudo-bootloader grace window (dev escape hatch) ----
-     * 10 s dispatching ONLY `query`->firm and `updat` before the
-     * measurement features start (no sampler/I2C/ADC; the display's first
-     * frame already ran pre-enumeration). USB runs on the same ISR + ring
-     * machinery as normal operation (single code path); the thread does
-     * nothing here but drain the ring, so the ring can never stay full. A
-     * fault in anything that starts later is escaped by power-cycling and
-     * running `make flash` inside this window — no K1. MK_PROBE reads
-     * 0x6ACE6ACE while the window is open. Standalone (no host) boots just
-     * wait out the 10 s. */
-    mk(MK_PROBE, 0x6ACE_6ACE);
+     * Feature-gated, OFF by default since build 98 (the always-on path is
+     * bench-verified; the flag exists for future risky bring-up — build
+     * `--features grace`). With it on: 10 s dispatching ONLY `query`->firm
+     * and `updat` before the measurement features start (no sampler/I2C/ADC;
+     * the display's first frame already ran pre-enumeration). USB runs on
+     * the same ISR + ring machinery as normal operation (single code path);
+     * the thread does nothing here but drain the ring, so the ring can never
+     * stay full. A fault in anything that starts later is escaped by
+     * power-cycling and running `make flash` inside this window — no K1.
+     * MK_PROBE reads 0x6ACE6ACE while the window is open. Standalone (no
+     * host) boots just wait out the 10 s. */
+    #[cfg(feature = "grace")]
     {
+        mk(MK_PROBE, 0x6ACE_6ACE);
         let mut acc: u32 = 0;
         let mut prev = cortex_m::peripheral::SYST::get_current();
         while acc < 480_000_000 {
@@ -231,8 +243,8 @@ fn run() -> ! {
             run_pending_cmds(true);
             with_usb(|_, _, serial| drain_serial(serial));
         }
+        mk(MK_PROBE, 0);
     }
-    mk(MK_PROBE, 0);
 
     /* Sampler: reprogram TIMER5 as the 250 Hz tick ISR and unmask its NVIC
      * line (ina.rs) — deliberately only now, after the grace window, so a
