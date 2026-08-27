@@ -3,7 +3,7 @@
 Custom Rust firmware for the RuiDeng TC66/TC66C USB-C power meter, developed
 against real hardware on the bench. M0 (self-hosting USB + self-reflash),
 M1 (real calibrated measurement), the M3 basics (ST7735S driver in
-tft.rs + always-on V/I/P screen with 15 s idle screen-off), and the M4
+tft.rs + always-on V/I/P screen with 15 s no-change screen-off), and the M4
 charge triggers (pd.rs: FUSB302 PD 2.0/3.0 sink — `pdctl`/`pdsta`/`pdcap`/
 `pdreq` + tools/pd.py, fixed PDOs + PPS + hard reset, bench-verified
 5-20 V and PPS 3.3-11 V; qc.rs: Quick Charge 2.0 D+/D− — `qctrg`/`qcoff`

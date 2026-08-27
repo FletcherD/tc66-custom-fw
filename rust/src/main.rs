@@ -262,12 +262,20 @@ fn run() -> ! {
      * (ui.rs dirty tracking), so an idle refresh costs nothing */
     let mut ui_ticks: u32 = 0;
 
-    /* Screen idle timeout: after 15 s with no measurable input the panel
-     * is blanked (DISPOFF + backlight off) — an overnight static screen
-     * caused real LCD image persistence. Activity = bus voltage above
-     * 2.5 V or current above 1 mA; wake within a second of either. */
+    /* Screen idle timeout: after 15 s without a *change* in the measured
+     * input the panel is blanked (DISPOFF + backlight off) — an overnight
+     * static screen caused real LCD image persistence, and a steady source
+     * parked on IN is exactly as static as no input. Activity = the 1 Hz
+     * V/I sample moving vs the previous second's by >100 mV or >5 mA
+     * (well above bench noise, ~25 mV / ~20 uA); plug, unplug, load steps
+     * and PD renegotiations wake within a second. The reference updates
+     * every second, so slow drift never wakes it. Draw verbs also wake. */
     const IDLE_OFF_SECS: u32 = 15;
+    const IDLE_V_DELTA: u32 = 1_000; /* 100 mV in 1e-4 V units */
+    const IDLE_I_DELTA: u32 = 500; /* 5 mA in 1e-5 A units */
     let mut idle_secs: u32 = 0;
+    let mut idle_ref_v: u32 = 0;
+    let mut idle_ref_i: u32 = 0;
 
     let mut last_ticks = ina::ticks();
     loop {
@@ -298,7 +306,11 @@ fn run() -> ! {
                     (acc_p_1e4s / 36_000) as u32,
                 );
                 if tft_alive {
-                    if v > 25_000 || i > 100 {
+                    let moved = v.abs_diff(idle_ref_v) > IDLE_V_DELTA
+                        || i.abs_diff(idle_ref_i) > IDLE_I_DELTA;
+                    idle_ref_v = v;
+                    idle_ref_i = i;
+                    if moved {
                         idle_secs = 0;
                         let _ = tft::screen_on(); /* no-op when already on */
                     } else if idle_secs < IDLE_OFF_SECS {

@@ -362,10 +362,12 @@ Related subtleties, all load-bearing:
   soft-connect), brightness = TIMER1 CH1 PWM on PB3 (1 kHz, compare 0..=999,
   init 499). Verbs: `tftfl` = test pattern / solid fill, `tftbl` = brightness,
   `tftui` = force a screen refresh (host side: `tools/tft.py`).
-  **Screen idle timeout**: 15 s with no measurable input (V ≤ 2.5 V and
-  I ≤ 1 mA) blanks the panel — DISPOFF (source outputs parked, so no static
+  **Screen idle timeout**: 15 s without a *change* in the measured input
+  (1 Hz V/I sample within 100 mV / 5 mA of the previous second's — a steady
+  source parked on IN is as static as none) blanks the panel — DISPOFF (source outputs parked, so no static
   image is driven into the liquid crystal; an overnight static screen caused
-  real image persistence) plus backlight off. Wakes within 1 s of activity;
+  real image persistence) plus backlight off. Wakes within 1 s of a V/I step
+  (plug, unplug, load change, PD renegotiation); slow drift never wakes it;
   the tft dev verbs also wake it. GRAM writes still work while blanked, so
   ui::draw keeps running and content is current at wake. `screen_on`/`
   screen_off` pump the pixel engine idle before sending their command (a
