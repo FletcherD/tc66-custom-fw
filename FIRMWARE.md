@@ -125,9 +125,13 @@ events, and any reset is processed by `dev.poll` (which programs the EPnR
 address fields) before `poll_cmd`/`arm` touch an endpoint. The grace window
 serves only CDC (no powerz endpoint writes). Keep it that way.
 
-### The grace window (pseudo-bootloader)
+### The grace window (pseudo-bootloader, `grace` feature — OFF by default)
 
-The first ~10 s after the IRQ unmask dispatch ONLY `query`→`firm` and
+Feature-gated off since build 98 (the always-on path is bench-verified):
+default builds dispatch the full verb set immediately, start the sampler
+right after the IRQ unmask, and rely on K1 + `make recover` for boot-path
+faults. Build `--features grace` when bringing up risky new always-on
+code. With it on: the first ~10 s after the IRQ unmask dispatch ONLY `query`→`firm` and
 `updat` — no sampler, I2C/ADC, or full command set. (The display's DMA
 first frame runs even earlier, pre-enumeration: every wait in that path is
 bounded and error-returning, and K1 remains the backstop for a hard fault
@@ -362,10 +366,12 @@ Related subtleties, all load-bearing:
   soft-connect), brightness = TIMER1 CH1 PWM on PB3 (1 kHz, compare 0..=999,
   init 499). Verbs: `tftfl` = test pattern / solid fill, `tftbl` = brightness,
   `tftui` = force a screen refresh (host side: `tools/tft.py`).
-  **Screen idle timeout**: 15 s with no measurable input (V ≤ 2.5 V and
-  I ≤ 1 mA) blanks the panel — DISPOFF (source outputs parked, so no static
+  **Screen idle timeout**: 15 s without a *change* in the measured input
+  (1 Hz V/I sample within 100 mV / 5 mA of the previous second's — a steady
+  source parked on IN is as static as none) blanks the panel — DISPOFF (source outputs parked, so no static
   image is driven into the liquid crystal; an overnight static screen caused
-  real image persistence) plus backlight off. Wakes within 1 s of activity;
+  real image persistence) plus backlight off. Wakes within 1 s of a V/I step
+  (plug, unplug, load change, PD renegotiation); slow drift never wakes it;
   the tft dev verbs also wake it. GRAM writes still work while blanked, so
   ui::draw keeps running and content is current at wake. `screen_on`/`
   screen_off` pump the pixel engine idle before sending their command (a
