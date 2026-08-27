@@ -262,17 +262,28 @@ fn proto_line_idle() {
     dm_drive(false);
 }
 
-/// Stock `proto_send_byte`: start pattern, 8 data bits MSB-first at BIT_US,
-/// odd-parity 9th bit, stop.
-fn afc_byte(b: u8) {
-    dm_drive(true); /* push-pull for the bits */
-    /* start pattern: D− high 24 µs / low 32 µs / high 32 µs */
+/// Stock start pattern (once per word, before the bytes): D− high 24 µs /
+/// low 32 µs / high 32 µs. Leaves D− driven push-pull.
+fn afc_start() {
+    dm_drive(true);
     dm_mark();
     us(24);
     dm_space();
     us(32);
     dm_mark();
     us(32);
+}
+
+/// Stock `proto_send_byte` body: 8 data bits MSB-first at BIT_US, a 9th
+/// odd-parity bit, then a stop (D− high + 180 µs). No start pattern (the word
+/// emits that once). Assumes D− already driven push-pull.
+///
+/// ASSUMPTION (untested, AFC-derived): parity is PER-BYTE odd parity. The RE
+/// calls it a "running-parity bit" with scratch at 0x2000029d — for a
+/// multi-byte packet this may instead be a parity running across the whole
+/// packet. Confirm against `proto_send_byte @0x080047b4` before trusting
+/// FCP/SCP writes. AFC (1 byte) is unaffected (per-byte == running for len 1).
+fn afc_byte_bits(b: u8) {
     for i in (0..8).rev() {
         if (b >> i) & 1 != 0 {
             dm_mark();
@@ -297,19 +308,27 @@ fn afc_byte(b: u8) {
     us(180);
 }
 
-/// One stock `proto_send_word(b, len=1, flag=1)` — the CLOSED-LOOP handshake
-/// (`@0x08004d60`): Mping → wait charger Sping → byte → Mping → wait Sping →
-/// measure the charger's echo → Mping → wait Sping. Only the byte's bit timing
-/// is interrupt-masked; the marks and the (read-based) waits tolerate ISR jitter.
-fn proto_send_word(b: u8) {
+/// One stock `proto_send_word(buf, len, flag)` — the CLOSED-LOOP handshake
+/// (`@0x08004d60`): Mping → wait charger Sping → start + `buf` bytes → [if flag:
+/// Mping → wait Sping → measure the charger's echo] → Mping → wait Sping. Only
+/// the bit timing is interrupt-masked; the marks and the (read-based) waits
+/// tolerate ISR jitter.
+fn proto_send_word(buf: &[u8], flag: bool) {
     proto_line_idle();
     proto_wait_sping();
     us(250);
-    cortex_m::interrupt::free(|_| afc_byte(b));
-    proto_line_idle();
-    proto_wait_sping();
-    proto_measure_response();
-    us(180);
+    cortex_m::interrupt::free(|_| {
+        afc_start();
+        for &b in buf {
+            afc_byte_bits(b);
+        }
+    });
+    if flag {
+        proto_line_idle();
+        proto_wait_sping();
+        proto_measure_response();
+        us(180);
+    }
     proto_line_idle();
     proto_wait_sping();
 }
@@ -320,26 +339,10 @@ fn proto_send_word(b: u8) {
 /// change). `0x46` = 9 V, `0x08` = 5 V (high nibble = 5 V + n; low = current).
 pub fn afc(cmd: u8, reps: u8) -> Result<(), u8> {
     config_pins();
-    if !unsafe { *ENTERED.0.get() } {
-        /* mode-4 entry, register-exact from stock `charge_protocol_handshake`
-         * (CHARGE_TRIGGER_FINDINGS.md): release all four pins (hi-Z) 200 ms,
-         * then drive D+ to its 0.6 V state (PA13=1, PA14=0) with D− left
-         * RELEASED for the whole 1250+800 = 2050 ms hold — the D− ≈ 0.6 V then 0
-         * a scope sees during the hold is charger-sourced, not the meter. Then
-         * the serial. SysTick `us` maxes at ~349 ms/call so holds loop in 50 ms
-         * steps. */
-        dp_drive(false); /* D+ released (hi-Z) */
-        dm_drive(false); /* D− released (hi-Z) */
-        hold_50ms(4); /* 200 ms preamble, all released */
-        dp_drive(true); /* D+ pins back to push-pull output */
-        drive((true, false, false, false)); /* drive D+ to 0.6 V; D− stays hi-Z */
-        hold_50ms(41); /* 2050 ms hold, D− released */
-        unsafe { *ENTERED.0.get() = true };
-        unsafe { *IN_QC3.0.get() = false };
-    }
+    accp_entry(); /* mode-4 entry, shared with FCP/SCP */
     let n = if reps == 0 { 3 } else { reps };
     for k in 0..n {
-        proto_send_word(cmd);
+        proto_send_word(&[cmd], true);
         if k + 1 < n {
             us(10_000); /* 10 ms gap between repeats */
         }
@@ -347,6 +350,119 @@ pub fn afc(cmd: u8, reps: u8) -> Result<(), u8> {
     /* leave D− released (hi-Z); D+ stays 0.6 V and the charger holds the
      * negotiated voltage. */
     dm_drive(false);
+    Ok(())
+}
+
+/* ---- Huawei FCP / SCP (charge_protocol_handshake modes 2 / 3) ----
+ *
+ * Same HiSilicon ACCP physical layer as AFC (D− serial, closed-loop
+ * proto_send_word), same entry (release-all → drive D+ 0.6 V, D− released,
+ * 2050 ms). Differences: 3 leading `01` sync pings 900 µs apart, then multi-byte
+ * register packets, each ending in a CRC-8 (poly 0x39, init 0, MSB-first, over
+ * all preceding bytes — `crc8_huawei @0x08003a2c`, verified bit-exact). Grammar:
+ *   0c = read8   <0c><reg><crc>
+ *   0b = write8  <0b><reg><val><crc>
+ *   1b = write16 <1b><reg><len><d0><d1><crc>
+ * Packets recovered from the stock scatter-decompressed .data (all CRC-verified).
+ *
+ * OPEN QUESTIONS (asked the user to RE — currently ASSUMPTIONS, marked below):
+ *   (a) per-packet `flag` (does each read/write set flag=1 = measure the
+ *       charger response, or flag=0)? Pings are flag=0; assumed data = flag=1.
+ *   (b) parity per-byte vs running across the packet (see afc_byte_bits).
+ *   (c) inter-packet gap after the 3× 900 µs pings; assumed 10 ms (AFC's gap).
+ *   (d) whether a trigger needs the full read+write sequence or just the writes.
+ * FCP is fixed-voltage (6 packets: read 04/21/31, write 2c=90→9V, read 2c,
+ * write 2b=01 commit). SCP reg 0xca = voltage code (raw scale, unknown volts;
+ * the stock scan probes 0xc8=200 and 0xdc=220). */
+
+/// CRC-8, poly 0x39, init 0x00, MSB-first, over `data` (`crc8_huawei`).
+fn crc8(data: &[u8]) -> u8 {
+    let mut crc = 0u8;
+    for &b in data {
+        crc ^= b;
+        for _ in 0..8 {
+            crc = if crc & 0x80 != 0 {
+                (crc << 1) ^ 0x39
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
+/// FCP/SCP shared entry: release all four pins 200 ms, then drive D+ to 0.6 V
+/// with D− released for 2050 ms (identical to AFC — modes 2/3/4 share it).
+fn accp_entry() {
+    if unsafe { *ENTERED.0.get() } {
+        return;
+    }
+    dp_drive(false);
+    dm_drive(false);
+    hold_50ms(4); /* 200 ms preamble, all released */
+    dp_drive(true);
+    drive((true, false, false, false)); /* D+ 0.6 V, D− released */
+    hold_50ms(41); /* 2050 ms hold */
+    unsafe { *ENTERED.0.get() = true };
+    unsafe { *IN_QC3.0.get() = false };
+}
+
+/// Send the 3 leading `01` sync pings (900 µs apart), then each command packet.
+/// A packet is `[opcode, reg, (val…)]`; `crc8` is appended here. ASSUMPTION:
+/// data packets use flag=true, gap = 10 ms (see the module note).
+fn accp_exchange(packets: &[&[u8]]) {
+    for k in 0..3 {
+        proto_send_word(&[0x01], false); /* sync ping, flag=0 */
+        if k < 2 {
+            us(900);
+        }
+    }
+    us(10_000);
+    let mut frame = [0u8; 8];
+    for (i, pkt) in packets.iter().enumerate() {
+        let n = pkt.len();
+        frame[..n].copy_from_slice(pkt);
+        frame[n] = crc8(pkt);
+        proto_send_word(&frame[..n + 1], true);
+        if i + 1 < packets.len() {
+            us(10_000);
+        }
+    }
+    dm_drive(false); /* leave D− released; charger holds the voltage */
+}
+
+/// `fcptr`: Huawei FCP 9 V request. Entry, 3 pings, then the stock mode-2
+/// 6-packet exchange: read regs 04/21/31, write VOUT_CONFIG 0x2c = 90 (→ 9 V,
+/// 100 mV units), read it back, write OUTPUT_CONTROL 0x2b = 1 (commit).
+pub fn fcp() -> Result<(), u8> {
+    config_pins();
+    accp_entry();
+    accp_exchange(&[
+        &[0x0c, 0x04],
+        &[0x0c, 0x21],
+        &[0x0c, 0x31],
+        &[0x0b, 0x2c, 0x5a],
+        &[0x0c, 0x2c],
+        &[0x0b, 0x2b, 0x01],
+    ]);
+    Ok(())
+}
+
+/// `scptr`: Huawei SCP request. Entry, 3 pings, then the stock mode-3 6-packet
+/// exchange: enable (CTRL_BYTE0 0xa0 = 0xc0), 0xa1 = 0x06, write16 regs
+/// 0xb0/0xb2, set voltage code 0xca = 0xc8 (raw scale — volts unknown), 0xcb =
+/// 0x64. `scp_set_voltage` (not ported) patches 0xca + CRC for other voltages.
+pub fn scp() -> Result<(), u8> {
+    config_pins();
+    accp_entry();
+    accp_exchange(&[
+        &[0x0b, 0xa0, 0xc0],
+        &[0x0b, 0xa1, 0x06],
+        &[0x1b, 0xb0, 0x02, 0x15, 0x7c],
+        &[0x1b, 0xb2, 0x02, 0x13, 0x88],
+        &[0x0b, 0xca, 0xc8],
+        &[0x0b, 0xcb, 0x64],
+    ]);
     Ok(())
 }
 

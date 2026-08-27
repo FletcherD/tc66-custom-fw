@@ -38,17 +38,33 @@ handshake` mode 4 is replicated register-for-register (see
 192.168.1.233, `kasa-plug` skill, `-t 5` cold) before a clean test. Our D+/D−
 drive HW is proven independently (QC2.0 `qctrg` switches this charger to 9/12 V).
 
-## FCP / SCP — next (share this exact machinery)
+## FCP / SCP — SCAFFOLDED (qc.rs `fcp()`/`scp()`, verbs `fcptr`/`scptr`), UNTESTED
 
-HiSilicon ACCP: one PHY for AFC/FCP/SCP. Reuse `proto_send_word`/`afc_byte`/
-`proto_wait_sping`. Differences vs AFC:
-- **3 sync pings** first: `proto_send_word(0x01)` ×3 with `i2c_bit_delay(900)` =
-  900 µs gaps, then the command packets (multi-byte, `flag` differs).
-- Grammar: `0c`=read8 `<0c><reg><crc>`, `0b`=write8 `<0b><reg><val><crc>`,
-  `1b`=write16. FCP set 9 V = `0b 2c 5a <crc>` then `0b 2b 01 <crc>`. SCP enable
-  `0b a0 c0 <crc>`, set volts `1b b8 <hi> <lo> <crc>` (mV, big-endian).
-- **CRC unconfirmed** (0x39 is a guess). Solve it from captured frames — the
-  stock capture in scratchpad + brute-forcer `crc.py` — before trusting writes.
-- `charge_protocol_handshake` modes: 2 = FCP (block 0x0800417c), 3 = SCP
-  (0x08004c60), 4 = AFC (0x080034e4); `scp_set_voltage @0x08004aac` patches the
-  target byte + checksum and re-sends.
+Share AFC's machinery: `accp_entry` (same release→D+0.6/D−released→2050 ms),
+`proto_send_word(buf, flag)` (now multi-byte), the closed-loop reads. Then 3×
+`proto_send_word(0x01, flag=0)` pings 900 µs apart, then the stock command
+packets (from the scatter-decompressed .data, all CRC-verified):
+- **FCP (mode 2), fixed 9 V:** `0c 04` `0c 21` `0c 31` `0b 2c 5a` (set 0x2c=90 →
+  9 V, 100 mV units) `0c 2c` `0b 2b 01` (commit).
+- **SCP (mode 3):** `0b a0 c0` (enable) `0b a1 06` `1b b0 02 15 7c` `1b b2 02 13
+  88` `0b ca c8` (voltage code 0xc8 — raw scale, volts unknown) `0b cb 64`.
+- **CRC-8 CONFIRMED:** poly 0x39, init 0, MSB-first, over all preceding bytes
+  (`crc8_huawei @0x08003a2c`). `qc::crc8` verified against all 16 RE example
+  packets. Appended in `accp_exchange`.
+
+**Three ASSUMPTIONS in the code that need RE (can't bench-test — no FCP/SCP
+charger). Each is marked in qc.rs:**
+1. **Parity (most critical).** `afc_byte_bits` uses PER-BYTE odd parity. The RE
+   calls `proto_send_byte`'s 9th bit a "running-parity" with scratch at
+   0x2000029d — for a multi-byte packet it may be a parity RUNNING across the
+   whole `proto_send_bytes` call. If wrong, every multi-byte packet's parity is
+   wrong → charger rejects all. (AFC unaffected: len 1.)
+2. **Per-packet `flag`.** Assumed data packets = flag=1 (measure the charger
+   response, like AFC's byte), pings = flag=0. The real flags for the mode-2/3
+   read (0c) vs write (0b/1b) packets are unconfirmed.
+3. **Inter-packet gap.** Assumed 10 ms between command packets (AFC's repeat
+   gap); the pings are the confirmed 900 µs.
+
+Also: SCP `0xca` voltage-code↔volts scale is raw/unknown (stock scan probes
+0xc8=200, 0xdc=220); `scp_set_voltage @0x08004aac` (not ported) patches 0xca +
+CRC for other voltages. Modes: 2 = FCP (0x0800417c), 3 = SCP (0x08004c60).

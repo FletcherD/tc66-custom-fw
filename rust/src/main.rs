@@ -69,7 +69,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 99;
+const BUILD_ID: u32 = 100;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -443,6 +443,14 @@ fn on_packet(buf: &[u8]) {
             };
             reply_ok_er(r);
         }
+    } else if match5(buf, b"fcptr") {
+        #[cfg(feature = "dev-verbs")]
+        /* fcptr: Huawei FCP 9 V request (fixed sequence). Blocks ~2.3 s. */
+        reply_ok_er(qc::fcp());
+    } else if match5(buf, b"scptr") {
+        #[cfg(feature = "dev-verbs")]
+        /* scptr: Huawei SCP request (stock mode-3 6-packet block). Blocks ~2.3 s. */
+        reply_ok_er(qc::scp());
     } else if match5(buf, b"qcoff") {
         #[cfg(feature = "dev-verbs")]
         reply_ok_er(qc::off());
