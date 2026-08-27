@@ -71,9 +71,12 @@ gone) — our own protocol on top of a compatible base, and room to add features
   - **M2 — persistence** (real serial/run-count, energy write-back to the
     wear-leveled EEPROM journal, `gtrec` log, EEPROM writes in the I²C
     driver).
-  - **M4 extensions:** FCP/SCP/AFC on the existing D+/D− engine
-    (`charge_protocol_handshake` modes 1–4); a QC3.0 min-voltage clamp;
-    a KM003C PD-capture attribute.
+  - **M4 extensions:** FCP/SCP on the existing D+/D− engine
+    (`charge_protocol_handshake` modes 2/3, sharing AFC's closed-loop
+    `proto_send_word`; CRC-8 poly still to be solved from captures);
+    a QC3.0 min-voltage clamp; a KM003C PD-capture attribute.
+    (Samsung AFC — mode 4 — is **done**: `afctr`, closed-loop, bench-verified
+    5↔9 V.)
   - The remaining QUIRKS.md open items (§1 NAK/APB stalls, §2 residual
     event-loss mechanism) and stock-firmware Tier 2 comparison. (Both
     refactor branches are merged; the TFT loops are deliberately not in

@@ -1,50 +1,54 @@
-# AFC/FCP/SCP D− serial — decode notes from working stock captures
+# Samsung AFC — SOLVED (build 97). Notes for FCP/SCP.
 
-The stock TC66's working protocol-trigger output was captured (D− = ch1,
-D+ = ch2) with `tools/scope_capture.py` at **100 kS/s (10 µs/sample)**:
-`afc.csv`, `fcp.csv`, `scp.csv` (each shows the charger actually switching).
-These are ground truth — our `qc.rs` AFC implementation does NOT match them
-and does not trigger. **The RE doc's `proto_send_byte` "152 µs NRZ bit" was an
-explicitly-unverified estimate and is wrong.**
+`afctr 0x46` drives a Samsung AFC charger from 5 V → 9 V, bench-verified
+(8.92 V), reliable across power-cycles; `afctr 0x08` returns it to 5 V. Lives in
+`qc.rs`; host tool sends `afctr <byte> [reps]`. The stock `charge_protocol_
+handshake` mode 4 is replicated register-for-register (see
+`/home/fletcher/tc66/firmware/ghidra/CHARGE_TRIGGER_FINDINGS.md`).
 
-## What the captures show (vs our implementation)
+## What made it work (the four things, in order of discovery)
 
-| | Working stock capture | Our qc.rs (build 86) |
-|---|---|---|
-| Encoding | **pulse-width**: each symbol is a HIGH pulse, LONG ≈ 2.5 ms vs SHORT ≈ 0.15–0.5 ms, with ~0.37 ms LOW gaps between | fixed 152 µs level per bit (NRZ) — **wrong** |
-| D− idle | **low (0 V)** between hold and serial | high (3.3 V mark) — **wrong** |
-| D+ | held 0.6 V throughout | held 0.6 V ✓ |
-| Structure | 3 pings (~910 µs `L91` gaps) → data packets (~10 ms `L1003` gaps) ✓ matches RE doc | 0x46 ×3 at 10 ms, no pings |
+1. **NRZ, not pulse-width.** Each byte is `proto_send_byte`: start pattern
+   (D− high 24 µs / low 32 µs / high 32 µs), 8 data bits MSB-first at ~152 µs
+   (1 = D− mark high [PB4 hi, PB5 lo], 0 = low), a 9th **odd-parity** bit, stop.
+   D+ held 0.6 V (PA13=1) throughout. Verified byte-perfect vs the stock capture.
+2. **Interrupt masking of the bit timing.** The 250 Hz sampler ISR (does ~0.5 ms
+   I2C reads) firing mid-byte stretches a bit cell and corrupts the frame. The
+   byte runs inside `cortex_m::interrupt::free`; the 2.5 ms marks and the reads
+   tolerate jitter.
+3. **The real entry** (register-exact, from a fresh 200 kS/s stock capture — the
+   findings-doc's "D+3.3/D−3.3 hold" was wrong): release all four pins (hi-Z)
+   200 ms, then drive **only D+** to its 0.6 V state (PA13=1, PA14=0) with **D−
+   left RELEASED** for the whole 2050 ms hold — the D− ≈ 0.6 V→0 a scope sees is
+   charger-sourced. Then the request byte ×3, 10 ms apart. AFC has **no sync
+   pings** (those are FCP/SCP).
+4. **CLOSED-LOOP — the decisive fix.** `proto_send_word` is not a blind send: it
+   READS PB4 (D− as input) to follow the charger's Sping. Per word: Mping (drive
+   D− high 2.5 ms via `proto_line_idle`, then release) → `proto_wait_sping` →
+   byte → Mping → wait Sping → `proto_measure_response` (read the byte-echo) →
+   Mping → wait Sping. An open-loop replay engages the charger (it Spings) but
+   never completes — the FSM needs the master to read/wait.
+   - **Sync subtlety that cost a build:** `proto_wait_sping` must FIRST wait for
+     the released mark to fall low, THEN detect the charger's Sping rising/
+     falling. Waiting only "high then low" mistakes the residual mark-high for
+     the Sping, so the byte is sent *during* the charger's Sping → contention →
+     garbled byte → no switch. Fixed by the leading `wait_pb4(false,…)`.
 
-So AFC entry + D+ hold are right; the **serial waveform is a different
-physical layer** (pulse-width / pulse-distance), and D− must idle low.
+**Bench procedure:** the charger's state matters — power-cycle it (Kasa plug
+192.168.1.233, `kasa-plug` skill, `-t 5` cold) before a clean test. Our D+/D−
+drive HW is proven independently (QC2.0 `qctrg` switches this charger to 9/12 V).
 
-## Decode progress (100 kS/s)
+## FCP / SCP — next (share this exact machinery)
 
-- **LONG high pulse ≈ 250 samples = 2.5 ms**, **SHORT ≈ 15–48 samples =
-  0.15–0.48 ms**. Inter-symbol LOW gap ≈ 37 samples (0.37 ms). Inter-ping gap
-  ≈ 91 samples (0.91 ms). Inter-packet gap ≈ 1003 samples (10 ms).
-- FCP `fcp.csv` serial burst starts ~idx 2,244,000. First three groups are the
-  3 pings, each the pattern `0 0 1 0 0` (LONG=0/SHORT=1) separated by 910 µs,
-  then a 10.9 ms gap, then the data packets. AFC `afc.csv` serial ~idx
-  5,135,700; one command byte ≈ `L L S L L S L L L` (9 symbols).
-- **Not yet cleanly solved:** the exact bit-frame (start marker? 8 data +
-  parity? the ping's short frame?) and the LONG/SHORT polarity. Naive
-  LONG=0/SHORT=1 MSB-first gives FCP-ping-ish `00100` and AFC ≈ 0x48 (expected
-  0x46) — close but the framing/boundaries need methodical work.
-
-## To finish (next session)
-
-1. Decode all three captures precisely against the KNOWN bytes
-   (`CHARGE_TRIGGER_FINDINGS.md`): FCP `01 01 01`, then `0c 04 e2 / 0c 21 b0 /
-   …`; AFC `46 46 46`; SCP `01 01 01` then `0b a0 c0 64 / …` with CRC-8/0x39.
-   Solve the frame + LONG/SHORT polarity so all known bytes decode exactly.
-2. Rebuild `qc.rs` serial: emit HIGH pulses of the decoded LONG/SHORT widths
-   (µs, SysTick-timed — the timing fix stays), D− idling **low**, with the
-   3-ping preamble for FCP/SCP. AFC entry (D+ 0.6 V / D− 3.3 V hold) is already
-   correct.
-3. Verify on the scope (`scope_capture.py`) that our output matches the working
-   capture BEFORE plugging the charger, then confirm 5 V→9 V.
-
-Everything else in M4 (PD 2.0/3.0 + PPS, QC2, QC3, KM003C PD capture) is done
-and verified; AFC/FCP/SCP are the remaining serial protocols.
+HiSilicon ACCP: one PHY for AFC/FCP/SCP. Reuse `proto_send_word`/`afc_byte`/
+`proto_wait_sping`. Differences vs AFC:
+- **3 sync pings** first: `proto_send_word(0x01)` ×3 with `i2c_bit_delay(900)` =
+  900 µs gaps, then the command packets (multi-byte, `flag` differs).
+- Grammar: `0c`=read8 `<0c><reg><crc>`, `0b`=write8 `<0b><reg><val><crc>`,
+  `1b`=write16. FCP set 9 V = `0b 2c 5a <crc>` then `0b 2b 01 <crc>`. SCP enable
+  `0b a0 c0 <crc>`, set volts `1b b8 <hi> <lo> <crc>` (mV, big-endian).
+- **CRC unconfirmed** (0x39 is a guess). Solve it from captured frames — the
+  stock capture in scratchpad + brute-forcer `crc.py` — before trusting writes.
+- `charge_protocol_handshake` modes: 2 = FCP (block 0x0800417c), 3 = SCP
+  (0x08004c60), 4 = AFC (0x080034e4); `scp_set_voltage @0x08004aac` patches the
+  target byte + checksum and re-sends.

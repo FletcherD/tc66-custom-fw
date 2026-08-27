@@ -14,8 +14,12 @@ import time
 sys.path.insert(0, "/home/fletcher/.claude/skills/owon-vds1022")
 from vds1022.vds1022 import VDS1022, CH1, CH2, DC  # noqa: E402
 
-RATE = 100e3           # 100 kS/s = 10 us/sample (~15 samples per 152 us bit)
+# Sample rate (S/s). 200 kS/s = 5 us/sample is the max the OWON roll-mode read
+# sustains over USB (250 kS/s+ drops samples and aborts). At 5 us/sample the
+# 24-32 us AFC start pulses are ~5-6 samples and the 152 us bits ~30. Override
+# as argv[2] (kept a param in case a future scope/host sustains more).
 OUT = sys.argv[1] if len(sys.argv) > 1 else "/tmp/scope_all.csv"
+RATE = float(sys.argv[2]) if len(sys.argv) > 2 else 200e3
 
 
 def main():

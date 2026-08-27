@@ -139,19 +139,29 @@ pub fn qc3(down: bool, count: u8) -> Result<(), u8> {
 
 /* ---- Samsung AFC (Adaptive Fast Charging, stock handshake mode 4) ----
  *
- * AFC is a serial protocol on D− (D+ held at 0.6 V throughout), NOT a level
- * table. Framing recovered from the stock `proto_send_byte @0x080047b4`:
- *   serial "1" = D− PB4 high / PB5 low; "0" = both low.
- *   8 data bits MSB-first, ~152 µs each, then a 9th ODD-parity bit (set so the
- *   total number of 1-bits incl. parity is odd), then a stop.
- * Entry (stock mode-4): 200 ms D+3.3/D−3.3 preamble, D+→0.6 V held ~2050 ms
- * (D− 3.3 V), then the request byte framed on D−, repeated.
- * Request byte = voltage nibble << 4 | current nibble (public AFC spec):
- *   5V=0x00, 9V=0x46, 12V=0x66 (current nibble 6 ≈ 1.65 A). Host passes it.
- * (CHARGE_TRIGGER_FINDINGS.md; the command byte is per the public AFC spec —
- * the stock builds it in RAM cfg+0x279.) */
-
-const BIT_US: u32 = 152; /* delay_bit_period @0x08003d42 */
+ * CLOSED-LOOP single-wire serial on D− (D+ held at 0.6 V throughout). Replicates
+ * the stock `charge_protocol_handshake` mode 4 register-for-register
+ * (CHARGE_TRIGGER_FINDINGS.md); the byte framing matches the stock afc.csv
+ * capture symbol-for-symbol AND the charger's Sping is read back on PB4.
+ *
+ * Serial levels (stock set_dpm_trigger_gpio network): mark / "1" = D− PB4 high,
+ * PB5 low (~3.3 V); "0" = both low (0 V). D+ = PA13 high (0.6 V) the whole time.
+ *
+ * Per byte (`proto_send_byte`): start pattern (D− high 24 µs / low 32 µs / high
+ * 32 µs), 8 data bits MSB-first at ~152 µs each (NRZ), a 9th ODD-parity bit,
+ * then a stop. `proto_send_word` wraps it CLOSED-LOOP: Mping (D− driven high
+ * 2.5 ms via `proto_line_idle`, then RELEASED to hi-Z) → `proto_wait_sping`
+ * (READ PB4: wait ≤3 ms for the charger's Sping rising edge, ≤3 ms for falling)
+ * → byte → Mping → wait Sping → `proto_measure_response` (read the charger's
+ * byte-echo) → Mping → wait Sping. An open-loop replay that never reads PB4 does
+ * NOT advance the charger's FSM (the charger Spings but the request never
+ * completes — observed). Entry: release all 4 pins 200 ms, then drive D+ to
+ * 0.6 V with D− RELEASED for 2050 ms, then the request byte (0x46 = 9 V,
+ * 0x08 = 5 V) ×3, 10 ms apart. AFC has NO sync pings (FCP/SCP only).
+ *
+ * The byte's bit timing runs with interrupts masked: the sampler (250 Hz, ~0.5
+ * ms I2C reads) or USB ISR firing mid-bit stretches a cell and corrupts the
+ * frame. The 2.5 ms marks and the read-based waits tolerate ISR jitter. */
 
 /// Microsecond delay off the free-running SysTick (24-bit, 48 MHz, set up in
 /// main). MUST be used for the serial bit timing rather than
@@ -165,96 +175,178 @@ fn us(n: u32) {
     while start.wrapping_sub(cortex_m::peripheral::SYST::get_current()) & 0x00FF_FFFF < cyc {}
 }
 
-/// One serial bit on D− (D+ stays 0.6 V). "1" = PB4 high only, "0" = both low.
-fn afc_bit(one: bool) {
-    drive((true, false, one, false));
-    us(BIT_US);
-}
+const BIT_US: u32 = 152; /* delay_bit_period @0x08003d42 */
 
-/// Send one byte as a stock proto_send_word: start pattern, 8 data bits
-/// Set the D− pins (PB4/PB5) push-pull (drive) or open-drain (release so the
-/// charger can pull the line for its ACK). D+ (PA13/PA14) stays push-pull.
-fn dminus_open_drain(open: bool) {
-    let gpiob = unsafe { &*pac::Gpiob::ptr() };
-    if open {
-        gpiob
-            .omode()
-            .modify(|_, w| w.om4().open_drain().om5().open_drain());
-    } else {
-        gpiob
-            .omode()
-            .modify(|_, w| w.om4().push_pull().om5().push_pull());
+/// Hold the current drive for `n` × 50 ms (SysTick `us` maxes at ~349 ms/call,
+/// so multi-second entry holds must loop).
+fn hold_50ms(n: u32) {
+    for _ in 0..n {
+        us(50_000);
     }
 }
 
-/// Stock `proto_line_idle @0x08004760`: drive D− to the mark level (PB4 high /
-/// PB5 low) push-pull for 2.5 ms, then flip PB4/PB5 to open-drain — releasing
-/// the strong drive (PB4 ODR=1 → hi-Z, PB5 ODR=0 → weak low) so the charger
-/// can drive the line to ACK. `proto_send_word` brackets every byte with this;
-/// it was the missing piece — a byte held push-pull throughout never lets the
-/// charger respond.
-fn proto_line_idle() {
-    dminus_open_drain(false); /* push-pull */
-    drive((true, false, true, false)); /* D+ 0.6 V, D− mark = PB4 hi/PB5 lo */
-    us(2500);
-    dminus_open_drain(true); /* release: PB4 hi-Z, PB5 weak low */
-}
-
-/// MSB-first, odd-parity 9th bit, stop.
-fn afc_byte(b: u8) {
-    dminus_open_drain(false); /* push-pull for the bits (was open-drain after idle) */
-    /* start pattern: D− 1 (24 µs) / 0 (32 µs) / 1 (32 µs) */
+/// D− to the mark / "1" level = PB4 high, PB5 low (~3.3 V); D+ stays 0.6 V.
+fn dm_mark() {
     drive((true, false, true, false));
-    us(24);
+}
+/// D− to "0" = both PB4/PB5 low (0 V); D+ stays 0.6 V.
+fn dm_space() {
     drive((true, false, false, false));
-    us(32);
-    drive((true, false, true, false));
-    us(32);
-    let mut ones = 0u32;
-    for i in (0..8).rev() {
-        let one = (b >> i) & 1 != 0;
-        if one {
-            ones += 1;
-        }
-        afc_bit(one);
+}
+
+/// PB4/PB5 (D−) as push-pull outputs (drive) or floating inputs (release, hi-Z).
+/// Releasing lets the charger drive D− for its Sping AND lets us read PB4.
+/// D+ (PA13/PA14) is untouched.
+fn dm_drive(drive: bool) {
+    let gpiob = unsafe { &*pac::Gpiob::ptr() };
+    if drive {
+        gpiob.ctl().modify(|_, w| w.ctl4().output().ctl5().output());
+    } else {
+        gpiob.ctl().modify(|_, w| w.ctl4().input().ctl5().input());
     }
-    /* 9th bit = odd parity: make the total count of 1-bits odd */
-    afc_bit(ones % 2 == 0);
-    /* stop: D− high then a 180 µs gap (i2c_bit_delay(180)) */
-    drive((true, false, true, false));
+}
+
+/// PA13/PA14 (D+) as push-pull outputs (drive) or floating inputs (released).
+fn dp_drive(drive: bool) {
+    let gpioa = unsafe { &*pac::Gpioa::ptr() };
+    if drive {
+        gpioa.ctl().modify(|_, w| w.ctl13().output().ctl14().output());
+    } else {
+        gpioa.ctl().modify(|_, w| w.ctl13().input().ctl14().input());
+    }
+}
+
+/// Read D− via PB4's input register (valid while released/hi-Z).
+fn dm_read() -> bool {
+    let gpiob = unsafe { &*pac::Gpiob::ptr() };
+    (gpiob.istat().read().bits() >> 4) & 1 != 0
+}
+
+/// Spin reading PB4 until it equals `want`, or `to_us` µs elapse (SysTick).
+fn wait_pb4(want: bool, to_us: u32) {
+    let lim = to_us * 48;
+    let start = cortex_m::peripheral::SYST::get_current();
+    while dm_read() != want {
+        if start.wrapping_sub(cortex_m::peripheral::SYST::get_current()) & 0x00FF_FFFF >= lim {
+            break;
+        }
+    }
+}
+
+/// Stock `proto_wait_sping` @0x08004eb4: after a Mping, wait for the charger's
+/// Sping on D−. First let the released mark FALL (so the residual mark-high is
+/// not mistaken for the Sping), then wait for the charger's rising edge (≤3 ms)
+/// and its falling edge (≤3 ms). Reading this — not blind-delaying — is what
+/// advances the charger's protocol FSM, and waiting out the whole Sping keeps
+/// the next byte from colliding with it.
+fn proto_wait_sping() {
+    wait_pb4(false, 3000); /* mark falls / line settles low */
+    wait_pb4(true, 3000); /* charger Sping rising */
+    wait_pb4(false, 3000); /* charger Sping falling */
+}
+
+/// Stock `proto_measure_response` @0x08004ef4: with D− released, wait out the
+/// charger's response high pulse (its byte-echo ACK) and its end (~20 ms cap).
+/// The caller's preceding `proto_wait_sping` already left the line low.
+fn proto_measure_response() {
+    wait_pb4(true, 20000); /* charger echo high */
+    wait_pb4(false, 20000); /* echo end */
+}
+
+/// Stock `proto_line_idle`: drive D− to the mark push-pull for 2.5 ms (the
+/// master "Mping"), then release D− (hi-Z) so the charger can Sping.
+fn proto_line_idle() {
+    dm_drive(true);
+    dm_mark();
+    us(2500);
+    dm_drive(false);
+}
+
+/// Stock `proto_send_byte`: start pattern, 8 data bits MSB-first at BIT_US,
+/// odd-parity 9th bit, stop.
+fn afc_byte(b: u8) {
+    dm_drive(true); /* push-pull for the bits */
+    /* start pattern: D− high 24 µs / low 32 µs / high 32 µs */
+    dm_mark();
+    us(24);
+    dm_space();
+    us(32);
+    dm_mark();
+    us(32);
+    for i in (0..8).rev() {
+        if (b >> i) & 1 != 0 {
+            dm_mark();
+        } else {
+            dm_space();
+        }
+        us(BIT_US);
+    }
+    /* 9th bit = odd parity: mark when popcount(b) is even (XOR-fold parity). */
+    let mut p = b;
+    p ^= p >> 4;
+    p ^= p >> 2;
+    p ^= p >> 1;
+    if p & 1 == 0 {
+        dm_mark();
+    } else {
+        dm_space();
+    }
+    us(BIT_US);
+    /* stop: D− high then a 180 µs gap */
+    dm_mark();
     us(180);
 }
 
+/// One stock `proto_send_word(b, len=1, flag=1)` — the CLOSED-LOOP handshake
+/// (`@0x08004d60`): Mping → wait charger Sping → byte → Mping → wait Sping →
+/// measure the charger's echo → Mping → wait Sping. Only the byte's bit timing
+/// is interrupt-masked; the marks and the (read-based) waits tolerate ISR jitter.
+fn proto_send_word(b: u8) {
+    proto_line_idle();
+    proto_wait_sping();
+    us(250);
+    cortex_m::interrupt::free(|_| afc_byte(b));
+    proto_line_idle();
+    proto_wait_sping();
+    proto_measure_response();
+    us(180);
+    proto_line_idle();
+    proto_wait_sping();
+}
+
 /// `afctr <byte> [reps]`: Samsung AFC request. First call after entry/off runs
-/// the ~2.25 s AFC entry, then frames the request byte `reps` times (default 3,
-/// 10 ms apart). Later calls re-send without re-entry (fast voltage change).
+/// the ~2.25 s AFC mode-4 entry, then frames the request byte `reps` times
+/// (default 3, 10 ms apart). Later calls re-send without re-entry (fast voltage
+/// change). `0x46` = 9 V, `0x08` = 5 V (high nibble = 5 V + n; low = current).
 pub fn afc(cmd: u8, reps: u8) -> Result<(), u8> {
     config_pins();
     if !unsafe { *ENTERED.0.get() } {
-        /* mode-4 entry: 3.3/3.3 preamble, then D+ 0.6 V held with D− 3.3 V */
-        drive((true, true, true, true));
-        crate::board::delay_ms(200);
-        drive((true, false, true, true)); /* D+ 0.6 V, D− 3.3 V */
-        crate::board::delay_ms(2050);
+        /* mode-4 entry, register-exact from stock `charge_protocol_handshake`
+         * (CHARGE_TRIGGER_FINDINGS.md): release all four pins (hi-Z) 200 ms,
+         * then drive D+ to its 0.6 V state (PA13=1, PA14=0) with D− left
+         * RELEASED for the whole 1250+800 = 2050 ms hold — the D− ≈ 0.6 V then 0
+         * a scope sees during the hold is charger-sourced, not the meter. Then
+         * the serial. SysTick `us` maxes at ~349 ms/call so holds loop in 50 ms
+         * steps. */
+        dp_drive(false); /* D+ released (hi-Z) */
+        dm_drive(false); /* D− released (hi-Z) */
+        hold_50ms(4); /* 200 ms preamble, all released */
+        dp_drive(true); /* D+ pins back to push-pull output */
+        drive((true, false, false, false)); /* drive D+ to 0.6 V; D− stays hi-Z */
+        hold_50ms(41); /* 2050 ms hold, D− released */
         unsafe { *ENTERED.0.get() = true };
         unsafe { *IN_QC3.0.get() = false };
     }
-    /* AFC (stock FUN_080034e4): proto_send_word(cmd) ×3 with 10 ms gaps — NO
-     * sync pings. proto_send_word = proto_line_idle (mark 2.5 ms + open-drain
-     * release) before AND after the byte, so the charger can ACK. */
     let n = if reps == 0 { 3 } else { reps };
     for k in 0..n {
-        proto_line_idle();
-        afc_byte(cmd);
-        proto_line_idle();
+        proto_send_word(cmd);
         if k + 1 < n {
-            crate::board::delay_ms(10);
+            us(10_000); /* 10 ms gap between repeats */
         }
     }
-    /* leave D− released (open-drain) at the mark — the charger holds 9 V while
-     * D+ stays at 0.6 V (push-pull); don't clobber it back to a hard 3.3 V */
-    dminus_open_drain(false);
-    drive((true, false, true, false));
+    /* leave D− released (hi-Z); D+ stays 0.6 V and the charger holds the
+     * negotiated voltage. */
+    dm_drive(false);
     Ok(())
 }
 
