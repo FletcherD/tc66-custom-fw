@@ -74,7 +74,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 101;
+const BUILD_ID: u32 = 102;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -168,13 +168,14 @@ fn run() -> ! {
 
     board::pa9_high(&p.gpioa);
 
-    /* SysTick free-runs over its full 24 bits as the grace-window timebase
-     * (CORE-internal — reads never stall during host NAK storms, unlike
-     * APB peripherals). 24 bits @ 48 MHz wraps at 349 ms, far beyond any
-     * loop pass. The steady-state loop paces itself off the TIMER5 ISR's
-     * tick counter instead (ina::ticks) — so SysTick has no consumer
-     * without the grace feature. */
-    #[cfg(feature = "grace")]
+    /* SysTick free-runs over its full 24 bits (CORE-internal — reads never
+     * stall during host NAK storms, unlike APB peripherals). 24 bits @ 48 MHz
+     * wraps at 349 ms, far beyond any loop pass. Two consumers: the `grace`
+     * window timebase, AND qc.rs's `us()`/`wait_pb4()` — the QC/AFC/FCP/SCP
+     * serial bit timing and the closed-loop Sping reads. So it MUST be enabled
+     * unconditionally: gating it on `grace` (build 83) silently broke afctr
+     * (us() spins forever on a stopped counter) once AFC landed. The main loop
+     * still paces off the TIMER5 tick (ina::ticks), not this. */
     {
         let mut syst = cortex_m::Peripherals::take().unwrap().SYST;
         syst.set_clock_source(cortex_m::peripheral::syst::SystClkSource::Core);
