@@ -11,7 +11,7 @@ edition = "2021"
 #   (without it TIMER5_DAC branches straight to the tick body).
 # - dev-verbs: the bring-up/debug verbs (i2crd adcrd clkrd tftfl tftbl
 #   tftui). query/getva/rawva/updat are the product protocol - never gated.
-default = ["dev-verbs"]
+default = ["pcprf", "dev-verbs"]
 pcprf = []
 dev-verbs = []
 
@@ -32,13 +32,16 @@ gd32f1 = { version = "0.9.2", features = ["gd32f150", "critical-section", "rt"] 
 aes = "0.8"
 libm = "0.2"
 
-# The C reference ships usb.c at -O0 because -Os inlining caused a post-enumeration
-# lockup (reference-c/Makefile). opt-level=1 + inline(never) on the USB path keeps
-# per-function frames so MK_PROBE stays meaningful.
+# opt "s" + fat LTO (was the conservative opt-level 1 / no LTO, kept for the C
+# reference's unexplained -Os post-enumeration lockup): −13.9 KB flash, +400 B
+# stack headroom, bench-validated 2026-08-26 as build 82 — smoke + before/after
+# latency (powerz/query/rawva/getva all improved), concurrent powerz+CDC soak,
+# two cold-boot enumeration cycles, self-updat. inline(never) on the USB path
+# still holds per-function frames, so MK_PROBE stays meaningful.
 [profile.release]
-opt-level = 1
+opt-level = "s"
 codegen-units = 1
-lto = false
+lto = "fat"
 panic = "abort"
 debug = true
 

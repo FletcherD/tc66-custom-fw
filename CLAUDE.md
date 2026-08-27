@@ -88,8 +88,9 @@ The board is on the bench hub, port **b2** — power-cycle it with the
   and polled from the main loop; long work (AES, TFT) never runs in an ISR.
   All thread-mode I2C must run inside `ina::pause(...)`, and all thread-mode
   access to the published measurements goes through `ina::snapshot()`/its
-  helpers — the soundness rules are the ina.rs module doc. Keep the build
-  profile conservative (`opt-level = 1`, no LTO) — see FIRMWARE.md.
+  helpers — the soundness rules are the ina.rs module doc. The build profile
+  is `opt-level = "s"` + fat LTO (bench-validated; if inexplicable USB
+  lockups appear, suspect it first) — see FIRMWARE.md.
 - The `.flasher` section must stay self-contained (no calls/literals into app
   flash); the `flasher-gate`/`init-gate`/`stack-gate` Makefile gates enforce
   this (and the static worst-case stack budget — a boot-path stack overflow

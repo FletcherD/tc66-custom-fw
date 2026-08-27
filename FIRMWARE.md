@@ -197,13 +197,17 @@ callbacks are silently dropped ~20-30% of the time (hence `arm()` writes
 unconditionally — WouldBlock is the cheap no-op — and never trusts a
 software armed-latch).
 
-Build profile stays `opt-level = 1`, `lto = false`, `codegen-units = 1`: the
-original C reference had an unexplained post-enumeration lockup when the USB
-path was aggressively inlined at `-Os`; revisit optimization only as an
-isolated, revertable change. One such change exists:
-`[profile.release.package.aes] opt-level = 3` — pure-compute crypto with no
-USB-path code; at opt-level 1 the fixsliced AES made every getva reply cost
-~64 ms of main-loop blocking (bench-measured; see Measurement below).
+Build profile is `opt-level = "s"`, `lto = "fat"`, `codegen-units = 1`
+(bench-validated 2026-08-26, build 82: smoke + latency before/after —
+powerz hwmon and every CDC verb got *faster* — concurrent powerz+CDC soak,
+two cold-boot enumeration cycles, self-updat). Historical caution that still
+matters: the original C reference had an unexplained post-enumeration lockup
+when its USB path was aggressively inlined at `-Os`, so the profile ran at
+`opt-level = 1`/no LTO until the flash/stack squeeze forced the change —
+if inexplicable USB lockups ever appear, this profile is the first suspect.
+`[profile.release.package.aes] opt-level = 3` stays — pure-compute crypto
+with no USB-path code; at low opt the fixsliced AES made every getva reply
+cost ~64 ms of main-loop blocking (bench-measured; see Measurement below).
 
 ## `updat` self-flasher
 
