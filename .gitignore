@@ -11,3 +11,9 @@
 __pycache__/
 *.pyc
 .claude/
+
+# large scope captures (D+/D- protocol RE)
+afc.csv
+fcp.csv
+scp.csv
+/tmp/scope_*.csv
