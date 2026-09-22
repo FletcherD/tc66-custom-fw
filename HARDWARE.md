@@ -146,6 +146,7 @@ Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the firs
 | `keyrd` | `OK`+raw+held (2 bytes, bit0 = K1, bit1 = K2) | our dev verb: raw PF0/PF1 levels (1 = released) + debounced pressed mask (keys.rs) |
 | `rstrd` | `OK`+u32 LE | our dev verb: RCU_RSTSCK captured at boot (bit 29 = watchdog reset, 28 = software) (wdg.rs, tools/wdgtest.py) |
 | `wdtst` | `OK`, then the meter reboots in ~14 s | our dev verb: hang the main loop to prove the watchdog bites |
+| `idlrd` | `OK`+4×u32 LE | our dev verb: screen-idle state — idle_secs, flags (bit0 tft alive, bit1 screen off), key-wake count, last screen_off result (1 = ok) |
 | `uiscr` | `OK`+screen / `ER`+stage | our dev verb: `uiscr <n>` select screen n (no arg = next, like K1) and redraw to completion |
 | `btini` | `OK` | our dev verb: restart the BLE UART in raw mode for module probing (`btini f` = 115200 instead of 9600); `btrun` returns it to dispatch |
 | `btcmd` | `OK` / `ER`+stage | our dev verb: `btcmd <bytes>` send raw bytes to the module (DMA TX; ER 4 = previous transfer still going) |
@@ -165,7 +166,7 @@ Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the firs
 | `qcoff` | `OK` / `ER` | our dev verb: release the QC/AFC D+/D− pins (charger reverts to 5 V; restores D± ADC + SWD) |
 
 Keeping `getva` byte-compatible (same reply) lets existing host tools work
-unchanged. The dev/debug verbs (`i2crd adcrd clkrd keyrd rstrd wdtst uiscr tftfl tftbl tftui btini btcmd btget btrun btsta btspy` — and
+unchanged. The dev/debug verbs (`i2crd adcrd clkrd keyrd rstrd wdtst idlrd uiscr tftfl tftbl tftui btini btcmd btget btrun btsta btspy` — and
 `pcprf` separately) sit behind default-on cargo features (`dev-verbs`,
 `pcprf`) so they can be dropped for flash space; disabled verbs match and
 silently do nothing.

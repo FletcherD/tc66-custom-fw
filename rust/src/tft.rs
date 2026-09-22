@@ -58,6 +58,9 @@ unsafe impl<T> Sync for Racy<T> {}
 static INITED: Racy<bool> = Racy(core::cell::UnsafeCell::new(false));
 /* screen-off state + the backlight compare to restore on wake */
 static SCREEN_OFF: Racy<bool> = Racy(core::cell::UnsafeCell::new(false));
+/* set by every screen_on() call, consumed by the main loop's idle timer:
+ * a wake from any path (verb, key, live input) restarts the 15 s count */
+static WOKE: Racy<bool> = Racy(core::cell::UnsafeCell::new(false));
 static LAST_BL: Racy<u16> = Racy(core::cell::UnsafeCell::new(499));
 
 struct Engine {
@@ -583,9 +586,19 @@ pub fn screen_off() -> Result<(), u8> {
     Ok(())
 }
 
+pub fn is_off() -> bool {
+    unsafe { *SCREEN_OFF.0.get() }
+}
+
+/// True once per screen_on() call since the last take (main loop only).
+pub fn take_woke() -> bool {
+    unsafe { core::mem::replace(&mut *WOKE.0.get(), false) }
+}
+
 #[inline(never)]
 pub fn screen_on() -> Result<(), u8> {
     ensure_init()?;
+    unsafe { *WOKE.0.get() = true };
     if !unsafe { *SCREEN_OFF.0.get() } {
         return Ok(());
     }

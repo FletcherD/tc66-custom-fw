@@ -77,7 +77,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 108;
+const BUILD_ID: u32 = 110;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -125,6 +125,9 @@ fn run() -> ! {
     mk(MK_WINDOWS, 0);
     for i in 0..6 {
         mk(MK_DSP_BASE + 4 * i, 0); /* display/DMA diagnostic block */
+    }
+    for i in 0..4 {
+        mk(MK_UI_BASE + 4 * i, 0);
     }
     for i in 0..4 {
         /* BT block — MK_BT_STATE especially: the marker window is outside
@@ -321,6 +324,7 @@ fn run() -> ! {
             let pressed = keys::poll();
             if pressed != 0 && tft_alive {
                 idle_secs = 0;
+                mk(MK_UI_WAKES, mk_get(MK_UI_WAKES) + 1);
                 let _ = tft::screen_on();
                 if pressed & 1 != 0 {
                     ui::next_screen();
@@ -358,16 +362,24 @@ fn run() -> ! {
                         || i.abs_diff(idle_ref_i) > IDLE_I_DELTA;
                     idle_ref_v = v;
                     idle_ref_i = i;
+                    /* a verb (tftui/uiscr/...) woke the panel: restart the
+                     * count, else the one-shot at 15 never fires again */
+                    if tft::take_woke() {
+                        idle_secs = 0;
+                    }
                     if moved {
                         idle_secs = 0;
                         let _ = tft::screen_on(); /* no-op when already on */
                     } else if idle_secs < IDLE_OFF_SECS {
                         idle_secs += 1;
                         if idle_secs == IDLE_OFF_SECS {
-                            let _ = tft::screen_off();
+                            let r = tft::screen_off();
+                            mk(MK_UI_OFFRES, r.map_or_else(|e| 2 + e as u32, |_| 1));
                         }
                     }
+                    mk(MK_UI_IDLE, idle_secs);
                 }
+                mk(MK_UI_STATE, tft_alive as u32 | (tft::is_off() as u32) << 1);
             }
             ui_ticks += elapsed;
             if ui_ticks >= 125 && tft_alive {
@@ -460,6 +472,17 @@ fn on_packet(buf: &[u8]) {
             loop {
                 cortex_m::asm::nop();
             }
+        }
+    } else if match5(buf, b"idlrd") {
+        #[cfg(feature = "dev-verbs")]
+        {
+            /* "OK" + 4 x u32 LE: the MK_UI block (markers.rs) */
+            let mut r = [0u8; 18];
+            r[..2].copy_from_slice(b"OK");
+            for i in 0..4 {
+                r[2 + 4 * i..6 + 4 * i].copy_from_slice(&(mk_get(MK_UI_BASE + 4 * i) as u32).to_le_bytes());
+            }
+            write_all(&r);
         }
     } else if match5(buf, b"keyrd") {
         #[cfg(feature = "dev-verbs")]

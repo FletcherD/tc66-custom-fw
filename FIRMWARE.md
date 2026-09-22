@@ -401,7 +401,12 @@ Related subtleties, all load-bearing:
   cell positions (18×24 px). Screen 0 is V/I/P (yellow/cyan/green), 1 is
   mAh/mWh/hh:mm:ss since power-on or the last reset, 2 is temperature and
   D+/D−. K1 steps to the next screen; K2 held for 1 s zeroes energy and the
-  run clock (main.rs owns the accumulators). `ui::draw(run_secs)` takes its
+  run clock (main.rs owns the accumulators). Idle-off (15 s without a V/I
+  move) is a one-shot on the loop's counter, so **every `tft::screen_on()`
+  call raises a wake flag that the loop consumes to restart the count**
+  (`take_woke`) — a draw verb after the panel blanked would otherwise leave
+  it on forever. `idlrd` exposes the counter/flags (MK_UI block,
+  0x20001304). `ui::draw(run_secs)` takes its
   own `ina::snapshot()` (keeps the main frame small); a screen switch
   poisons the char cache so every cell repaints in the new colors. Cells are
   always fully overdrawn fg/bg (no clear → no flicker). `ui::draw` only
@@ -614,8 +619,8 @@ Bump `BUILD_ID` in `main.rs` when flashing; reading `MK_BUILD` (0x20001060)
 back proves the new image is actually running.
 
 Cargo features (both default-on, droppable for flash space): `dev-verbs`
-(i2crd adcrd clkrd keyrd rstrd wdtst uiscr tftfl tftbl tftui btini btcmd btget
-btrun btsta btspy — disabled verbs match and silently do nothing) and `pcprf` (the PC profiler + its verb). The product protocol
+(i2crd adcrd clkrd keyrd rstrd wdtst idlrd uiscr tftfl tftbl tftui btini btcmd
+btget btrun btsta btspy — disabled verbs match and silently do nothing) and `pcprf` (the PC profiler + its verb). The product protocol
 (query/getva/rawva/updat/powerz) is never gated.
 
 ### Fast-flash placement (`fast.x` + `make fast-gate`)

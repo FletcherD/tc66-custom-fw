@@ -34,7 +34,7 @@ pub const MK_WINDOWS: usize = 0x2000_1068; // completed sample windows, ~10.4 Hz
  * error/status snapshot; words 3..11 subsystem-defined — DOCUMENT every
  * slot you claim here, next to its constant. Read with `make markers`
  * (covers 0x1000..0x1100). Only ever write via mk() (volatile).
- * The window ends at 0x20001400 (flasher); 0x1304..0x1400 is free. */
+ * The window ends at 0x20001400 (flasher); 0x1314..0x1400 is free. */
 
 /* USB interrupt-path block: the USBD_LP ISR + command ring (main.rs).
  * All words are single-writer (ISR, or thread mode under interrupt::free
@@ -154,3 +154,14 @@ pub fn mk(addr: usize, v: u32) {
 pub fn mk_get(addr: usize) -> u32 {
     unsafe { core::ptr::read_volatile(addr as *const u32) }
 }
+
+/* UI / screen-idle block (main loop, thread-mode single-writer; `idlrd`).
+ * +0  MK_UI_IDLE   idle_secs (seconds without a V/I move, saturates at 15)
+ * +4  MK_UI_STATE  bit0 tft_alive, bit1 screen is off
+ * +8  MK_UI_WAKES  key-press wake events
+ * +12 MK_UI_OFFRES last screen_off() result: 1 = ok, 2+e = Err(e) */
+pub const MK_UI_BASE: usize = 0x2000_1304;
+pub const MK_UI_IDLE: usize = MK_UI_BASE;
+pub const MK_UI_STATE: usize = MK_UI_BASE + 4;
+pub const MK_UI_WAKES: usize = MK_UI_BASE + 8;
+pub const MK_UI_OFFRES: usize = MK_UI_BASE + 12;
