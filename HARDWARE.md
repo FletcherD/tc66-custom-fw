@@ -389,21 +389,25 @@ The chip shares the INA226/EEPROM I²C bus — all access inside `ina::pause`.
   (bench-confirmed: `btspy` counts the BLE-written edges on PB0). It is a
   transparent UART↔GATT bridge — advertises as **`BT24-M`**, service `ffe0`,
   notify `ffe1` (meter→host), write `ffe2` (host→meter) — running at its
-  **9600 baud**. Its firmware (V3.2.0) speaks the DX-SMART `AT+` set
-  (CRLF-terminated, AT mode only while no BLE client is connected): every
-  *query* answers (`AT+VERSION`, `AT+BAUD` → `+BAUD=3`, `AT+NAME`,
-  `AT+LADDR`, `AT+UUID/CHAR/WRITE`, `AT+PWRM` → 1, `AT+HELP` banner) and
-  `AT+RESET` works, but every *parameterized write* tried — `AT+BAUD7`,
-  `AT+BAUD=7`, `AT+BAUD115200`, `AT+NAME=BT24-M`, 8 syntaxes in all — returns
-  `ERROR=104` ("command error"). The syntax reference for this variant is the
-  "DX-BT24-M&BT24-T Serial UART Application Guide", which is NOT the
-  BT24/BT24-S/BT27 guide (whose `AT+BAUD<n>` form this module rejects) and
-  is not in `~/tc66/docs` (only the M hardware spec is) nor online — so
-  "cannot change the baud" is an empirical result pending that document.
-  The stock firmware never configures this module: its provisioning routine
-  (`TTM:BPS-115200`/`TTM:REN-TC66C`, toggling PA6 around them) belongs to an
-  older module family and is skipped when the EEPROM config word compared
-  against 0x4259 says this is a newer unit (stock's normal path also runs 9600; its provisioning routine additionally toggles **PA6**, presumably
+  **9600 baud, and that cannot be changed on this unit.** Its firmware
+  (V3.2.0) speaks the DX-SMART `AT+` set documented in the
+  "DX-BT24-M&BT24-T 串口应用指导" (vendor PDF, copy at
+  `~/tc66/docs/DX-BT24-M_BT24-T_UART_Application_Guide_CN.pdf`; the
+  hardware spec is `~/tc66/docs/DX-BT24-M.pdf`): `AT+<CMD><param>` +
+  CRLF, uppercase, AT mode only while no BLE client is connected. Queries
+  all answer (`AT+VERSION`, `AT+BAUD` → `+BAUD=3`, `AT+NAME` → BT24-M,
+  `AT+LADDR`, `AT+UUID/CHAR/WRITE`, `AT+PWRM`, `AT+NOTI`) and the
+  **volatile** writes succeed (`AT+NOTI1`, `AT+TRANSPORT1`, `AT+PWRM1` →
+  OK, `AT+RESET` reboots it), but the **persistent** ones — `AT+BAUD7`,
+  `AT+NAME…`, `AT+STOP0`, `AT+PARI0` — all return `ERROR=104`. The guide's
+  baud section states that name + baud rate may be changed **at most 30
+  times in total** (a one-time-programmable store on the DA14531), and a
+  module that refuses exactly those writes has spent that budget (or was
+  supplied with none). No unlock exists in the guide; the stock firmware
+  never touches this module: its provisioning routine (`TTM:BPS-115200`/
+  `TTM:REN-TC66C`, toggling PA6 around them) belongs to an older module
+  family and is skipped when the EEPROM config word compared against
+  0x4259 says this is a newer unit (stock's normal path also runs 9600; its provisioning routine additionally toggles **PA6**, presumably
   a module control line — unverified, unused by us). Advertises whenever the
   meter is powered; one connection at a time. The BLE command set mirrors the
   USB verbs with a `b` prefix + CRLF (`bgetva` = the same 192-B packet, arrives
