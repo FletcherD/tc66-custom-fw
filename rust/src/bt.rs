@@ -1,37 +1,42 @@
 //! DX-BT24-M BLE module link — the stock BLE transport, reimplemented.
 //!
 //! The module is a transparent UART<->GATT bridge on **USART1** (TX = PA2
-//! AF1, RX = PB0 AF4 — recovered from the stock firmware's init) that owns
-//! the whole BLE side (service 0xFFE0, notify 0xFFE1 / write 0xFFE2). The
-//! stock firmware provisioned it persistently to **115200 baud** and the
-//! advertised name `TC66C` (`TTM:BPS-115200` / `TTM:REN-TC66C`), so normal
-//! operation is just "speak 115200"; `init(true)` selects the module's
-//! 9600 power-on default for TTM re-provisioning via the dev verbs.
+//! AF1, RX = PB0 AF4 — recovered from the stock firmware's init and
+//! bench-confirmed with the `btspy` pin sampler) that owns the whole BLE
+//! side (advertises as `BT24-M`, service 0xFFE0, notify 0xFFE1 / write
+//! 0xFFE2). It runs at its **9600** power-on default: this module variant
+//! ignores the `TTM:` provisioning strings (BPS/REN) the stock firmware
+//! carries — its name never became `TC66C` either — and stock's normal
+//! path also sets 9600. `init(true)` selects 115200 for experiments only.
 //!
-//! No interrupts (the two-IRQ rule stands): RX is a **circular DMA ring on
-//! channel 4** — the part's fixed USART1_RX request, free of the TFT engine
-//! on ch2 — that the main loop drains via `service()`; TX is polled with
-//! bounded waits (TBE only depends on our own shifter, never on the module).
-//! At 115200 a 192-B `bgetva` reply blocks the loop ~17 ms, which the
-//! tick-delta cadences absorb; USB and the sampler live in ISRs.
+//! No interrupts (the two-IRQ rule stands). RX is a **circular DMA ring on
+//! channel 4** (the part's fixed USART1_RX request, free of the TFT engine
+//! on ch2) that the main loop drains via `service()`. TX is a **one-shot
+//! DMA on channel 3** (USART1_TX) out of a static 192-B buffer in high RAM:
+//! a full `bgetva` reply takes ~200 ms on the wire at 9600 and the loop
+//! must not wait for it. `send` refuses (Err 4) while a transfer is still
+//! going out — the host polls at ~1 Hz, so a collision is a host bug.
 //!
 //! Concurrency: everything here is thread-mode only (main loop + dev
-//! verbs — mutually exclusive by construction, single context). The DMA
-//! ring is hardware-written; the consumer computes the write index from
-//! CH4CNT and only reads bytes behind it, so a torn in-flight byte is
-//! never observed. `service()` copies a completed line out of the
-//! assembler before dispatching, so the callback may freely call back
-//! into `send`/`read_raw`.
+//! verbs — mutually exclusive by construction, single context). Both DMA
+//! buffers are hardware-accessed; the RX consumer computes the write index
+//! from CH4CNT and only reads bytes behind it, and the TX buffer is only
+//! written after the previous transfer is verified complete. `service()`
+//! copies a completed line out of the assembler before dispatching, so the
+//! callback may freely call back into `send`/`read_raw`.
 //!
 //! Modes (MK_BT_STATE): 0 = uninitialized, 1 = raw (bring-up: `service`
-//! leaves bytes for the `btrd` verb), 2 = dispatch (lines are matched as
-//! `b`-verbs). Dev flow: `btini` -> raw probing (`btwr`/`btrd`) -> `btgo`;
-//! the always-on path enters dispatch mode directly.
+//! leaves bytes for the `btget` verb), 2 = dispatch (lines are matched as
+//! `b`-verbs). Boot enters dispatch directly (`init` + `set_dispatch`);
+//! the dev verbs `btini`/`btcmd`/`btget`/`btrun` re-enter raw mode for
+//! module probing.
 
 use crate::markers::*;
 use gd32f1::gd32f150 as pac;
 
 const RING: usize = 64;
+/// TX buffer: one `bgetva` reply (the longest message we ever send).
+pub const TX_MAX: usize = 192;
 /// Longest meaningful line ("bgetva" + CRLF is 8; TTM replies fit too).
 const LINE_MAX: usize = 24;
 
@@ -43,6 +48,10 @@ unsafe impl<T> Sync for Racy<T> {}
 
 /// DMA-written RX ring. The CPU only reads it (behind the write index).
 static RX_RING: Racy<[u8; RING]> = Racy(core::cell::UnsafeCell::new([0; RING]));
+/// DMA-read TX buffer (high RAM, zeroed by main() before anything runs —
+/// memory.x; it is never read before `send` fills it).
+#[link_section = ".hibss"]
+static TX_BUF: Racy<[u8; TX_MAX]> = Racy(core::cell::UnsafeCell::new([0; TX_MAX]));
 
 struct RxState {
     /// next ring index the consumer reads (thread-only)
@@ -70,13 +79,12 @@ pub fn set_dispatch() {
     }
 }
 
-/// Bring up USART1 + the RX DMA ring. Pure register configuration — no
-/// waits, nothing can block. Idempotent: re-init tears the old session
-/// down first (dev verb may be re-issued, e.g. to switch baud).
-/// `low_baud` selects the module's 9600 power-on default instead of the
-/// provisioned 115200.
+/// Bring up USART1 + the RX DMA ring + the TX DMA channel. Pure register
+/// configuration — no waits, nothing can block. Idempotent: re-init tears
+/// the old session down first (dev verb may be re-issued to switch baud).
+/// `fast` selects 115200 instead of the module's 9600 default.
 #[inline(never)]
-pub fn init(low_baud: bool) {
+pub fn init(fast: bool) {
     let rcu = unsafe { &*pac::Rcu::ptr() };
     let gpioa = unsafe { &*pac::Gpioa::ptr() };
     let gpiob = unsafe { &*pac::Gpiob::ptr() };
@@ -90,6 +98,7 @@ pub fn init(low_baud: bool) {
     /* stop any previous session before reconfiguring */
     usart.ctl0().modify(|_, w| w.uen().disabled());
     dma.ch4ctl().modify(|_, w| w.chen().disabled());
+    dma.ch3ctl().modify(|_, w| w.chen().disabled());
 
     /* pins as the stock firmware configures them: AF, push-pull, pull-up */
     gpioa.afsel0().modify(|_, w| w.sel2().af1());
@@ -108,10 +117,32 @@ pub fn init(low_baud: bool) {
     rcu.apb1rst().modify(|_, w| w.usart1rst().clear_bit());
 
     /* 8N1, oversampling 16: BAUD = PCLK1 (48 MHz) / rate */
-    let div: u32 = if low_baud { 5000 } else { 417 };
+    let div: u32 = if fast { 417 } else { 5000 };
     usart.baud().write(|w| unsafe { w.bits(div) });
-    /* RX by DMA only — no USART interrupts, ever */
-    usart.ctl2().write(|w| w.denr().enabled());
+    /* both directions by DMA — no USART interrupts, ever */
+    usart.ctl2().write(|w| w.denr().enabled().dent().enabled());
+
+    /* one-shot TX on channel 3 (the fixed USART1_TX request); armed per
+     * message in `send` (count + enable), configured once here */
+    dma.intc().write(|w| w.gifc3().clear().ftfifc3().clear().errifc3().clear());
+    dma.ch3paddr()
+        .write(|w| unsafe { w.paddr().bits(usart.tdata().as_ptr() as u32) });
+    dma.ch3maddr()
+        .write(|w| unsafe { w.maddr().bits(TX_BUF.0.get() as u32) });
+    dma.ch3ctl().write(|w| {
+        w.dir()
+            .from_memory()
+            .pnaga()
+            .fixed()
+            .mnaga()
+            .increment()
+            .pwidth()
+            .bits8()
+            .mwidth()
+            .bits8()
+            .prio()
+            .low()
+    });
 
     /* circular RX ring on channel 4 (the fixed USART1_RX request) */
     dma.intc().write(|w| {
@@ -245,32 +276,57 @@ pub fn service(mut dispatch: impl FnMut(&[u8])) {
     }
 }
 
-/// Polled bounded TX. TBE/TC depend only on our own shift register (the
-/// module has no flow control), so the budget is pure paranoia. Err stages:
-/// 1 = TBE timeout, 2 = TC timeout, 3 = not initialized.
+/// True once the last DMA transfer has fully left the shifter (or none
+/// was ever started — TC is set at reset).
+fn tx_idle(dma: &pac::dma::RegisterBlock, usart: &pac::usart0::RegisterBlock) -> bool {
+    dma.ch3cnt().read().cnt().bits() == 0 && usart.stat().read().tc().bit_is_set()
+}
+
+/// Exclusive access to the TX buffer for building a reply in place (the
+/// 192-B getva packet must not live on the main-loop stack). Err 3 = link
+/// not initialized, 4 = previous transfer still on the wire.
 #[inline(never)]
-pub fn send(data: &[u8]) -> Result<(), u8> {
+pub fn tx_buf() -> Result<&'static mut [u8; TX_MAX], u8> {
     if mode() == 0 {
         return Err(3);
     }
+    let dma = unsafe { &*pac::Dma::ptr() };
     let usart = unsafe { &*pac::Usart1::ptr() };
-    for &b in data {
-        let mut budget = 50_000u32;
-        while usart.stat().read().tbe().bit_is_clear() {
-            budget -= 1;
-            if budget == 0 {
-                return Err(1);
-            }
-        }
-        usart.tdata().write(|w| unsafe { w.bits(b as u32) });
+    if !tx_idle(dma, usart) {
+        return Err(4);
     }
-    let mut budget = 50_000u32;
-    while usart.stat().read().tc().bit_is_clear() {
-        budget -= 1;
-        if budget == 0 {
-            return Err(2);
-        }
+    Ok(unsafe { &mut *TX_BUF.0.get() })
+}
+
+/// Start sending the first `n` bytes of the TX buffer (filled via
+/// `tx_buf`). Returns at once; the DMA finishes on its own.
+#[inline(never)]
+pub fn send_buf(n: usize) -> Result<(), u8> {
+    if n == 0 || n > TX_MAX {
+        return Err(5);
     }
-    mk(MK_BT_TX, mk_get(MK_BT_TX) + data.len() as u32);
+    let dma = unsafe { &*pac::Dma::ptr() };
+    let usart = unsafe { &*pac::Usart1::ptr() };
+    if mode() == 0 {
+        return Err(3);
+    }
+    if !tx_idle(dma, usart) {
+        return Err(4);
+    }
+    usart.intc().write(|w| w.tcc().clear()); /* TC re-sets when this transfer ends */
+    dma.ch3ctl().modify(|_, w| w.chen().disabled());
+    dma.ch3cnt().write(|w| w.cnt().bits(n as u16));
+    dma.ch3ctl().modify(|_, w| w.chen().enabled());
+    mk(MK_BT_TX, mk_get(MK_BT_TX) + n as u32);
     Ok(())
+}
+
+/// Copy `data` into the TX buffer and send it (short replies, dev verbs).
+#[inline(never)]
+pub fn send(data: &[u8]) -> Result<(), u8> {
+    if data.len() > TX_MAX {
+        return Err(5);
+    }
+    tx_buf()?[..data.len()].copy_from_slice(data);
+    send_buf(data.len())
 }

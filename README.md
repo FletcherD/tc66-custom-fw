@@ -35,6 +35,11 @@ gone) — our own protocol on top of a compatible base, and room to add features
   DMA-driven and non-blocking (SPI0 TX on DMA ch2, pumped from the main
   loop — bench-verified via the MK_DSP markers); the first frame draws
   pre-enumeration, so the screen is live from power-on.
+- **BLE: done.** The TC66C's DX-BT24-M module (USART1, 9600) is served
+  always-on: the stock `bgetva`/`bnextp`/`blastp` verbs plus our
+  `bquery`/`brawva`, RX by circular DMA, TX by DMA so a 200 ms reply never
+  stalls the loop. Bench-verified end to end with `tools/ble.py`
+  (`getva` decrypts a live packet over the air).
 - **Watchdog: done.** FWDGT (~13 s) armed at boot and fed from the main
   loop and the SRAM flasher; a hung loop reboots the meter instead of
   playing dead. Bench-verified (`tools/wdgtest.py`).
@@ -86,9 +91,8 @@ gone) — our own protocol on top of a compatible base, and room to add features
     event-loss mechanism) and stock-firmware Tier 2 comparison. (Both
     refactor branches are merged; the TFT loops are deliberately not in
     fast flash — DMA made them non-blocking instead.)
-  - Richer M3 screens (energy, temp, D±); **M4 — stretch** (BLE mirror;
-    USB-PD / QC trigger via the on-board FUSB302 — the KM003C protocol's
-    AdcQueue/PD-capture attributes are the natural wire format).
+  - Screen rotation (`rotat`/`brotat`), brightness setting, a PD/CC
+    status screen.
 
 ## Layout
 

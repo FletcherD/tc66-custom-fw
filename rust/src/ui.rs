@@ -33,7 +33,6 @@ const COLORS: [[u16; 3]; SCREENS as usize] = [
     [0xFD20, 0xF81F, 0xFFFF], /* mAh orange, mWh magenta, time white */
     [0xFBEA, 0xFFFF, 0xAFFF], /* temp salmon, D+ white, D- light blue */
 ];
-const ALL_DIRTY: u32 = (1 << (3 * COLS)) - 1;
 
 struct Racy<T>(core::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for Racy<T> {}
@@ -49,12 +48,11 @@ pub fn screen() -> u8 {
     unsafe { *SCREEN.0.get() }
 }
 
-/// Select a screen (wraps) and force a full repaint on the next `draw`.
+/// Select a screen (wraps). Poisons the char cache so the next `draw`
+/// marks every cell dirty (same char in a new color must repaint too).
 pub fn set_screen(n: u8) {
     unsafe {
         *SCREEN.0.get() = n % SCREENS;
-        *DIRTY.0.get() = ALL_DIRTY;
-        /* the char cache would suppress same-char cells; poison it */
         *LAST.0.get() = [[0; COLS]; 3];
     }
 }

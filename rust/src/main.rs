@@ -77,7 +77,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 106;
+const BUILD_ID: u32 = 108;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -264,6 +264,11 @@ fn run() -> ! {
      * line (ina.rs) — deliberately only now, after the grace window, so a
      * sampler/I2C fault stays escapable by power-cycle + `make flash`. */
     ina::start(&p.rcu, &p.timer5);
+
+    /* BLE link (bt.rs): USART1 + DMA rings, dispatch mode from the start —
+     * register-only setup, no waits; the module is a transparent bridge. */
+    bt::init(false);
+    bt::set_dispatch();
 
     /* 1 Hz energy integration (RAM only, starts at 0; persistence is M2):
      * every 250 ticks accumulate published I and P for one second.
@@ -549,9 +554,9 @@ fn on_packet(buf: &[u8]) {
     } else if match5(buf, b"btini") {
         #[cfg(feature = "dev-verbs")]
         {
-            /* dev verb: bring up the BLE UART in raw mode; `btini 9` uses
-             * the module's 9600 power-on default (TTM re-provisioning) */
-            bt::init(buf.len() >= 7 && buf[6] == b'9');
+            /* dev verb: (re)start the BLE UART in raw mode for module
+             * probing (btcmd/btget); `btini f` = 115200 instead of 9600 */
+            bt::init(buf.len() >= 7 && buf[6] == b'f');
             write_all(b"OK");
         }
     } else if match5(buf, b"btcmd") {
@@ -560,6 +565,12 @@ fn on_packet(buf: &[u8]) {
     } else if match5(buf, b"btget") {
         #[cfg(feature = "dev-verbs")]
         do_btget();
+    } else if match5(buf, b"btsta") {
+        #[cfg(feature = "dev-verbs")]
+        do_btsta();
+    } else if match5(buf, b"btspy") {
+        #[cfg(feature = "dev-verbs")]
+        do_btspy(buf);
     } else if match5(buf, b"btrun") {
         #[cfg(feature = "dev-verbs")]
         {
@@ -694,23 +705,29 @@ fn on_ble_line(line: &[u8]) {
     } else if line == b"brawva" {
         /* ours, not stock: the plaintext streaming reply over BLE */
         do_brawva();
+    } else if line == b"bnextp" {
+        ui::next_screen(); /* the 2 Hz refresh repaints */
+    } else if line == b"blastp" {
+        ui::set_screen(ui::screen() + ui::SCREENS - 1);
     }
 }
 
-/// `bgetva` -> the same 192-B encrypted packet as USB, out the module UART
-/// (~17 ms blocking at 115200 — the tick-delta cadences absorb it).
+/// `bgetva` -> the same 192-B encrypted packet as USB, built straight into
+/// the link's DMA buffer (never on this stack) and sent without waiting.
 #[inline(never)]
 fn do_bgetva() {
-    let mut reply = [0u8; 192];
-    getva::build(&mut reply, &live_fields());
-    let _ = bt::send(&reply);
+    if let Ok(buf) = bt::tx_buf() {
+        getva::build(buf, &live_fields());
+        let _ = bt::send_buf(192);
+    }
 }
 
 #[inline(never)]
 fn do_brawva() {
-    let mut reply = [0u8; getva::RAW_LEN];
-    getva::build_raw(&mut reply, &live_fields());
-    let _ = bt::send(&reply);
+    if let Ok(buf) = bt::tx_buf() {
+        getva::build_raw((&mut buf[..getva::RAW_LEN]).try_into().unwrap(), &live_fields());
+        let _ = bt::send_buf(getva::RAW_LEN);
+    }
 }
 
 /// dev verb: `btcmd <bytes>` — forward raw bytes (TTM commands) to the
@@ -723,6 +740,64 @@ fn do_btcmd(buf: &[u8]) {
         return;
     }
     reply_ok_er(bt::send(&buf[6..]));
+}
+
+/// dev verb: `btsta` -> "OK" + 7 x u32 LE: USART1 STAT, CTL0, BAUD,
+/// DMA CH4CTL, CH4CNT (RX ring), CH3CTL, CH3CNT (TX) — the link's plumbing.
+#[cfg(feature = "dev-verbs")]
+#[inline(never)]
+fn do_btsta() {
+    let rd = |a: u32| unsafe { core::ptr::read_volatile(a as *const u32) };
+    /* DMA CHxCTL = 0x08 + 0x14*x, CHxCNT = 0x0C + 0x14*x */
+    let words = [
+        rd(0x4000_4400 + 0x1C), /* USART1_STAT */
+        rd(0x4000_4400 + 0x00), /* USART1_CTL0 */
+        rd(0x4000_4400 + 0x0C), /* USART1_BAUD */
+        rd(0x4002_0000 + 0x08 + 0x14 * 4),
+        rd(0x4002_0000 + 0x0C + 0x14 * 4),
+        rd(0x4002_0000 + 0x08 + 0x14 * 3),
+        rd(0x4002_0000 + 0x0C + 0x14 * 3),
+    ];
+    let mut reply = [0u8; 30];
+    reply[..2].copy_from_slice(b"OK");
+    for (i, w) in words.iter().enumerate() {
+        reply[2 + 4 * i..6 + 4 * i].copy_from_slice(&w.to_le_bytes());
+    }
+    write_all(&reply);
+}
+
+/// dev verb: `btspy <port 0=A/1=B> <pin>` -> sample that pin's ISTAT bit
+/// for ~1 s (any GPIO mode) and reply "OK" + u32 transitions + u32 low
+/// samples + u32 total samples. Blocks the loop (dev verb — allowed).
+#[cfg(feature = "dev-verbs")]
+#[inline(never)]
+fn do_btspy(buf: &[u8]) {
+    let (Some(&port), Some(&pin)) = (buf.get(5), buf.get(6)) else {
+        write_all(&[b'E', b'R', 0x0F]);
+        return;
+    };
+    let istat = if port == 0 { 0x4800_0010 } else { 0x4800_0410 } as *const u32;
+    let mask = 1u32 << (pin & 15);
+    let t0 = ina::ticks();
+    let mut prev = unsafe { core::ptr::read_volatile(istat) } & mask;
+    let (mut trans, mut low, mut total) = (0u32, 0u32, 0u32);
+    while ina::ticks().wrapping_sub(t0) < 250 {
+        let v = unsafe { core::ptr::read_volatile(istat) } & mask;
+        total += 1;
+        if v == 0 {
+            low += 1;
+        }
+        if v != prev {
+            trans += 1;
+            prev = v;
+        }
+    }
+    let mut reply = [0u8; 14];
+    reply[..2].copy_from_slice(b"OK");
+    reply[2..6].copy_from_slice(&trans.to_le_bytes());
+    reply[6..10].copy_from_slice(&low.to_le_bytes());
+    reply[10..14].copy_from_slice(&total.to_le_bytes());
+    write_all(&reply);
 }
 
 /// dev verb: `btget` -> "OK" + whatever raw bytes the module sent (up to

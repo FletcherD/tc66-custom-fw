@@ -10,7 +10,7 @@ edition = "2021"
 # - pcprf: the TIMER5-veneer PC profiler (ina.rs) + its `pcprf` dump verb
 #   (without it TIMER5_DAC branches straight to the tick body).
 # - dev-verbs: the bring-up/debug verbs (i2crd adcrd clkrd keyrd rstrd
-#   wdtst uiscr tftfl tftbl tftui). query/getva/rawva/updat are the product protocol - never gated.
+#   wdtst uiscr tftfl tftbl tftui btini btcmd btget btrun btsta btspy). query/getva/rawva/updat are the product protocol - never gated.
 # - grace: the 10 s boot grace window (pseudo-bootloader escape hatch:
 #   query/updat only, sampler deferred — power-cycle + `make flash` recovers
 #   without K1). OFF by default since build 98; build `--features grace` when

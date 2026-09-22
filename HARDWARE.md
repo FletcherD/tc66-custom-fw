@@ -147,6 +147,11 @@ Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the firs
 | `rstrd` | `OK`+u32 LE | our dev verb: RCU_RSTSCK captured at boot (bit 29 = watchdog reset, 28 = software) (wdg.rs, tools/wdgtest.py) |
 | `wdtst` | `OK`, then the meter reboots in ~14 s | our dev verb: hang the main loop to prove the watchdog bites |
 | `uiscr` | `OK`+screen / `ER`+stage | our dev verb: `uiscr <n>` select screen n (no arg = next, like K1) and redraw to completion |
+| `btini` | `OK` | our dev verb: restart the BLE UART in raw mode for module probing (`btini f` = 115200 instead of 9600); `btrun` returns it to dispatch |
+| `btcmd` | `OK` / `ER`+stage | our dev verb: `btcmd <bytes>` send raw bytes to the module (DMA TX; ER 4 = previous transfer still going) |
+| `btget` | `OK`+bytes | our dev verb: drain up to 32 raw bytes received from the module (raw mode) |
+| `btsta` | `OK`+7×u32 LE | our dev verb: USART1 STAT/CTL0/BAUD, DMA CH4CTL/CNT (RX ring), CH3CTL/CNT (TX) |
+| `btspy` | `OK`+3×u32 LE | our dev verb: `btspy <port 0=A,1=B> <pin>` sample a pin for 1 s → transitions, low samples, total samples |
 | `tftfl` | `OK` / `ER`+stage | our dev verb: TFT test pattern (no args) or solid fill (RGB565 LE u16) (tools/tft.py) |
 | `tftbl` | `OK` / `ER`+stage | our dev verb: backlight PWM compare, LE u16 0..=999 (tools/tft.py) |
 | `tftui` | `OK` / `ER`+stage | our dev verb: force a main-screen refresh (tools/tft.py) |
@@ -160,7 +165,7 @@ Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the firs
 | `qcoff` | `OK` / `ER` | our dev verb: release the QC/AFC D+/D− pins (charger reverts to 5 V; restores D± ADC + SWD) |
 
 Keeping `getva` byte-compatible (same reply) lets existing host tools work
-unchanged. The dev/debug verbs (`i2crd adcrd clkrd keyrd rstrd wdtst uiscr tftfl tftbl tftui` — and
+unchanged. The dev/debug verbs (`i2crd adcrd clkrd keyrd rstrd wdtst uiscr tftfl tftbl tftui btini btcmd btget btrun btsta btspy` — and
 `pcprf` separately) sit behind default-on cargo features (`dev-verbs`,
 `pcprf`) so they can be dropped for flash space; disabled verbs match and
 silently do nothing.
@@ -379,9 +384,18 @@ The chip shares the INA226/EEPROM I²C bus — all access inside `ina::pause`.
   pull-up when released — verified with `keyrd`); polled, no EXTI.
 
 ### Bluetooth
-- A **DX-BT24** BLE module on **USART0** (UART). The BLE command set mirrors the USB
-  verbs with a `b` prefix + CRLF. (Note: the module's RF is weak on this board — a
-  hardware limitation, not a firmware issue.)
+- A **DX-BT24-M** BLE module on **USART1**: **TX = PA2 (AF1), RX = PB0 (AF4)**
+  (bench-confirmed: `btspy` counts the BLE-written edges on PB0). It is a
+  transparent UART↔GATT bridge — advertises as **`BT24-M`**, service `ffe0`,
+  notify `ffe1` (meter→host), write `ffe2` (host→meter) — running at its
+  **9600-baud power-on default**. It ignores the `TTM:BPS-115200`/`TTM:REN-TC66C`
+  provisioning strings the stock firmware carries (stock's normal path also
+  runs 9600; its provisioning routine additionally toggles **PA6**, presumably
+  a module control line — unverified, unused by us). Advertises whenever the
+  meter is powered; one connection at a time. The BLE command set mirrors the
+  USB verbs with a `b` prefix + CRLF (`bgetva` = the same 192-B packet, arrives
+  as one notification). RF is weak on this board — hardware, not firmware.
+  Host tool: `tools/ble.py` (uv script: scan / send / getva / rxtest / spy / sta).
 
 ### Energy integration
 - A 1 Hz timer integrates the mAh/mWh accumulators from the published V/I, so energy

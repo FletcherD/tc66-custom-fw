@@ -7,7 +7,11 @@ tft.rs + three screens in ui.rs — V/I/P, energy + run clock, temp/D± —
 with 15 s no-change screen-off; keys.rs polls K1/K2 — K1 next screen, K2
 held 1 s resets energy, any press wakes; `keyrd`/`uiscr` dev verbs), the
 FWDGT watchdog (wdg.rs, ~13 s, fed per loop pass + inside the flasher —
-bench-verified with tools/wdgtest.py; `rstrd` reads the reset cause), and the M4
+bench-verified with tools/wdgtest.py; `rstrd` reads the reset cause), the
+BLE link (bt.rs: DX-BT24-M on USART1 at 9600 — its power-on default, it
+ignores TTM provisioning — RX DMA ring + TX DMA, always-on dispatch of
+`bgetva`/`bquery`/`brawva`/`bnextp`/`blastp`; bench-verified with
+tools/ble.py), and the M4
 charge triggers (pd.rs: FUSB302 PD 2.0/3.0 sink — `pdctl`/`pdsta`/`pdcap`/
 `pdreq` + tools/pd.py, fixed PDOs + PPS + hard reset, bench-verified
 5-20 V and PPS 3.3-11 V; qc.rs: Quick Charge 2.0 D+/D− — `qctrg`/`qcoff`

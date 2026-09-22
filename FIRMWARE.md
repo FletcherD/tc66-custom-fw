@@ -36,6 +36,7 @@ the ina.rs module doc.
 | `ui.rs` | the three screens (V/I/P, mAh/mWh/run-time, temp/D+/D−), per-cell dirty tracking + async draw pump (`service`/`flush`), `tftui`/`uiscr` verb backends |
 | `keys.rs` | K1/K2 buttons (PF0/PF1, active-low, internal pull-up): 250 Hz debounced poll from the main loop, press-edge events; `keyrd` dev verb backend |
 | `wdg.rs` | free watchdog (FWDGT, ~13 s): armed right after clock init, fed once per main-loop pass (and by the SRAM flasher); captures the boot reset cause for `rstrd` |
+| `bt.rs` | BLE link: USART1 ↔ DX-BT24-M at 9600, RX circular DMA ring (ch4) drained by `service` into CRLF lines, TX one-shot DMA (ch3) from a static 192-B buffer in `.hibss`; `btini`/`btcmd`/`btget`/`btrun`/`btsta` verb backends |
 | `markers.rs` | SRAM debug marker map + helpers |
 
 ## Startup / linker
@@ -516,6 +517,25 @@ PD traffic.
   traffic is pending a PD source on the bench (the wire format is per spec but
   not yet round-tripped end-to-end).
 
+## BLE link (`bt.rs`)
+
+Always on from boot (right after `ina::start`): `bt::init(false)` +
+`set_dispatch()` are register-only, and the module bridges GATT writes to
+USART1 bytes with no handshake. `bt::service(on_ble_line)` runs every
+main-loop pass: it pops bytes the RX DMA ring received (write index from
+CH4CNT, consumer reads only behind it), assembles CR/LF lines, and
+dispatches `bgetva` (the 192-B packet, built straight into the TX DMA
+buffer via `tx_buf()`/`send_buf()` — never on the loop's stack), `bquery`
+→ `firm`, `brawva`, and the stock screen verbs `bnextp`/`blastp` (the 2 Hz
+refresh repaints). TX is a DMA on ch3: `send` returns immediately and
+refuses (Err 4) while the previous message is still on the wire (~200 ms
+for a packet at 9600) — measured: USB `getva` latency is unchanged while
+BLE replies stream. No interrupts: the two-IRQ rule stands. Dev verbs
+re-enter raw mode (`btini`, then `btcmd`/`btget` for module probing,
+`btrun` back to dispatch); `btspy` is a generic 1 s GPIO edge counter that
+settled the pinout, `btsta` dumps the USART/DMA registers. Host side:
+`tools/ble.py`. Markers: `MK_BT_*` block at 0x200010e8.
+
 ## Watchdog (`wdg.rs`)
 
 The FWDGT runs from IRC40K (/128, reload 4095: ~13 s nominal, ~8.7 s at the
@@ -594,8 +614,8 @@ Bump `BUILD_ID` in `main.rs` when flashing; reading `MK_BUILD` (0x20001060)
 back proves the new image is actually running.
 
 Cargo features (both default-on, droppable for flash space): `dev-verbs`
-(i2crd adcrd clkrd keyrd rstrd wdtst uiscr tftfl tftbl tftui — disabled verbs
-match and silently do nothing) and `pcprf` (the PC profiler + its verb). The product protocol
+(i2crd adcrd clkrd keyrd rstrd wdtst uiscr tftfl tftbl tftui btini btcmd btget
+btrun btsta btspy — disabled verbs match and silently do nothing) and `pcprf` (the PC profiler + its verb). The product protocol
 (query/getva/rawva/updat/powerz) is never gated.
 
 ### Fast-flash placement (`fast.x` + `make fast-gate`)
