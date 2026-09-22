@@ -389,9 +389,14 @@ The chip shares the INA226/EEPROM I²C bus — all access inside `ina::pause`.
   (bench-confirmed: `btspy` counts the BLE-written edges on PB0). It is a
   transparent UART↔GATT bridge — advertises as **`BT24-M`**, service `ffe0`,
   notify `ffe1` (meter→host), write `ffe2` (host→meter) — running at its
-  **9600-baud power-on default**. It ignores the `TTM:BPS-115200`/`TTM:REN-TC66C`
-  provisioning strings the stock firmware carries (stock's normal path also
-  runs 9600; its provisioning routine additionally toggles **PA6**, presumably
+  **9600 baud**. Its firmware (V3.2.0, DX-SMART `AT+` set, CRLF-terminated,
+  AT mode only while no BLE client is connected) answers every *query*
+  (`AT+VERSION`, `AT+BAUD` → `+BAUD=3`, `AT+NAME`, `AT+LADDR`, `AT+HELP`
+  banner) but rejects **every write** with `ERROR=104` — `AT+BAUD7` (115200)
+  in all syntaxes and even `AT+NAME` with the current value — so the baud
+  cannot be changed from the UART; the `TTM:BPS-115200`/`TTM:REN-TC66C`
+  strings in the stock firmware are for another module family and are
+  ignored too (stock's normal path also runs 9600; its provisioning routine additionally toggles **PA6**, presumably
   a module control line — unverified, unused by us). Advertises whenever the
   meter is powered; one connection at a time. The BLE command set mirrors the
   USB verbs with a `b` prefix + CRLF (`bgetva` = the same 192-B packet, arrives
