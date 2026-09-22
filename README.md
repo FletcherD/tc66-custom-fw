@@ -28,11 +28,16 @@ gone) — our own protocol on top of a compatible base, and room to add features
   stock encrypted+checksummed `getva` packet — plus our plaintext `rawva`
   verb with a window sequence number for fast lossless streaming
   (`tools/rawva.py`). Verified live on hardware.
-- **M3 — display basics: done.** ST7735S driver + always-on V/I/P main
-  screen, 15 s idle screen-off (burn-in protection). Pixel streaming is
+- **M3 — display: done.** ST7735S driver + three always-on screens
+  (V/I/P; mAh/mWh + run clock; temperature + D+/D−), K1 steps screens, K2
+  held 1 s resets energy, 15 s idle screen-off (burn-in protection; any
+  key press wakes it — `rust/src/keys.rs`). Pixel streaming is
   DMA-driven and non-blocking (SPI0 TX on DMA ch2, pumped from the main
   loop — bench-verified via the MK_DSP markers); the first frame draws
   pre-enumeration, so the screen is live from power-on.
+- **Watchdog: done.** FWDGT (~13 s) armed at boot and fed from the main
+  loop and the SRAM flasher; a hung loop reboots the meter instead of
+  playing dead. Bench-verified (`tools/wdgtest.py`).
 - **Fast-flash placement: done.** Hot path pinned below the GD32's 32 KB
   zero-wait flash boundary (`rust/fast.x` + `make fast-gate`): query 0.2 ms,
   rawva 0.6 ms, getva 2.3 ms round-trip (were 4.5/9/49); powerz sustains

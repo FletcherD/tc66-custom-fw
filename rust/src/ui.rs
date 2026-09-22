@@ -1,9 +1,14 @@
-//! M3 main screen: voltage, current, power on three colored lines.
+//! Main screens: three 8-cell lines each, switched with K1 (main.rs).
+//!
+//!   0  V / I / P            (yellow / cyan / green)
+//!   1  mAh / mWh / hh:mm:ss (energy since power-on or the last K2 reset)
+//!   2  temperature / D+ / D−
 //!
 //! Fixed layout of 8 monospace font cells per line (font.rs, 18x24). Cells
 //! are always fully overdrawn by the tft glyph engine, and only cells whose
 //! character changed since the last draw are touched, so updates are
-//! flicker-free and cheap (idle screen redraws nothing).
+//! flicker-free and cheap (idle screen redraws nothing). A screen switch
+//! marks every cell dirty (same char, different color must still repaint).
 //!
 //! Drawing is asynchronous: `draw` only formats the target text and marks
 //! changed cells dirty (cheap, never blocks); `service` — pumped every main
@@ -12,6 +17,7 @@
 //! to completion and is bounded by the engine's per-phase poll budgets.
 
 use crate::font;
+use crate::ina;
 use crate::tft;
 
 const COLS: usize = 8;
@@ -20,8 +26,14 @@ const Y0: u16 = 1;
 const Y_STEP: u16 = font::CELL_H + 3;
 
 const BG: u16 = 0x0000;
-/* line colors: V yellow, I cyan, P green (RGB565) */
-const COLORS: [u16; 3] = [0xFFE0, 0x07FF, 0x07E0];
+pub const SCREENS: u8 = 3;
+/* per-screen line colors (RGB565) */
+const COLORS: [[u16; 3]; SCREENS as usize] = [
+    [0xFFE0, 0x07FF, 0x07E0], /* V yellow, I cyan, P green */
+    [0xFD20, 0xF81F, 0xFFFF], /* mAh orange, mWh magenta, time white */
+    [0xFBEA, 0xFFFF, 0xAFFF], /* temp salmon, D+ white, D- light blue */
+];
+const ALL_DIRTY: u32 = (1 << (3 * COLS)) - 1;
 
 struct Racy<T>(core::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for Racy<T> {}
@@ -31,12 +43,43 @@ static LAST: Racy<[[u8; COLS]; 3]> = Racy(core::cell::UnsafeCell::new([[0; COLS]
  * job is kicked (LAST holds the char that was kicked — a later draw() that
  * changes the cell re-marks it, so an in-flight glyph is never stale-final) */
 static DIRTY: Racy<u32> = Racy(core::cell::UnsafeCell::new(0));
+static SCREEN: Racy<u8> = Racy(core::cell::UnsafeCell::new(0));
+
+pub fn screen() -> u8 {
+    unsafe { *SCREEN.0.get() }
+}
+
+/// Select a screen (wraps) and force a full repaint on the next `draw`.
+pub fn set_screen(n: u8) {
+    unsafe {
+        *SCREEN.0.get() = n % SCREENS;
+        *DIRTY.0.get() = ALL_DIRTY;
+        /* the char cache would suppress same-char cells; poison it */
+        *LAST.0.get() = [[0; COLS]; 3];
+    }
+}
+
+pub fn next_screen() {
+    set_screen(screen() + 1);
+}
 
 /// right-aligned decimal digits of `v` into `buf`, zero-padded
 fn digits(buf: &mut [u8], mut v: u32) {
     for b in buf.iter_mut().rev() {
         *b = b'0' + (v % 10) as u8;
         v /= 10;
+    }
+}
+
+/// right-aligned decimal digits with leading zeros blanked (last kept)
+fn digits_sp(buf: &mut [u8], v: u32) {
+    digits(buf, v);
+    let n = buf.len() - 1;
+    for b in buf.iter_mut().take(n) {
+        if *b != b'0' {
+            break;
+        }
+        *b = b' ';
     }
 }
 
@@ -60,15 +103,50 @@ fn fmt1_5(line: &mut [u8; COLS], val: u32, unit: u8) {
     line[7] = unit;
 }
 
-/// Format the screen from published values (units: 1e-4 V, 1e-5 A, 1e-4 W —
-/// the getva integers) and mark changed cells dirty. Never touches the
-/// hardware; `service`/`flush` do the drawing.
+/// Format the current screen from the published measurements (own
+/// snapshot — the caller's frame stays small) and `run_secs` (elapsed time
+/// since power-on / energy reset), then mark changed cells dirty. Never
+/// touches the hardware; `service`/`flush` do the drawing.
 #[inline(never)]
-pub fn draw(v_1e4: u32, i_1e5: u32, p_1e4: u32) {
+pub fn draw(run_secs: u32) {
+    let m = ina::snapshot();
     let mut lines = [[b' '; COLS]; 3];
-    fmt2_4(&mut lines[0], v_1e4, b'V');
-    fmt1_5(&mut lines[1], i_1e5, b'A');
-    fmt2_4(&mut lines[2], p_1e4, b'W');
+    match screen() {
+        0 => {
+            let (p, _) = ina::derive(m.v_1e4, m.i_1e5);
+            fmt2_4(&mut lines[0], m.v_1e4, b'V');
+            fmt1_5(&mut lines[1], m.i_1e5, b'A');
+            fmt2_4(&mut lines[2], p, b'W');
+        }
+        1 => {
+            digits_sp(&mut lines[0][0..5], m.mah.min(99_999));
+            lines[0][5..8].copy_from_slice(b"mAh");
+            digits_sp(&mut lines[1][0..5], m.mwh.min(99_999));
+            lines[1][5..8].copy_from_slice(b"mWh");
+            let t = &mut lines[2];
+            digits(&mut t[0..2], (run_secs / 3600).min(99));
+            t[2] = b':';
+            digits(&mut t[3..5], run_secs / 60 % 60);
+            t[5] = b':';
+            digits(&mut t[6..8], run_secs % 60);
+        }
+        _ => {
+            let t = &mut lines[0];
+            t[0] = b'T';
+            t[4] = if m.temp_c < 0 { b'-' } else { b' ' };
+            digits_sp(&mut t[5..7], m.temp_c.unsigned_abs().min(99));
+            t[7] = b'C';
+            for (row, (sign, d)) in [(b'+', m.dp_1e2), (b'-', m.dm_1e2)].iter().enumerate() {
+                let l = &mut lines[1 + row];
+                l[0] = b'D';
+                l[1] = *sign;
+                digits(&mut l[3..4], (d / 100).min(9));
+                l[4] = b'.';
+                digits(&mut l[5..7], d % 100);
+                l[7] = b'V';
+            }
+        }
+    }
 
     let last = unsafe { &mut *LAST.0.get() };
     let dirty = unsafe { &mut *DIRTY.0.get() };
@@ -102,7 +180,7 @@ pub fn service() -> Result<bool, u8> {
         X0 + col as u16 * font::ADV,
         Y0 + row as u16 * Y_STEP,
         ch,
-        COLORS[row],
+        COLORS[screen() as usize][row],
         BG,
     )?;
     *dirty &= !(1 << n);

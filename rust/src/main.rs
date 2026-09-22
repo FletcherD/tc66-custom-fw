@@ -53,6 +53,7 @@ mod font;
 mod getva;
 mod i2c;
 mod ina;
+mod keys;
 mod markers;
 #[cfg(feature = "dev-verbs")]
 mod pd;
@@ -63,6 +64,7 @@ mod startup;
 mod tft;
 mod ui;
 mod usb_bus;
+mod wdg;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use cortex_m_rt::entry;
@@ -74,7 +76,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 102;
+const BUILD_ID: u32 = 105;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -126,12 +128,16 @@ fn run() -> ! {
 
     let p = pac::Peripherals::take().unwrap();
     board::clock_init(&p.rcu);
+    /* watchdog armed before anything that can block; fed once per pass
+     * of every loop below and by the SRAM flasher (wdg.rs) */
+    wdg::start(&p.rcu);
 
     /* Force a fresh enumeration of THIS app: the bootloader handed off with D+
      * still pulled up and the host bound to the bootloader. Disconnect, bring
      * the stack up, reconnect. */
     board::pa9_config_output(&p.rcu, &p.gpioa);
     board::pa9_low(&p.gpioa);
+    keys::init(&p.rcu, &p.gpiof); /* K1/K2 inputs, polled from the loop */
     board::delay_ms(120);
 
     /* Composite device wearing the POWER-Z KM003C identity so the mainline
@@ -163,7 +169,7 @@ fn run() -> ! {
      * off for this boot (verbs can still retry it). Every wait in this
      * path is bounded and error-returning — a fault here would land
      * before the escape hatch opens, and K1 remains the backstop. */
-    ui::draw(0, 0, 0);
+    ui::draw(0);
     let mut tft_alive = ui::flush().is_ok();
 
     board::pa9_high(&p.gpioa);
@@ -232,6 +238,7 @@ fn run() -> ! {
         while acc < 480_000_000 {
             /* 10 s of core cycles */
             mk(MK_HEART, mk_get(MK_HEART) + 1);
+            wdg::feed();
             let c = cortex_m::peripheral::SYST::get_current();
             acc += prev.wrapping_sub(c) & 0x00FF_FFFF; /* down-counter */
             prev = c;
@@ -258,6 +265,10 @@ fn run() -> ! {
     let mut sec_ticks: u32 = 0;
     let mut acc_i_1e5s: u64 = 0;
     let mut acc_p_1e4s: u64 = 0;
+    /* seconds since power-on / last energy reset (energy screen clock) */
+    let mut run_secs: u32 = 0;
+    /* K2 held >= 1 s resets energy + run time; one shot per hold */
+    let mut k2_hold: u32 = 0;
 
     /* screen refresh every 125 ticks (0.5 s); only changed cells are drawn
      * (ui.rs dirty tracking), so an idle refresh costs nothing */
@@ -281,6 +292,7 @@ fn run() -> ! {
     let mut last_ticks = ina::ticks();
     loop {
         mk(MK_HEART, mk_get(MK_HEART) + 1);
+        wdg::feed();
         /* cal retries + the deferred window-end ADC burst (temp/D±) */
         ina::service();
         /* FUSB302 PD sink engine — no-op until armed by `pdctl 1` */
@@ -293,6 +305,29 @@ fn run() -> ! {
             /* refresh the pre-built powerz reply at tick cadence (own frame:
              * its 44-B buffer must not live in run()'s — stack-gate) */
             refresh_powerz_payload();
+            /* keys: any press wakes (or keeps awake) an idle-off screen;
+             * K1 = next screen, K2 held 1 s = energy/run-time reset */
+            let pressed = keys::poll();
+            if pressed != 0 && tft_alive {
+                idle_secs = 0;
+                let _ = tft::screen_on();
+                if pressed & 1 != 0 {
+                    ui::next_screen();
+                    ui::draw(run_secs);
+                }
+            }
+            if keys::held() & 2 != 0 {
+                k2_hold = k2_hold.saturating_add(elapsed);
+                if k2_hold >= 250 && k2_hold < 250 + elapsed {
+                    acc_i_1e5s = 0;
+                    acc_p_1e4s = 0;
+                    run_secs = 0;
+                    ina::set_energy(0, 0);
+                    ui::draw(run_secs);
+                }
+            } else {
+                k2_hold = 0;
+            }
             sec_ticks += elapsed;
             while sec_ticks >= 250 {
                 sec_ticks -= 250;
@@ -302,6 +337,7 @@ fn run() -> ! {
                 let (pw, _) = ina::derive(v, i);
                 acc_i_1e5s += i as u64;
                 acc_p_1e4s += pw as u64;
+                run_secs = run_secs.saturating_add(1);
                 ina::set_energy(
                     (acc_i_1e5s / 360_000) as u32,
                     (acc_p_1e4s / 36_000) as u32,
@@ -327,9 +363,7 @@ fn run() -> ! {
                 ui_ticks = 0;
                 /* format-only: marks changed cells dirty; the per-pass
                  * ui::service() below streams the glyphs out via DMA */
-                let (v, i) = ina::snapshot_vi();
-                let (pw, _) = ina::derive(v, i);
-                ui::draw(v, i, pw);
+                ui::draw(run_secs);
             }
         }
         /* advance the display DMA engine one poll (cheap when idle; at most
@@ -395,6 +429,30 @@ fn on_packet(buf: &[u8]) {
     } else if match5(buf, b"clkrd") {
         #[cfg(feature = "dev-verbs")]
         do_clkrd();
+    } else if match5(buf, b"rstrd") {
+        #[cfg(feature = "dev-verbs")]
+        {
+            /* "OK" + RCU_RSTSCK at boot (u32 LE; bit 29 = watchdog reset) */
+            let mut r = [b'O', b'K', 0, 0, 0, 0];
+            r[2..].copy_from_slice(&wdg::reset_cause().to_le_bytes());
+            write_all(&r);
+        }
+    } else if match5(buf, b"wdtst") {
+        #[cfg(feature = "dev-verbs")]
+        {
+            /* watchdog test: reply, then hang the thread until the FWDGT
+             * bites (~13 s) — the meter reboots and rstrd shows bit 29 */
+            write_all(b"OK");
+            loop {
+                cortex_m::asm::nop();
+            }
+        }
+    } else if match5(buf, b"keyrd") {
+        #[cfg(feature = "dev-verbs")]
+        {
+            /* "OK" + raw PF0/PF1 levels + debounced pressed mask (keys.rs) */
+            write_all(&[b'O', b'K', keys::raw(), keys::held()]);
+        }
     } else if match5(buf, b"pdctl") {
         #[cfg(feature = "dev-verbs")]
         {
@@ -500,10 +558,24 @@ fn on_packet(buf: &[u8]) {
         /* dev verb: draw/refresh the main screen from published values
          * (kick + pump to completion — dev verbs may block) */
         let _ = tft::screen_on();
-        let m = ina::snapshot();
-        let (p, _) = ina::derive(m.v_1e4, m.i_1e5);
-        ui::draw(m.v_1e4, m.i_1e5, p);
+        ui::draw(0);
         reply_ok_er(ui::flush());
+        }
+    } else if match5(buf, b"uiscr") {
+        #[cfg(feature = "dev-verbs")]
+        {
+        /* dev verb: uiscr <n> -> select screen n (as K1 would), redraw
+         * to completion; no arg = next screen. Replies OK + screen index. */
+        let _ = tft::screen_on();
+        match buf.get(5) {
+            Some(&n) => ui::set_screen(n),
+            None => ui::next_screen(),
+        }
+        ui::draw(0);
+        match ui::flush() {
+            Ok(()) => write_all(&[b'O', b'K', ui::screen()]),
+            Err(e) => write_all(&[b'E', b'R', e]),
+        }
         }
     } else if match5(buf, b"tftbl") {
         #[cfg(feature = "dev-verbs")]

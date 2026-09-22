@@ -67,6 +67,13 @@ unsafe fn bt_wr(ep: u32, field: u32, v: u16) {
     core::ptr::write_volatile((PMA_BASE + 16 * ep as usize + 4 * field as usize) as *mut u16, v)
 }
 
+/* FWDGT reload (wdg.rs): the erase + 810 chunks take ~1.3 s, but a stalled
+ * host must not turn into a watchdog reset mid-image. Plain MMIO write. */
+#[inline(always)]
+unsafe fn wdg_feed() {
+    core::ptr::write_volatile(0x4000_3000 as *mut u32, 0xAAAA);
+}
+
 /* Send `len` (<=6) bytes packed into three little-endian halfwords on the bulk
  * IN side of `ep`, and wait for the host to fetch them. */
 #[inline(always)]
@@ -92,6 +99,7 @@ extern "C" fn flasher_main(ep: u32) -> ! {
         let rx_pma = (PMA_BASE + 2 * bt_rd(ep, 2) as usize) as *const u16; /* ADDR_RX */
 
         /* erase the whole app region (we run from SRAM; bootloader code survives) */
+        wdg_feed();
         let erase: extern "C" fn(u32, u32, u32) = core::mem::transmute(BL_ERASE_PAGES);
         erase(APP_BASE, PAGE_SIZE, NUM_PAGES);
 
@@ -111,7 +119,9 @@ extern "C" fn flasher_main(ep: u32) -> ! {
         let wp = words.as_mut_ptr() as *mut u32;
         while off < IMAGE_BYTES {
             /* receive one 64-B chunk */
-            while epr_rd(ep) & 0x8000 == 0 {} /* wait CTR_RX */
+            while epr_rd(ep) & 0x8000 == 0 {
+                wdg_feed(); /* a host pause here must not reset us */
+            }
             let mut i = 0usize;
             while i < 16 {
                 /* word i = halfwords at rx_pma[+8i] | [+8i+4] (doubled addressing) */
