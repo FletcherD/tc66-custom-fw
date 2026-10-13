@@ -409,7 +409,7 @@ Related subtleties, all load-bearing:
   next attempt starts clean. Blocking wrappers exist where blocking is
   allowed: `tft::fill_rect`/`test_pattern` and `ui::flush` (dev verbs, boot).
 - The screens (`ui.rs` + `font.rs`): three 8-cell lines at fixed monospace
-  cell positions (18×24 px). Screen 0 is V/I/P (yellow/cyan/green), 1 is
+  cell positions (18×24 px). Screen 0 is V/I/P (green/yellow/cyan — V green and I yellow everywhere, plot included), 1 is
   the active energy group's mAh/mWh/run clock (persisted), 2 is temperature and
   D+/D−. K1 steps to the next screen (the index persists as a setting); K2
   held for 1 s zeroes the active group + its run clock and saves at once

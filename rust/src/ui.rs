@@ -1,6 +1,6 @@
 //! Main screens: three 8-cell lines each, switched with K1 (main.rs).
 //!
-//!   0  V / I / P            (yellow / cyan / green)
+//!   0  V / I / P            (green / yellow / cyan)
 //!   1  mAh / mWh / hh:mm:ss (energy since power-on or the last K2 reset)
 //!   2  temperature / D+ / D−
 //!   3  scrolling V/I plot   (plot.rs — full screen, no cells)
@@ -32,7 +32,7 @@ pub const SCREENS: u8 = 4;
 pub const PLOT: u8 = 3;
 /* per-screen line colors (RGB565) */
 const COLORS: [[u16; 3]; SCREENS as usize] = [
-    [0xFFE0, 0x07FF, 0x07E0], /* V yellow, I cyan, P green */
+    [0x07E0, 0xFFE0, 0x07FF], /* V green, I yellow, P cyan (V/I as on the plot) */
     [0xFD20, 0xF81F, 0xFFFF], /* mAh orange, mWh magenta, time white */
     [0xFBEA, 0xFFFF, 0xAFFF], /* temp salmon, D+ white, D- light blue */
     [0; 3],                   /* plot: no cells */

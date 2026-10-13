@@ -38,8 +38,8 @@ const W: u16 = tft::WIDTH;
 const H: u16 = tft::HEIGHT;
 const GRID_Y: u16 = H / 4;
 
-const C_V: u16 = 0xFFE0; /* yellow, as on screen 0 */
-const C_I: u16 = 0x07FF; /* cyan */
+const C_V: u16 = 0x07E0; /* green, as on screen 0 */
+const C_I: u16 = 0xFFE0; /* yellow, as on screen 0 */
 const C_GRID: u16 = 0x2104;
 const C_BG: u16 = 0x0000;
 
