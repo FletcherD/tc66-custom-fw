@@ -14,7 +14,7 @@
 //! Drawing is incremental: `draw` only formats the target text and marks
 //! changed cells dirty (cheap, never blocks); `service` — pumped every main
 //! loop pass — draws at most one dirty cell per pass, finishing its glyph
-//! DMA before returning (~4.5 ms; a full 24-cell screen ~125 ms).
+//! DMA before returning (~1 ms; a full 24-cell screen ~30 ms).
 //! `flush` (boot first frame, `tftui` verb) pumps to completion and is
 //! bounded by the engine's per-phase poll budgets.
 
@@ -182,7 +182,7 @@ pub fn draw(run_secs: u32) {
 }
 
 /// One pump pass: advance the tft engine; when it is idle, draw the next
-/// dirty cell to completion (at most one glyph per call, ~4.5 ms).
+/// dirty cell to completion (at most one glyph per call, ~1 ms).
 /// Ok(true) = engine idle and nothing left to draw. Err = a job failed and
 /// was torn down (caller drops the always-on refresh, as before).
 #[inline(never)]

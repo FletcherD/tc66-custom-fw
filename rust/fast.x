@@ -102,9 +102,18 @@ SECTIONS
     *(.text.*7tc66_fw5getva*);          /* build, build_raw (init is 56 B) */
     *(.text.*8do_getva* .text.*8do_rawva*);
 
-    /* (No TFT loops anywhere above, despite their profile share when they
-     * sat slow: the display is DMA-driven now and gets no fast-region
-     * budget.) */
+    /* --- tier 4b: the TFT pixel engine (glyph/fill DMA pump). In slow
+     * flash its row loop missed on nearly every call and its speed swung
+     * with layout (full redraw 0.15 s .. 1.3 s across unrelated commits).
+     * Init, backlight, rotation and scroll commands stay slow. --- */
+    *(.text.*7tc66_fw3tft7service*);
+    *(.text.*3tft9stage_row* .text.*3tft8dma_kick* .text.*3tft9pump_idle*);
+    *(.text.*3tft10start_char* .text.*3tft10start_fill*);
+    *(.text.*3tft19pixel_session_begin* .text.*3tft17pixel_session_end*);
+    *(.text.*3tft10set_window* .text.*3tft11spi_frame16*);
+    *(.text.*3tft13write_command* .text.*3tft10write_data*);
+    *(.text.*3tft14spi_write_byte* .text.*3tft13spi_wait_idle*);
+    *(.text.*7tc66_fw2ui7service*);
 
     /* --- tier 5: per-command helpers (spill fodder — fine either side) --- */
     *(.text.*11live_fields* .text.*11reply_ok_er*);

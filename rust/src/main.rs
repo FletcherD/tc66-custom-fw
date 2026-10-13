@@ -81,7 +81,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 121;
+const BUILD_ID: u32 = 122;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -402,7 +402,7 @@ fn run() -> ! {
             }
         }
         /* advance the display engine (cheap when idle; at most one glyph
-         * per pass, drawn to completion — ~4.5 ms). A failed job
+         * per pass, drawn to completion — ~1 ms). A failed job
          * disables the always-on refresh for this boot; verbs can retry. */
         if tft_alive && ui::service().is_err() {
             tft_alive = false;

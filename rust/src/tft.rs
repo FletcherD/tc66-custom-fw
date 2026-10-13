@@ -448,9 +448,9 @@ pub fn service() -> Result<bool, u8> {
 }
 
 /// Pump service() until the engine goes idle. Terminates because every
-/// phase carries a poll budget. Blocking: a glyph is ~4.5 ms (0.3 ms of
-/// SPI; the rest is this engine's slow-flash fetches), a full-screen fill
-/// ~8.5 ms.
+/// phase carries a poll budget. Blocking: a glyph is ~1 ms (0.3 ms of
+/// SPI), a full-screen fill ~8.5 ms. The engine lives in fast flash (fast.x
+/// tier 4b) — from slow flash a glyph cost 4.5-50 ms depending on layout.
 #[inline(never)]
 pub fn pump_idle() -> Result<(), u8> {
     loop {

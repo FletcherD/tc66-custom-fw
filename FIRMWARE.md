@@ -424,9 +424,12 @@ Related subtleties, all load-bearing:
   poisons the char cache so every cell repaints in the new colors. Cells are
   always fully overdrawn fg/bg (no clear → no flicker). `ui::draw` only
   formats and marks changed cells dirty (never blocks); the per-pass
-  `ui::service` draws at most one glyph per pass (~4.5 ms: 0.3 ms of SPI,
-  the rest slow-flash fetches of the row engine — a full screen ~125 ms),
-  so the idle 2 Hz refresh costs nothing. USB stays ISR-serviced throughout;
+  `ui::service` draws at most one glyph per pass (~1 ms, 0.3 ms of it SPI;
+  a full 24-cell screen ~30 ms — `tools/uitime.py` times it via `uiscr`),
+  so the idle 2 Hz refresh costs nothing. The pixel engine and
+  `ui::service` are pinned in fast flash (fast.x tier 4b): from slow flash
+  the same redraw took 0.15-1.3 s depending on where unrelated commits
+  shifted it. USB stays ISR-serviced throughout;
   only thread-mode command dispatch waits out the glyph. (One *row* per
   pass made characters visibly fill in one by one: a main-loop pass is
   ~0.6 ms, see "Fast-flash placement".) TFT init + first frame run at boot **before `pa9_high`**
@@ -705,8 +708,9 @@ calls; stack_gate.py collapses them in its call graph.
 
 When adding code, decide its region: hot loops → a fast.x tier (and check
 the fast-gate report); straight-line per-command code tolerates slow (one
-traversal costs µs — but see the cold-call cost below). The TFT path and
-the per-pass `pd`/`cfg`/`bt`/`ui`/`plot` service calls are slow-region.
+traversal costs µs — but see the cold-call cost below). The TFT pixel
+engine is fast (tier 4b); TFT init/commands, `ui::draw` and the per-pass
+`pd`/`cfg`/`bt`/`plot` service calls are slow-region.
 Re-measure with the PC profiler (below) after moving things.
 
 **Slow-region cost is per cold fetch, not a flat ~10x** (SysTick section
@@ -715,9 +719,12 @@ timing, 2026-10): `pd::service`'s ~15-instruction early-return path costs
 immediately — the slow region behaves like a tiny cache with ~40 µs
 misses, so code that alternates between several slow functions (a polling
 loop over `tft::service`/`stage_row`/`dma_kick`) misses on nearly every
-call. The steady-state main-loop pass is ~0.6 ms, almost all of it
-cold calls into slow-region service functions. Warm tight loops (AES) see
-the ~10x figure.
+call, and the cost is **layout-sensitive**: the identical glyph engine
+took 0.15 s or 1.3 s per full redraw depending only on how far unrelated
+code growth shifted it. Anything with a polling loop belongs in fast.x.
+The steady-state main-loop pass is ~0.6 ms, almost all of it cold calls
+into slow-region service functions. Warm tight loops (AES) see the ~10x
+figure.
 
 ### PC profiler (`pcprf` verb + tools/pcprofile.py)
 

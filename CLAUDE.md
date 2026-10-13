@@ -32,7 +32,9 @@ compatibility**. The sampler runs from the TIMER5 interrupt (250 Hz,
 interleaved INA226 reads — ina.rs), immune to main-loop blocking. The hot
 path is pinned below the GD32's 32 KB zero-wait flash boundary
 (`rust/fast.x` + `make fast-gate` — FIRMWARE.md "Fast-flash placement";
-query 0.2 / rawva 0.6 / getva 2.3 ms). Profile with the on-device PC
+query 0.2 / rawva 0.6 / getva 2.3 ms; the TFT pixel engine too — full
+redraw ~30 ms, tools/uitime.py). Slow-region cost is per cold fetch and
+layout-sensitive: anything with a polling loop belongs in fast.x. Profile with the on-device PC
 sampler (`pcprf` verb + tools/pcprofile.py; the DWT is a stub — never
 trust PCSR). For lossless host streaming use the plaintext `rawva` verb
 (window seq for dedup; tools/rawva.py); getva also carries the seq at
