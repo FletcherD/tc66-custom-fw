@@ -2,7 +2,7 @@
 //! `bcfgrd` / `bcfgwr` over BLE).
 //!
 //! A setting's id is its EEPROM word index — address = 0x2000 + 4·id — so
-//! the stock config block (HARDWARE.md "EEPROM layout") is used as-is and
+//! the stock config block (docs/HARDWARE.md "EEPROM layout") is used as-is and
 //! stock firmware keeps reading our values. Settings the stock firmware
 //! doesn't have live in our own block at 0x2060.. (id 24+, never touched by
 //! stock), guarded by a magic word at id 24.

@@ -14,8 +14,9 @@ cell (union of ink extents, so baselines align), and emits a Rust module:
 The firmware blits each cell with set-window + fg/bg expansion, so a full
 cell (including the blank space glyph) always overwrites what was there.
 
-Example (the main-screen font, Inconsolata Bold from the u8g2 font sources):
-  mkfont.py inb.otf 30 '0123456789 .-VAW' ../rust/src/font.rs
+Example (the main-screen font: font/inb.otf, Inconsolata LGC Bold, SIL OFL —
+font/OFL.txt):
+  mkfont.py font/inb.otf 30 '0123456789 .-VAWhm:TCD+vb' ../rust/src/font.rs
 """
 import sys
 

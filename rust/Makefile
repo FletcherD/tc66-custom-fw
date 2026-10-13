@@ -1,20 +1,23 @@
-# TC66 Rust firmware — build + flash. Mirrors reference-c/Makefile's flow.
-# Normal loop:  make flash      (hands-free via the running app's `updat`)
-# Recovery:     hold K1 while plugging in, then  make recover
+# TC66 Rust firmware — build + flash.
+# Dev loop:   make flash      (dev build, hands-free via the running app's `updat`)
+# Release:    make release    (product build: no dev verbs -> tc66fw-release.enc.bin)
+# Recovery:   hold K1 while plugging in, then  make recover
+# CI:         make gates      (build + every gate, dev and release feature sets)
 
 ELF = target/thumbv7m-none-eabi/release/tc66-fw
 
+# The dev loop adds the debug verbs + PC profiler to the default (release)
+# feature set; RELEASE=1 builds the defaults only. Extra features stack on
+# either: make flash FEATURES=grace
+DEV_FEATURES = dev-verbs pcprf
+CARGO_FEATURES = $(strip $(if $(RELEASE),,$(DEV_FEATURES)) $(FEATURES))
+
 all: tc66fw.pad.bin
 
-# FEATURES=grace (etc.) builds with extra cargo features: make flash FEATURES=grace
 build:
-	cargo build --release $(if $(FEATURES),--features $(FEATURES))
+	cargo build --release $(if $(CARGO_FEATURES),--features "$(CARGO_FEATURES)")
 	arm-none-eabi-size $(ELF)
 
-# cortex-m-rt's Reset copies __sidata -> __sdata..__edata and zeroes
-# __sbss..__ebss assuming contiguous VMAs inside RAM; a linker-script mistake
-# (e.g. INSERT AFTER .data pushing __edata to a disjoint address) turns that
-# into a boot-time RAM smear. Pin all four inside the real RAM region.
 init-gate: build
 	@arm-none-eabi-nm $(ELF) | python3 -c "import sys; \
 syms = {n: int(a,16) for a,_,n in (l.split() for l in sys.stdin) if n in ('__sdata','__edata','__sbss','__ebss')}; \
@@ -50,6 +53,19 @@ open('tc66fw.pad.bin','wb').write(d + b'\x00' * (51840 - len(d)))"
 flash: tc66fw.pad.bin
 	python3 ../tools/app_update.py tc66fw.pad.bin
 
+# Release image: the product feature set, AES-encrypted for the stock
+# bootloader (the format the vendor's own firmware images use). Recursive so
+# the build/gates run with RELEASE=1.
+release:
+	$(MAKE) RELEASE=1 tc66fw.enc.bin
+	cp tc66fw.enc.bin tc66fw-release.enc.bin
+	@echo "release image: rust/tc66fw-release.enc.bin"
+
+# Every gate on both feature sets (CI runs this on each push)
+gates:
+	$(MAKE) tc66fw.bin
+	$(MAKE) RELEASE=1 tc66fw.bin
+
 # Bootloader recovery path (AES image; hold K1 while plugging in first)
 tc66fw.enc.bin: tc66fw.bin
 	python3 ../tools/encrypt.py tc66fw.bin tc66fw.enc.bin
@@ -74,6 +90,6 @@ markers:
 
 clean:
 	cargo clean
-	rm -f tc66fw.bin tc66fw.pad.bin tc66fw.enc.bin
+	rm -f tc66fw.bin tc66fw.pad.bin tc66fw.enc.bin tc66fw-release.enc.bin
 
-.PHONY: all build flasher-gate init-gate stack-gate fast-gate flash recover markers clean
+.PHONY: all release gates build flasher-gate init-gate stack-gate fast-gate flash recover markers clean

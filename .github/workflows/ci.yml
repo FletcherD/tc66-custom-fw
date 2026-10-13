@@ -1,0 +1,28 @@
+name: CI
+
+# Every push and PR builds the firmware in both feature sets (dev and release)
+# and runs every build gate: flasher, init, stack, fast, image header. These
+# are what keep a change from silently breaking the boot path.
+on:
+  push:
+  pull_request:
+
+jobs:
+  gates:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install binutils + python deps
+        run: sudo apt-get update && sudo apt-get install -y binutils-arm-none-eabi python3-cryptography
+      - name: Install the pinned toolchain (rust/rust-toolchain.toml)
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --component rust-src --target thumbv7m-none-eabi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Build + gates (dev and release feature sets)
+        run: make gates

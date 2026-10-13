@@ -13,6 +13,7 @@ invisible); tick-cadence thread work is under-sampled.
 Usage: pcprofile.py <elf> [seconds] [--load VERB[:REPLYLEN]]
   --load getva:192   interleave a getva between polls (default: none)
 """
+import os
 import bisect
 import struct
 import subprocess
@@ -49,7 +50,7 @@ def main():
             return syms[i][2]
         return f"?{pc:#010x}"
 
-    sys.path.insert(0, "/home/fletcher/tc66-custom-fw/tools")
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import serial
     import tc66lib as t
     s = serial.Serial(t.meter_candidates()[0], 115200, timeout=2)

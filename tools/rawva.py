@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.9"
+# dependencies = ["pyserial"]
+# ///
 """Stream samples from the custom firmware's plaintext `rawva` verb.
 
 rawva reply (46 B, layout in rust/src/getva.rs): "raw1" magic, then LE u32

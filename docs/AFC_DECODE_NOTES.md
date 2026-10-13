@@ -3,8 +3,7 @@
 `afctr 0x46` drives a Samsung AFC charger from 5 V → 9 V, bench-verified
 (8.92 V), reliable across power-cycles; `afctr 0x08` returns it to 5 V. Lives in
 `qc.rs`; host tool sends `afctr <byte> [reps]`. The stock `charge_protocol_
-handshake` mode 4 is replicated register-for-register (see
-`/home/fletcher/tc66/firmware/ghidra/CHARGE_TRIGGER_FINDINGS.md`).
+handshake` mode 4 is replicated register-for-register (per our unpublished stock-firmware RE notes).
 
 ## What made it work (the four things, in order of discovery)
 
@@ -34,8 +33,7 @@ handshake` mode 4 is replicated register-for-register (see
      the Sping, so the byte is sent *during* the charger's Sping → contention →
      garbled byte → no switch. Fixed by the leading `wait_pb4(false,…)`.
 
-**Bench procedure:** the charger's state matters — power-cycle it (Kasa plug
-192.168.1.233, `kasa-plug` skill, `-t 5` cold) before a clean test. Our D+/D−
+**Bench procedure:** the charger's state matters — power-cycle it (mains off ~5 s, cold) before a clean test. Our D+/D−
 drive HW is proven independently (QC2.0 `qctrg` switches this charger to 9/12 V).
 
 ## FCP / SCP — SCAFFOLDED (qc.rs `fcp()`/`scp()`, verbs `fcptr`/`scptr`), UNTESTED

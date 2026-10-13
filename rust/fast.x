@@ -1,4 +1,4 @@
-/* Fast-flash placement (QUIRKS §4, FIRMWARE.md "Fast-flash placement"):
+/* Fast-flash placement (QUIRKS §4, docs/FIRMWARE.md "Fast-flash placement"):
  * the GD32F150 fetches zero-wait only below 0x0800_8000; above it every
  * cold fetch costs tens of µs. .fasttext pins the hot path directly after
  * the vector table; ordinary .text follows and spills past the boundary;

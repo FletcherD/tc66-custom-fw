@@ -308,7 +308,7 @@ def main():
         sys.exit(f"stack-gate FAIL: need {need} B > budget {budget} B "
                  f"(STACK_TOP-__ebss). Shrink deep-chain frames, keep the "
                  f"ISR shallow, or move one-shot init pre-unmask; see "
-                 f"FIRMWARE.md.")
+                 f"docs/FIRMWARE.md.")
     print("stack-gate ok")
 
 

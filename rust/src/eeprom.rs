@@ -1,5 +1,5 @@
 //! BL24C256 EEPROM (32 KB, 7-bit 0x50, 2-byte addressing, 64-B pages) on the
-//! shared I2C0 bus. Layout is the stock firmware's (HARDWARE.md "EEPROM
+//! shared I2C0 bus. Layout is the stock firmware's (docs/HARDWARE.md "EEPROM
 //! layout"), so stock and this firmware read each other's data.
 //!
 //! Every bus access runs inside `ina::pause` (the sampler ISR owns the bus

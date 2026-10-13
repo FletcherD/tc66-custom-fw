@@ -1,5 +1,9 @@
-#!/usr/bin/env python3
-"""Host side of the firmware's PD sink verbs (M4 bring-up, FUSB302).
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.9"
+# dependencies = ["pyserial"]
+# ///
+"""Host side of the firmware's PD sink verbs (FUSB302).
 
   pd.py arm            arm the sink engine (pdctl 1) — then plug the source in
   pd.py off            FUSB302 SW_RES + engine off (pdctl 0)
@@ -11,7 +15,10 @@
   pd.py watch [secs]   poll status at 2 Hz (default 20 s)
 
 DANGER: a granted request RAISES THE OUT-PORT VOLTAGE (9/12/15/20 V).
-Nothing should be attached downstream of the meter when triggering.
+Nothing should be attached downstream of the meter when triggering. `req`
+refuses PDOs above --max-v and asks for confirmation unless --yes
+(tools/trigger_guard.py). The firmware's trigger verbs are in every build
+(cargo feature `triggers`, on by default).
 """
 import sys
 import time
@@ -19,6 +26,7 @@ import time
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 import serial  # noqa: E402
 from tc66lib import meter_candidates  # noqa: E402
+import trigger_guard  # noqa: E402
 
 STATES = {
     0: "off",
@@ -73,6 +81,22 @@ def ok_er(r, what):
         print("%s: ER 0x%02x (%s)" % (what, e, ERRS.get(e, "I2C stage %d%s" % (e & 0x7F, " NACK/buserr" if e & 0x80 else ""))))
         return False
     sys.exit("garbled reply: %r" % r)
+
+
+def read_caps(s):
+    r = xfer(s, b"pdcap", 31)
+    if r[:2] != b"OK":
+        sys.exit("garbled pdcap reply: %r" % r)
+    return [int.from_bytes(r[3 + 4 * i : 7 + 4 * i], "little") for i in range(r[2])]
+
+
+def pdo_max_mv(pdo):
+    """Highest voltage a PDO can put on VBUS (fixed: its voltage; ranges: top)."""
+    if pdo >> 30 == 0:
+        return ((pdo >> 10) & 0x3FF) * 50
+    if pdo >> 30 == 3:
+        return ((pdo >> 17) & 0xFF) * 100
+    return ((pdo >> 20) & 0x3FF) * 50
 
 
 def decode_pdo(i, pdo):
@@ -137,9 +161,8 @@ def show_status(s):
 
 
 def main():
-    if len(sys.argv) < 2:
-        sys.exit(__doc__)
-    cmd = sys.argv[1]
+    guard, argv = trigger_guard.parse(__doc__)
+    cmd = argv[0]
     s = open_meter()
     if cmd == "arm":
         ok_er(xfer(s, b"pdctl\x01", 3), "arm")
@@ -150,26 +173,26 @@ def main():
     elif cmd == "status":
         show_status(s)
     elif cmd == "caps":
-        r = xfer(s, b"pdcap", 31)
-        if r[:2] != b"OK":
-            sys.exit("garbled pdcap reply: %r" % r)
-        n = r[2]
-        if not n:
+        pdos = read_caps(s)
+        if not pdos:
             print("no source capabilities stored (source attached? PD at all?)")
-        for i in range(n):
-            pdo = int.from_bytes(r[3 + 4 * i : 7 + 4 * i], "little")
+        for i, pdo in enumerate(pdos):
             print(decode_pdo(i + 1, pdo), " raw=0x%08x" % pdo)
     elif cmd == "req":
-        n = int(sys.argv[2], 0)
-        mv = int(float(sys.argv[3]) * 1000) if len(sys.argv) > 3 else 0
-        ma = int(float(sys.argv[4]) * 1000) if len(sys.argv) > 4 else 0
-        pkt = b"pdreq" + bytes([n]) + mv.to_bytes(2, "little") + ma.to_bytes(2, "little")
+        n = int(argv[1], 0)
+        mv = int(float(argv[2]) * 1000) if len(argv) > 2 else 0
+        ma = int(float(argv[3]) * 1000) if len(argv) > 3 else 0
+        pdos = read_caps(s)
+        if not 1 <= n <= len(pdos):
+            sys.exit("no PDO %d among the %d stored source caps (pd.py caps)" % (n, len(pdos)))
         what = "request PDO %d" % n + (" @ %.2f V" % (mv / 1000) if mv else "")
+        trigger_guard.confirm(guard, (mv or pdo_max_mv(pdos[n - 1])) / 1000, what)
+        pkt = b"pdreq" + bytes([n]) + mv.to_bytes(2, "little") + ma.to_bytes(2, "little")
         if ok_er(xfer(s, pkt, 3), what):
             time.sleep(0.7)
             show_status(s)
     elif cmd == "watch":
-        secs = float(sys.argv[2]) if len(sys.argv) > 2 else 20
+        secs = float(argv[1]) if len(argv) > 1 else 20
         end = time.time() + secs
         while time.time() < end:
             show_status(s)

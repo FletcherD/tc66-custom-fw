@@ -141,6 +141,8 @@ Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the firs
 | `cfgrd` | `OK`+total+start+n+n×14 B+CRC16 | ours: `cfgrd [start]` (ASCII decimal, default 0) — one page of ≤13 settings from index start: id u8, value/min/max u32 LE, flags u8 (bit0 read-only); CRC16/MODBUS over all preceding bytes; page until start + n == total (tools/cfg.py). BLE: `bcfgrd [start]` |
 | `cfgwr` | `OK` / `ER`+code | ours: `cfgwr <id> <value>` ASCII decimal; ER 0x0F bad args, 0x10 unknown id, 0x11 out of range, 0x12 read-only; applies at once, EEPROM write ~2 s after the last change |
 | `updat` | `uprdy`, then per-chunk `OK` | our app self-update |
+| `versn` | `OK`+ASCII `<semver>+<build>` | ours: firmware version, e.g. `OK0.1.0+128` (Cargo version + BUILD_ID) |
+| `eeprd` | `OK`+data / `ER`+code | ours: `eeprd <addr u16 LE> <len 1..=32>` read-only EEPROM read (ER 0x0F bad args, 0x21 out of range, 0x22 bus) — tools/tc66flash.py `backup-eeprom`, tools/eedump.py |
 | `rawva` | 46 B plaintext | our dev verb: getva fields + window seq, no AES — use for streaming (tools/rawva.py) |
 | `pcprf` | 516 B plaintext | our dev verb: PC-profiler ring dump (u32 counter + 128 u32 PCs; FIRMWARE.md "PC profiler", tools/pcprofile.py) |
 | `i2crd` | `OK`+data / `ER`+diag | our dev verb: raw I²C read (tools/i2cread.py) |
@@ -159,20 +161,24 @@ Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the firs
 | `tftfl` | `OK` / `ER`+stage | our dev verb: TFT test pattern (no args) or solid fill (RGB565 LE u16) (tools/tft.py) |
 | `tftbl` | `OK` / `ER`+stage | our dev verb: backlight PWM compare, LE u16 0..=999 (tools/tft.py) |
 | `tftui` | `OK` / `ER`+stage | our dev verb: force a main-screen refresh (tools/tft.py) |
-| `pdctl` | `OK` / `ER`+stage | our dev verb: PD sink engine off (0) / arm (1) / hard-reset (2) (pd.rs, tools/pd.py) |
-| `pdsta` | `OK`+20 B | our dev verb: PD engine state (layout: `pd::status`) |
-| `pdcap` | `OK`+n+n×4 B | our dev verb: received source PDOs (LE u32 each) |
-| `pdreq` | `OK` / `ER` | our dev verb: `pdreq <n> [mv u16][ma u16]` — request source PDO n (1-based; fixed, or PPS APDO with a setpoint) — **raises OUT voltage** |
-| `qctrg` | `OK` / `ER` | our dev verb: `qctrg <mode>` QC2.0 D+/D− trigger, mode 0/1/2/3 = 5/9/12/20 V (blocks ~1.5 s on first call) — **raises OUT voltage** (qc.rs, tools/qc.py) |
-| `qc3ct` | `OK` / `ER` | our dev verb: `qc3ct <dir> <count>` QC3.0 continuous, dir 0/1 = up/down, count 200 mV steps — **raises OUT voltage** |
-| `afctr` | `OK` / `ER` | our dev verb: `afctr <byte> [reps]` Samsung AFC serial trigger on D−, byte = voltage/current nibbles (0x46 = 9 V, 0x08 = 5 V); closed-loop (reads the charger Sping on PB4); first call blocks ~2.3 s on entry — **raises OUT voltage** (qc.rs) |
-| `qcoff` | `OK` / `ER` | our dev verb: release the QC/AFC D+/D− pins (charger reverts to 5 V; restores D± ADC + SWD) |
+| `pdctl` | `OK` / `ER`+stage | our trigger verb: PD sink engine off (0) / arm (1) / hard-reset (2) (pd.rs, tools/pd.py) |
+| `pdsta` | `OK`+20 B | our trigger verb: PD engine state (layout: `pd::status`) |
+| `pdcap` | `OK`+n+n×4 B | our trigger verb: received source PDOs (LE u32 each) |
+| `pdreq` | `OK` / `ER` | our trigger verb: `pdreq <n> [mv u16][ma u16]` — request source PDO n (1-based; fixed, or PPS APDO with a setpoint) — **raises OUT voltage** |
+| `qctrg` | `OK` / `ER` | our trigger verb: `qctrg <mode>` QC2.0 D+/D− trigger, mode 0/1/2/3 = 5/9/12/20 V (blocks ~1.5 s on first call) — **raises OUT voltage** (qc.rs, tools/qc.py) |
+| `qc3ct` | `OK` / `ER` | our trigger verb: `qc3ct <dir> <count>` QC3.0 continuous, dir 0/1 = up/down, count 200 mV steps — **raises OUT voltage** |
+| `afctr` | `OK` / `ER` | our trigger verb: `afctr <byte> [reps]` Samsung AFC serial trigger on D−, byte = voltage/current nibbles (0x46 = 9 V, 0x08 = 5 V); closed-loop (reads the charger Sping on PB4); first call blocks ~2.3 s on entry — **raises OUT voltage** (qc.rs) |
+| `qcoff` | `OK` / `ER` | our trigger verb: release the QC/AFC D+/D− pins (charger reverts to 5 V; restores D± ADC + SWD) |
 
 Keeping `getva` byte-compatible (same reply) lets existing host tools work
-unchanged. The dev/debug verbs (`i2crd adcrd clkrd keyrd rstrd wdtst idlrd uiscr tftfl tftbl tftui btini btcmd btget btrun btsta btspy` — and
-`pcprf` separately) sit behind default-on cargo features (`dev-verbs`,
-`pcprf`) so they can be dropped for flash space; disabled verbs match and
-silently do nothing.
+unchanged. Verbs are grouped by cargo feature (docs/DEVELOPMENT.md "Feature
+sets"): the product verbs above (`getva query rotat gtrec cfgrd cfgwr updat
+versn eeprd rawva`) are always served; the trigger verbs (`pdctl pdsta pdcap
+pdreq qctrg qc3ct afctr qcoff`) need `triggers` (in release builds); the dev
+verbs (`i2crd adcrd clkrd keyrd rstrd wdtst idlrd uiscr tftfl tftbl
+tftui btini btcmd btget btrun btsta btspy`, the untested `fcptr`/`scptr`) need
+`dev-verbs`, and `pcprf` its own `pcprf` feature — both only in dev builds.
+Disabled verbs match and silently do nothing.
 
 ### `getva` reply (192 B = three 64-byte blocks, AES-256-ECB)
 Key: `5821fa5601b2f02687ff1204622a4fb086f40260816f9a0ba7f106619ab87288`.
@@ -260,8 +266,7 @@ ten LE u32 fields, CRC16/MODBUS tail); client + deduping stream generator in
   measurement path — bus voltage/shunt read 0 until the IN port is fed.
 
 #### EEPROM layout (stock-compatible — both firmwares read each other's data)
-Recovered from the stock firmware (RE notes `~/tc66/firmware/ghidra/
-EEPROM_FINDINGS.md` + `PERSISTENCE_FINDINGS.md`); `tools/eedump.py show` decodes
+Recovered from the stock firmware (unpublished RE notes); `tools/eedump.py show` decodes
 an image or the live chip.
 
 | Range | Contents |
@@ -360,7 +365,7 @@ instead; this unit's serial is 55050.)
   that is OFF at reset — enable `RCU_CTL1.IRC14MEN` first or calibration
   (RSTCLB/CLB) hangs forever. This cost a debug cycle.
 - Channel map — **the stock firmware's, recovered from its ADC init**
-  (`~/tc66/firmware/ghidra/ADC_FINDINGS.md`; one board design, no revisions):
+  (one board design, no revisions):
   **ch0 = PA0 = NTC divider**, **ch1 = PA1 = D+**, **ch9 = PB1 = D−**,
   ch16 = internal die temp, ch17 = Vrefint. Stock puts exactly PA0/PA1/PB1 in
   analog mode, and so does adc.rs. **PB0 (ch8) is the BLE UART RX** (the
@@ -434,9 +439,8 @@ The chip shares the INA226/EEPROM I²C bus — all access inside `ina::pause`.
   notify `ffe1` (meter→host), write `ffe2` (host→meter) — running at its
   **9600 baud, and that cannot be changed on this unit.** Its firmware
   (V3.2.0) speaks the DX-SMART `AT+` set documented in the
-  "DX-BT24-M&BT24-T 串口应用指导" (vendor PDF, copy at
-  `~/tc66/docs/DX-BT24-M_BT24-T_UART_Application_Guide_CN.pdf`; the
-  hardware spec is `~/tc66/docs/DX-BT24-M.pdf`): `AT+<CMD><param>` +
+  "DX-BT24-M&BT24-T 串口应用指导" (DX-SMART vendor PDF; the
+  hardware spec is the DX-BT24-M datasheet): `AT+<CMD><param>` +
   CRLF, uppercase, AT mode only while no BLE client is connected. Queries
   all answer (`AT+VERSION`, `AT+BAUD` → `+BAUD=3`, `AT+NAME` → BT24-M,
   `AT+LADDR`, `AT+UUID/CHAR/WRITE`, `AT+PWRM`, `AT+NOTI`) and the

@@ -2,7 +2,7 @@
 """Fast-flash placement gate (make fast-gate).
 
 The GD32F150 fetches zero-wait only below FAST_END (0x0800_8000); above it
-every cold fetch costs tens of µs (QUIRKS.md §4, FIRMWARE.md "Fast-flash
+every cold fetch costs tens of µs (docs/QUIRKS.md §4, docs/FIRMWARE.md "Fast-flash
 placement"). fast.x pins the hot path (.fasttext) right after the vector
 table. This gate fails the build if .fasttext itself crosses FAST_END
 (nothing may spill silently — decide what to demote), or if any CRITICAL

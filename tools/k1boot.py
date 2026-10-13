@@ -2,7 +2,7 @@
 """Drive the TC66's K1 button from the host and enter the meter's bootloader
 hands-free.
 
-K1 (PF0) is wired to GP8 of the Pico debugprobe, whose (patched, see FIRMWARE.md)
+K1 (PF0) is wired to GP8 of the Pico debugprobe, whose (patched, see docs/FIRMWARE.md)
 firmware exposes GP8 as the CMSIS-DAP nRESET pin: open drain, so "release" is
 Hi-Z (K1's pull-up takes it high) and "hold" drives it low. We talk to it with
 the stock DAP_SWJ_Pins command over the CMSIS-DAP v2 bulk interface — no SWD

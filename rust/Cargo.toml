@@ -4,21 +4,27 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-# Both on by default; drop them (--no-default-features, or default-features
-# with a subset) if flash space is ever needed. Gated verbs match and
-# silently do nothing when disabled.
+# The default set is the RELEASE build (`make release`): the product protocol
+# (powerz, getva/rawva/query/updat/cfgrd/cfgwr/gtrec/eeprd/versn — never
+# gated) plus the charge triggers. The dev loop (`make flash`) adds
+# dev-verbs + pcprf. Gated verbs match and silently do nothing when disabled.
+# - triggers: the PD sink + QC/AFC D+/D- trigger verbs (pdctl pdsta pdcap
+#   pdreq qctrg qc3ct afctr qcoff), the PD engine service and the powerz PD
+#   capture attribute. A granted request RAISES THE OUT VOLTAGE.
+# - dev-verbs: the bring-up/debug verbs (i2crd adcrd clkrd keyrd rstrd
+#   wdtst idlrd uiscr tftfl tftbl tftui btini btcmd btget btrun btsta btspy)
+#   and the untested Huawei fcptr/scptr triggers.
 # - pcprf: the TIMER5-veneer PC profiler (ina.rs) + its `pcprf` dump verb
 #   (without it TIMER5_DAC branches straight to the tick body).
-# - dev-verbs: the bring-up/debug verbs (i2crd adcrd clkrd keyrd rstrd
-#   wdtst idlrd uiscr tftfl tftbl tftui btini btcmd btget btrun btsta btspy). query/getva/rawva/updat are the product protocol - never gated.
 # - grace: the 10 s boot grace window (pseudo-bootloader escape hatch:
 #   query/updat only, sampler deferred — power-cycle + `make flash` recovers
-#   without K1). OFF by default since build 98; build `--features grace` when
-#   bringing up risky new always-on code. Without it a boot-path fault needs
-#   K1 + `make recover`.
-default = ["pcprf", "dev-verbs"]
+#   without K1). OFF by default; build `--features grace` when bringing up
+#   risky new always-on code. Without it a boot-path fault needs K1 +
+#   `make recover`.
+default = ["triggers"]
+triggers = []
 pcprf = []
-dev-verbs = []
+dev-verbs = ["triggers"]
 grace = []
 
 [dependencies]

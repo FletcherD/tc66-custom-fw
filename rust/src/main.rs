@@ -58,12 +58,12 @@ mod i2c;
 mod ina;
 mod keys;
 mod markers;
-#[cfg(feature = "dev-verbs")]
+#[cfg(feature = "triggers")]
 mod pd;
 mod persist;
 mod plot;
 mod powerz;
-#[cfg(feature = "dev-verbs")]
+#[cfg(feature = "triggers")]
 mod qc;
 mod startup;
 mod tft;
@@ -81,7 +81,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 124;
+const BUILD_ID: u32 = 129;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -324,7 +324,7 @@ fn run() -> ! {
         /* cal retries + the deferred window-end ADC burst (temp/D±) */
         ina::service();
         /* FUSB302 PD sink engine — no-op until armed by `pdctl 1` */
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "triggers")]
         pd::service();
         let now = ina::ticks();
         let elapsed = now.wrapping_sub(last_ticks);
@@ -468,6 +468,10 @@ fn on_packet(buf: &[u8]) {
         reply_ok_er(cfg::write_cmd(&buf[5..]));
     } else if match5(buf, b"gtrec") {
         do_gtrec();
+    } else if match5(buf, b"eeprd") {
+        do_eeprd(buf);
+    } else if match5(buf, b"versn") {
+        do_versn();
     } else if match5(buf, b"rotat") {
         /* stock: toggle 180° rotation (persisted), no reply */
         toggle_rotation();
@@ -519,7 +523,7 @@ fn on_packet(buf: &[u8]) {
             write_all(&[b'O', b'K', keys::raw(), keys::held()]);
         }
     } else if match5(buf, b"pdctl") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "triggers")]
         {
             /* pdctl 0 = FUSB302 off (SW_RES), pdctl 1 = arm as PD sink,
              * pdctl 2 = send PD hard reset (source restarts caps at its
@@ -533,13 +537,13 @@ fn on_packet(buf: &[u8]) {
             reply_ok_er(r);
         }
     } else if match5(buf, b"pdsta") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "triggers")]
         do_pdsta();
     } else if match5(buf, b"pdcap") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "triggers")]
         do_pdcap();
     } else if match5(buf, b"pdreq") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "triggers")]
         {
             /* pdreq <n> [mv u16 LE] [ma u16 LE]: request source PDO n
              * (1-based); mv/ma only for a PPS APDO */
@@ -559,7 +563,7 @@ fn on_packet(buf: &[u8]) {
             reply_ok_er(r);
         }
     } else if match5(buf, b"qctrg") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "triggers")]
         {
             /* qctrg <mode>: QC2.0 D+/D- trigger, mode 0/1/2/3 = 5/9/12/20 V
              * (blocks ~1.5 s on the first call — QC entry). Raises OUT V. */
@@ -570,7 +574,7 @@ fn on_packet(buf: &[u8]) {
             reply_ok_er(r);
         }
     } else if match5(buf, b"qc3ct") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "triggers")]
         {
             /* qc3ct <dir> <count>: QC3.0 continuous, dir 0=up 1=down,
              * count 200 mV steps. First call runs entry (~1.5 s). */
@@ -581,7 +585,7 @@ fn on_packet(buf: &[u8]) {
             reply_ok_er(r);
         }
     } else if match5(buf, b"afctr") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "triggers")]
         {
             /* afctr <byte> [reps]: Samsung AFC serial request (byte = voltage
              * nibble<<4|current nibble; 9V=0x46). First call blocks ~2.25 s. */
@@ -600,7 +604,7 @@ fn on_packet(buf: &[u8]) {
         /* scptr: Huawei SCP request (stock mode-3 6-packet block). Blocks ~2.3 s. */
         reply_ok_er(qc::scp());
     } else if match5(buf, b"qcoff") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "triggers")]
         reply_ok_er(qc::off());
     } else if match5(buf, b"btini") {
         #[cfg(feature = "dev-verbs")]
@@ -755,6 +759,68 @@ fn do_pcprf() {
         }
         write_all(&chunk);
     }
+}
+
+/// eeprd <addr u16 LE> <len 1..=32> -> "OK" + len bytes of EEPROM, or
+/// "ER" + code (0x0F bad args, eeprom.rs E_*). Read-only; the user-facing
+/// backup path (tools/tc66flash.py backup-eeprom, tools/eedump.py).
+#[inline(never)]
+fn do_eeprd(buf: &[u8]) {
+    let (addr, len) = match (buf.get(5), buf.get(6), buf.get(7)) {
+        (Some(&lo), Some(&hi), Some(&n)) if (1..=32).contains(&n) => {
+            (lo as u16 | (hi as u16) << 8, n as usize)
+        }
+        _ => {
+            write_all(&[b'E', b'R', 0x0F]);
+            return;
+        }
+    };
+    let mut reply = [0u8; 34];
+    reply[..2].copy_from_slice(b"OK");
+    match eeprom::read(addr, &mut reply[2..2 + len]) {
+        Ok(()) => write_all(&reply[..2 + len]),
+        Err(e) => write_all(&[b'E', b'R', e]),
+    }
+}
+
+/// versn -> "OK" + ASCII "<semver>+<build>", e.g. "OK0.1.0+128"
+#[inline(never)]
+fn do_versn() {
+    let mut reply = [0u8; 32];
+    let n = version_str(&mut reply[2..]);
+    reply[..2].copy_from_slice(b"OK");
+    write_all(reply.get(..2 + n).unwrap_or(&reply));
+}
+
+/// "<semver>+<BUILD_ID>" (Cargo.toml version) into `out`; returns its length
+pub fn version_str(out: &mut [u8]) -> usize {
+    let v = env!("CARGO_PKG_VERSION").as_bytes();
+    let mut n = 0;
+    for &b in v.iter().chain(b"+".iter()) {
+        if let Some(d) = out.get_mut(n) {
+            *d = b;
+            n += 1;
+        }
+    }
+    let mut digits = [0u8; 10];
+    let mut k = 0;
+    let mut id = BUILD_ID;
+    loop {
+        digits[k % 10] = b'0' + (id % 10) as u8;
+        k += 1;
+        id /= 10;
+        if id == 0 || k == 10 {
+            break;
+        }
+    }
+    while k > 0 {
+        k -= 1;
+        if let Some(d) = out.get_mut(n) {
+            *d = digits[k % 10];
+            n += 1;
+        }
+    }
+    n
 }
 
 /// dev verb: same fields as getva, plaintext + CRC16, no AES — for fast
@@ -973,7 +1039,7 @@ fn do_clkrd() {
 }
 
 /// dev verb: pdsta -> "OK" + 20-byte PD engine state (layout: pd::status)
-#[cfg(feature = "dev-verbs")]
+#[cfg(feature = "triggers")]
 #[inline(never)]
 fn do_pdsta() {
     let mut reply = [0u8; 22];
@@ -985,7 +1051,7 @@ fn do_pdsta() {
 }
 
 /// dev verb: pdcap -> "OK" + count + count x 4-byte LE source PDOs
-#[cfg(feature = "dev-verbs")]
+#[cfg(feature = "triggers")]
 #[inline(never)]
 fn do_pdcap() {
     let mut reply = [0u8; 31];
@@ -1283,7 +1349,7 @@ fn refresh_powerz_payload() {
     with_usb(|_, pz, _| pz.set_payload(&pl));
 }
 
-/// Build the 44-byte powerz ADC payload (layout: powerz.rs / HARDWARE.md).
+/// Build the 44-byte powerz ADC payload (layout: powerz.rs / docs/HARDWARE.md).
 /// All uV/uA are our wire units scaled up (1e-4 V -> x100 uV, 1e-5 A ->
 /// x10 uA); Vcc1/Vcc2 come from the PD engine's CC sweep (live while armed,
 /// else 0), Vdd from the Vrefint ratio; temp is clamped at 0 (the kernel
@@ -1312,9 +1378,9 @@ fn powerz_payload() -> [u8; powerz::ADC_PAYLOAD_LEN] {
     /* Vcc1/Vcc2: CC-pin voltages from the PD engine's MDAC sweep — live
      * while the engine is armed (`pdctl 1`), 0 otherwise. Vdd: logic rail
      * via the Vrefint ratio (each window's ADC burst). */
-    #[cfg(feature = "dev-verbs")]
+    #[cfg(feature = "triggers")]
     let (c1, c2) = pd::cc_mv();
-    #[cfg(not(feature = "dev-verbs"))]
+    #[cfg(not(feature = "triggers"))]
     let (c1, c2) = (0u16, 0u16);
     put16(26, c1 as u32 * 10); /* mV -> 0.1 mV units */
     put16(28, c2 as u32 * 10);

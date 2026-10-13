@@ -3,7 +3,7 @@
 //!
 //! The monitor is a TI INA226 at 7-bit 0x4A (verified: manuf 0x5449, die
 //! 0x2260); registers read 16-bit big-endian after a 1-byte pointer write.
-//! Calibration model (HARDWARE.md, constants live in the EEPROM at 0x50):
+//! Calibration model (docs/HARDWARE.md, constants live in the EEPROM at 0x50):
 //!   V[1e-4 V] = (sum of 8 bus-voltage raws * gainV + offV) / 20000
 //!   biased    = shunt raw XOR 0x8000            (two's-complement -> offset-binary)
 //!   I[1e-5 A] = (((sum of 16 biased) - ref) * gainC / 10000) / 4
@@ -89,20 +89,20 @@ pub struct Cal {
     pub refz: u32,    // EEPROM 0x2058 (sum of 16 offset-binary shunt raws at 0 A)
 }
 
-/* ADC channels — the stock map, recovered from its ADC init (HARDWARE.md
+/* ADC channels — the stock map, recovered from its ADC init (docs/HARDWARE.md
  * "On-chip ADC"): PA0 = NTC, PA1 = D+, PB1 = D−. */
 const CH_NTC: u8 = 0;
 const CH_DP: u8 = 1;
 const CH_DM: u8 = 9;
 const CH_VREF: u8 = 17; /* internal 1.2 V reference -> Vdd for powerz */
 
-/// D± wire value per HARDWARE.md: sum-of-16 * 330 / 65520 -> 1e-2 V.
+/// D± wire value per docs/HARDWARE.md: sum-of-16 * 330 / 65520 -> 1e-2 V.
 fn d_line_1e2(sum16: u32) -> u32 {
     sum16 * 330 / 65520
 }
 
 /// NTC temperature — the STOCK model, recovered exactly from the stock
-/// firmware (HARDWARE.md "Temperature (NTC) & D±"): 10k @ 25 C, beta = 3450,
+/// firmware (docs/HARDWARE.md "Temperature (NTC) & D±"): 10k @ 25 C, beta = 3450,
 /// on the bottom of an 11.5k divider:
 ///   R = avg * 11500 / (4095 - avg);  T = 1/(1/298.15 + ln(R/10000)/3450)
 fn ntc_temp_c(sum16: u32) -> i32 {
@@ -167,7 +167,7 @@ pub fn cal_i(cal: &Cal, shunt_sum: u64, n: u64) -> i32 {
 /// Uncalibrated ("original") values from raw sums using the nominal design
 /// constants instead of the per-unit EEPROM trim: bus 1.25 mV/LSB; shunt
 /// 2.5 uV/LSB across the 15 mOhm design shunt = 500/3 uA/LSB. (This unit's
-/// trims sit within 0.3% of these nominals — HARDWARE.md.)
+/// trims sit within 0.3% of these nominals — docs/HARDWARE.md.)
 pub fn ori_uv(bus_sum: u64, n: u64) -> u32 {
     (bus_sum * 1250 / n) as u32
 }

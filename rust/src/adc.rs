@@ -1,5 +1,5 @@
 //! Polled on-chip ADC (F1-style: CLB calibration, SWRCST software trigger).
-//! Used for the NTC temperature divider and the D+/D- dividers (HARDWARE.md:
+//! Used for the NTC temperature divider and the D+/D- dividers (docs/HARDWARE.md:
 //! published D± = sum_of_16 * 330 / 65520 -> 1e-2 V). The channel map is the
 //! stock firmware's (recovered from its ADC init): ch0 = PA0 NTC, ch1 = PA1
 //! D+, ch9 = PB1 D−, ch16/17 internal — and exactly those three pins are put

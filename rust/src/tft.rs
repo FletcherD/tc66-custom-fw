@@ -1,6 +1,6 @@
 //! ST7735S TFT driver (160x80 RGB565, offset col+1/row+26) on SPI0.
 //! The transport, pins, init sequence, and offsets are the stock firmware's,
-//! recovered in tc66/firmware/ghidra/TFT_FINDINGS.md:
+//! recovered from its disassembly:
 //!   SCK=PA5, MOSI=PA7 (AF0), DC=PA4, RST=PA3, CS tied low (SW-NSS).
 //!   Backlight: enable=PA9 (already high — it doubles as the USB D+
 //!   soft-connect, board.rs), brightness=PB3 TIMER1 CH1 PWM.

@@ -4,7 +4,7 @@
 # dependencies = ["pyserial", "cryptography"]
 # ///
 """Poll `getva` over USB CDC once and print every decoded field (format:
-HARDWARE.md "getva reply"), including the per-block checksums.
+docs/HARDWARE.md "getva reply"), including the per-block checksums.
 
   getva.py
 """

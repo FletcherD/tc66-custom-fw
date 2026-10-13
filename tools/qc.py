@@ -1,5 +1,9 @@
-#!/usr/bin/env python3
-"""Host side of the QC2.0 D+/D- trigger dev verbs (qctrg/qcoff, pd.rs qc.rs).
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.9"
+# dependencies = ["pyserial"]
+# ///
+"""Host side of the QC2.0/3.0 D+/D- trigger verbs (qctrg/qcoff, pd.rs qc.rs).
 
   qc.py <5|9|12|20>    request that voltage via QC2.0 (first call blocks ~1.5 s
                        for QC entry) — then reads the meter's own bus voltage
@@ -10,6 +14,8 @@
   qc.py qc3            QC3.0 demo: enter, +10 steps, -5 steps, reading bus
 
 DANGER: a QC trigger RAISES THE OUT-PORT VOLTAGE. Nothing downstream.
+Voltage-raising commands refuse targets above --max-v and ask for
+confirmation unless --yes (tools/trigger_guard.py).
 Only works with a QC2.0-capable charger on IN (non-PD; a PD source ignores
 D+/D-). PA13/PA14 are SWDIO/SWCLK — SWD is dead until `qc.py off`.
 """
@@ -19,6 +25,7 @@ import time
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 import serial  # noqa: E402
 from tc66lib import meter_candidates  # noqa: E402
+import trigger_guard  # noqa: E402
 
 MODES = {5: 0, 9: 1, 12: 2, 20: 3}
 
@@ -62,22 +69,29 @@ def trig(s, volts):
     print("   bus: %.3f V" % (bus(s) or 0))
 
 
+QC3_STEP_V = 0.2
+
+
 def main():
-    if len(sys.argv) < 2:
-        sys.exit(__doc__)
+    guard, argv = trigger_guard.parse(__doc__)
     s = open_meter()
-    cmd = sys.argv[1]
+    cmd = argv[0]
     if cmd == "off":
         ok(xfer(s, b"qcoff"), "off")
     elif cmd == "sweep":
+        trigger_guard.confirm(guard, 20, "QC sweep 5 -> 20 V")
         for v in (5, 9, 12, 20, 5):
             trig(s, v)
     elif cmd in ("up", "down"):
-        n = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+        n = int(argv[1]) if len(argv) > 1 else 1
+        if cmd == "up":
+            now = bus(s) or 5.0
+            trigger_guard.confirm(guard, max(now, 5.0) + QC3_STEP_V * n, "QC3 +%d steps" % n)
         ok(xfer(s, b"qc3ct" + bytes([1 if cmd == "down" else 0, n])), "QC3 %s x%d" % (cmd, n))
         time.sleep(0.4 + 0.02 * n)
         print("   bus: %.3f V" % (bus(s) or 0))
     elif cmd == "qc3":
+        trigger_guard.confirm(guard, 5.0 + QC3_STEP_V * 11, "QC3 demo (+11 steps)")
         ok(xfer(s, b"qc3ct" + bytes([0, 1])), "QC3 enter+1up")  # entry (~1.5s)
         time.sleep(0.5)
         print("   base: %.3f V" % (bus(s) or 0))
@@ -93,6 +107,8 @@ def main():
         v = int(cmd)
         if v not in MODES:
             sys.exit("voltage must be one of 5 9 12 20")
+        if v > 5:
+            trigger_guard.confirm(guard, v, "QC %d V" % v)
         trig(s, v)
 
 

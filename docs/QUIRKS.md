@@ -161,8 +161,8 @@ The stock firmware is production code running on this exact silicon —
 a uniquely good discriminator, in two tiers:
 
 **Tier 1 — static analysis (free, no flashing): DONE (2026-08-25).** Answers
-below; full write-up + Ghidra annotations in
-`~/tc66/firmware/ghidra/STOCK_USB_ARCH.md`.
+below; full write-up + Ghidra annotations in our unpublished
+stock-firmware RE notes.
 
 - **Vector table — does stock use the USBD interrupt?** YES. A real USBD ISR is
   installed at vector idx 53 (**IRQ37 = USBD_LP**), `usbd_lp_isr @0x08007ee0`

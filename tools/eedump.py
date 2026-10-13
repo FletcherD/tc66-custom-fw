@@ -4,13 +4,13 @@
 # dependencies = ["pyserial", "tqdm"]
 # ///
 """Dump or decode the meter's 32 KB EEPROM (BL24C256) via the custom
-firmware's `i2crd` dev verb (32 B per transaction, read-only).
+firmware's read-only `eeprd` verb (32 B per transaction; every build).
 
   eedump.py dump out.bin [--start A] [--len N]   raw image (default: all 32 KB)
   eedump.py show <image.bin>                     decode config, energy ring, datalog
   eedump.py show --live                          dump the persistence regions, then decode
 
-Layout: HARDWARE.md "EEPROM layout" (stock-compatible).
+Layout: docs/HARDWARE.md "EEPROM layout" (stock-compatible).
 """
 import argparse
 import os
@@ -19,7 +19,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tqdm import tqdm  # noqa: E402
-from i2cread import i2crd, open_meter  # noqa: E402
+from i2cread import open_meter  # noqa: E402
 
 SIZE = 0x8000
 CHUNK = 32
@@ -45,6 +45,15 @@ def crc16_modbus(data):
     return crc
 
 
+def eeprd(s, addr, n):
+    s.reset_input_buffer()
+    s.write(b"eeprd" + struct.pack("<HB", addr, n))
+    r = s.read(2 + n)
+    if r[:2] == b"OK" and len(r) == 2 + n:
+        return r[2:]
+    raise IOError("eeprd %#06x: %r" % (addr, r))
+
+
 def read_range(s, start, length):
     out = bytearray()
     with tqdm(total=length, unit="B", unit_scale=True, desc="eeprom") as bar:
@@ -53,7 +62,7 @@ def read_range(s, start, length):
             n = min(CHUNK, start + length - a)
             for attempt in range(3):
                 try:
-                    out += i2crd(s, 0x50, [a >> 8, a & 0xFF], n)
+                    out += eeprd(s, a, n)
                     break
                 except IOError:
                     if attempt == 2:

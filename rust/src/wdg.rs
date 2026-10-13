@@ -35,6 +35,7 @@ pub fn feed() {
     unsafe { core::ptr::write_volatile(0x4000_3000 as *mut u32, 0xAAAA) };
 }
 
+#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
 pub fn reset_cause() -> u32 {
     RESET_CAUSE.load(core::sync::atomic::Ordering::Relaxed)
 }

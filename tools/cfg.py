@@ -30,7 +30,7 @@ Wire format (rust/src/cfg.rs):
                        start + n == total
   cfgwr <id> <val>  (ASCII decimal args) -> "OK" | "ER" + code
 A setting's id is its EEPROM word index: address = 0x2000 + 4 * id (the
-stock firmware's config block, HARDWARE.md "EEPROM layout").
+stock firmware's config block, docs/HARDWARE.md "EEPROM layout").
 """
 import argparse
 import os

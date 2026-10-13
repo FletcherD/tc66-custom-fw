@@ -1,6 +1,6 @@
 //! M2 persistence: the two energy groups + run clock (wear-leveled EEPROM
 //! ring), the datalogger ring behind `gtrec`, and the per-unit serial
-//! number. Layouts are the stock firmware's (HARDWARE.md "EEPROM layout"),
+//! number. Layouts are the stock firmware's (docs/HARDWARE.md "EEPROM layout"),
 //! so stock and this firmware pick up each other's totals.
 //!
 //! Energy ring 0x0000..0x2000: 256 slots × 32 B, each

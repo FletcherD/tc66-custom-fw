@@ -376,6 +376,7 @@ pub fn afc(cmd: u8, reps: u8) -> Result<(), u8> {
  * the stock scan probes 0xc8=200 and 0xdc=220). */
 
 /// CRC-8, poly 0x39, init 0x00, MSB-first, over `data` (`crc8_huawei`).
+#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
 fn crc8(data: &[u8]) -> u8 {
     let mut crc = 0u8;
     for &b in data {
@@ -410,6 +411,7 @@ fn accp_entry() {
 /// Send the 3 leading `01` sync pings (900 µs apart), then each command packet.
 /// A packet is `[opcode, reg, (val…)]`; `crc8` is appended here. ASSUMPTION:
 /// data packets use flag=true, gap = 10 ms (see the module note).
+#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
 fn accp_exchange(packets: &[&[u8]]) {
     for k in 0..3 {
         proto_send_word(&[0x01], false); /* sync ping, flag=0 */
@@ -434,6 +436,7 @@ fn accp_exchange(packets: &[&[u8]]) {
 /// `fcptr`: Huawei FCP 9 V request. Entry, 3 pings, then the stock mode-2
 /// 6-packet exchange: read regs 04/21/31, write VOUT_CONFIG 0x2c = 90 (→ 9 V,
 /// 100 mV units), read it back, write OUTPUT_CONTROL 0x2b = 1 (commit).
+#[cfg(feature = "dev-verbs")] /* untested — not in release builds */
 pub fn fcp() -> Result<(), u8> {
     config_pins();
     accp_entry();
@@ -452,6 +455,7 @@ pub fn fcp() -> Result<(), u8> {
 /// exchange: enable (CTRL_BYTE0 0xa0 = 0xc0), 0xa1 = 0x06, write16 regs
 /// 0xb0/0xb2, set voltage code 0xca = 0xc8 (raw scale — volts unknown), 0xcb =
 /// 0x64. `scp_set_voltage` (not ported) patches 0xca + CRC for other voltages.
+#[cfg(feature = "dev-verbs")] /* untested — not in release builds */
 pub fn scp() -> Result<(), u8> {
     config_pins();
     accp_entry();

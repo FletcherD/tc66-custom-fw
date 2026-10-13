@@ -434,7 +434,9 @@ Related subtleties, all load-bearing:
   pass made characters visibly fill in one by one: a main-loop pass is
   ~0.6 ms, see "Fast-flash placement".) TFT init + first frame run at boot **before `pa9_high`**
   via `ui::flush()` — the init's ~400 ms of delays must not stall USB
-  enumeration, and the blocking pump there is required. A failed job
+  enumeration, and the blocking pump there is required. The first ~2 s
+  show a splash (`TC66` / `v<semver>` / `b<build>`, white — `ui::draw`
+  counts down `SPLASH` per draw call) before the saved screen. A failed job
   disables the always-on refresh for that boot (`tft_alive`), keeping a
   wedged SPI/DMA from slowing the loop; the dev verbs can still retry.
   Display diagnostics live in the `MK_DSP_*` marker block (0x200010d0):
@@ -676,10 +678,15 @@ All wrapped in `rust/Makefile`:
 Bump `BUILD_ID` in `main.rs` when flashing; reading `MK_BUILD` (0x20001060)
 back proves the new image is actually running.
 
-Cargo features (both default-on, droppable for flash space): `dev-verbs`
-(i2crd adcrd clkrd keyrd rstrd wdtst idlrd uiscr tftfl tftbl tftui btini btcmd
-btget btrun btsta btspy — disabled verbs match and silently do nothing) and `pcprf` (the PC profiler + its verb). The product protocol
-(query/getva/rawva/updat/powerz) is never gated.
+Cargo features (rust/Cargo.toml; DEVELOPMENT.md "Feature sets"): the
+default set is the release build — `triggers` (PD/QC/AFC verbs, the PD
+engine service, the powerz PD attribute). The dev loop (`make flash`) adds
+`dev-verbs` (bring-up/debug verbs + the untested fcptr/scptr; implies
+`triggers`) and `pcprf` (the PC profiler + its verb); `grace` is opt-in.
+Disabled verbs match and silently do nothing. The product protocol
+(query/getva/rawva/updat/cfgrd/cfgwr/gtrec/eeprd/versn/powerz) is never
+gated. CI (`.github/workflows/ci.yml`) runs `make gates` — every gate on
+both feature sets — on each push.
 
 ### Fast-flash placement (`fast.x` + `make fast-gate`)
 
@@ -743,8 +750,7 @@ the same split.
 
 The chip's DWT is a stub (PCSR reads 0xFFFFFFFF, CYCCNT never counts), so
 hardware PC sampling is unavailable. Instead the TIMER5_DAC entry veneer
-(ina.rs, cargo feature `pcprf`, default on — `--no-default-features` drops
-it) records the interrupted context's PC from the exception frame into a
+(ina.rs, cargo feature `pcprf`, in dev builds only) records the interrupted context's PC from the exception frame into a
 128-entry SRAM ring at 0x2000_1100 (markers.rs) at 250 Hz; the `pcprf`
 verb dumps counter+ring over CDC and `tools/pcprofile.py <elf> [secs]
 [--load getva:192]` polls, dedups, symbolizes, and histograms — no SWD, no
@@ -761,7 +767,7 @@ tick-cadence thread work is under-sampled; the polling itself is visible
 - Background SRAM reads work while the core runs: debug via the **SRAM marker
   map** (`markers.rs`) + `make markers`.
 - If serial goes quiet after a markers read, **power-cycle the meter's hub
-  port** (the `usb-hub-power` skill; the meter is on port b2) and it comes back.
+  port** (or replug it) and it comes back.
 - `probe-rs`/`defmt`/RTT are **not usable** (they need halt). Flash via
   `updat`/bootloader, debug via markers + serial + the `i2crd`/`adcrd` dev verbs.
 

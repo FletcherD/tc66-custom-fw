@@ -3,8 +3,10 @@
 *.elf
 *.bin
 *.map
-# this unit's EEPROM backup (dumped via tools/i2cread.py / the i2crd verb)
-!eeprom-backup.bin
+# this unit's EEPROM backup (factory calibration) — local only, never commit
+eeprom-backup.bin
+# vendor datasheets/manuals — not redistributable, keep local copies only
+*.pdf
 # Rust
 /rust/target/
 # Python

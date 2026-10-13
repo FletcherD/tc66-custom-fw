@@ -1,6 +1,6 @@
 //! Real `getva` reply builder (M1).
 //!
-//! Wire format (HARDWARE.md): 192-B plaintext = 3 x 64-B blocks pac1/pac2/pac3,
+//! Wire format (docs/HARDWARE.md): 192-B plaintext = 3 x 64-B blocks pac1/pac2/pac3,
 //! little-endian u32 fields, **CRC16/MODBUS of bytes 0..60 stored LE at 60..64
 //! of each block** (verified against the known-good static packet), then
 //! AES-256-ECB encrypted with the meter's fixed key.

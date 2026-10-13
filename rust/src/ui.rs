@@ -5,6 +5,9 @@
 //!   2  temperature / D+ / D−
 //!   3  scrolling V/I plot   (plot.rs — full screen, no cells)
 //!
+//! The first ~2 s after boot show a splash instead: "TC66", the semver and
+//! the build id (white).
+//!
 //! Fixed layout of 8 monospace font cells per line (font.rs, 18x24). Cells
 //! are always fully overdrawn by the tft glyph engine, and only cells whose
 //! character changed since the last draw are touched, so updates are
@@ -48,6 +51,10 @@ static LAST: Racy<[[u8; COLS]; 3]> = Racy(core::cell::UnsafeCell::new([[0; COLS]
  * changes the cell re-marks it, so an in-flight glyph is never stale-final) */
 static DIRTY: Racy<u32> = Racy(core::cell::UnsafeCell::new(0));
 static SCREEN: Racy<u8> = Racy(core::cell::UnsafeCell::new(0));
+/* boot splash (name + version): draw() calls left to show it — the boot
+ * frame plus the main loop's 2 Hz refresh, so ~2 s */
+static SPLASH: Racy<u8> = Racy(core::cell::UnsafeCell::new(5));
+const SPLASH_COLOR: u16 = 0xFFFF;
 
 pub fn screen() -> u8 {
     unsafe { *SCREEN.0.get() }
@@ -127,11 +134,36 @@ fn fmt1_5(line: &mut [u8; COLS], val: u32, unit: u8) {
 /// touches the hardware; `service`/`flush` do the drawing.
 #[inline(never)]
 pub fn draw(run_secs: u32) {
+    let splash = unsafe { &mut *SPLASH.0.get() };
     if screen() == PLOT {
+        *splash = 0;
         return;
     }
-    let m = ina::snapshot();
     let mut lines = [[b' '; COLS]; 3];
+    if *splash > 0 {
+        *splash -= 1;
+        if *splash > 0 {
+            /* "  TC66" / "v<semver>" / "b<build>" */
+            lines[0][2..6].copy_from_slice(b"TC66");
+            let mut v = [b' '; 16];
+            let n = crate::version_str(&mut v);
+            let s = v.get(..n).unwrap_or(&[]);
+            let (semver, build) = s.split_at(s.iter().position(|&c| c == b'+').unwrap_or(0));
+            lines[1][0] = b'v';
+            for (d, &c) in lines[1][1..].iter_mut().zip(semver) {
+                *d = c;
+            }
+            lines[2][0] = b'b';
+            for (d, &c) in lines[2][1..].iter_mut().zip(build.iter().skip(1)) {
+                *d = c;
+            }
+            mark_dirty(&lines);
+            return;
+        }
+        /* splash over: repaint every cell in the screen's own colors */
+        unsafe { *LAST.0.get() = [[0; COLS]; 3] };
+    }
+    let m = ina::snapshot();
     match screen() {
         0 => {
             let (p, _) = ina::derive(m.v_1e4, m.i_1e5);
@@ -169,6 +201,11 @@ pub fn draw(run_secs: u32) {
         }
     }
 
+    mark_dirty(&lines);
+}
+
+/// Store the target characters and mark the cells that changed dirty.
+fn mark_dirty(lines: &[[u8; COLS]; 3]) {
     let last = unsafe { &mut *LAST.0.get() };
     let dirty = unsafe { &mut *DIRTY.0.get() };
     for (row, line) in lines.iter().enumerate() {
@@ -205,7 +242,11 @@ pub fn service() -> Result<bool, u8> {
         X0 + col as u16 * font::ADV,
         Y0 + row as u16 * Y_STEP,
         ch,
-        COLORS[screen() as usize][row],
+        if unsafe { *SPLASH.0.get() } > 0 {
+            SPLASH_COLOR
+        } else {
+            COLORS[screen() as usize][row]
+        },
         BG,
     )?;
     *dirty &= !(1 << n);

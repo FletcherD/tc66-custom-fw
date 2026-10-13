@@ -9,7 +9,7 @@
 //! Control header:  [type:7|ext:1][tid][attr15<<1 LE]  (GetData attr 1 = ADC
 //! arrives as 0c tid 02 00). Data header: [0x41][tid][len-words LE]. Extended
 //! header: attr | chunk<<16 | size<<22, LE u32. Protocol reference:
-//! github.com/okhsunrog/km003c-protocol-research (see HARDWARE.md).
+//! github.com/okhsunrog/km003c-protocol-research (see docs/HARDWARE.md).
 
 use usb_device::bus::{InterfaceNumber, UsbBus, UsbBusAllocator};
 use usb_device::class::UsbClass;
@@ -205,7 +205,7 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
     /// attribute) — so the ADC fast-path is untouched. Empty ring still
     /// returns the 12-byte measurement preamble.
     fn build_pd(&mut self, tid: u8) {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "triggers")]
         {
             let reply = unsafe { &mut *PD_REPLY.0.get() };
             let payload = crate::pd::drain_pd_packet(&mut reply[8..PD_REPLY_MAX]);
@@ -219,8 +219,8 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
             self.pd_pending = 8 + payload;
             self.flush();
         }
-        #[cfg(not(feature = "dev-verbs"))]
-        self.queue(&[RSP_REJECT, tid, 0, 0]); /* no PD engine without dev-verbs */
+        #[cfg(not(feature = "triggers"))]
+        self.queue(&[RSP_REJECT, tid, 0, 0]); /* no PD engine without triggers */
     }
 }
 
