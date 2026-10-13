@@ -18,12 +18,16 @@ that link's verbs except query/updat/cfg*), idle_off_s (screen-off after
 N s without a reading change, 0 = never), idle_dv_mv / idle_di_ma (a 1 s
 V / I change above this keeps the screen on; 0 disables that trigger, both
 0 = always time out), log_on (datalog recording), log_clear (write 1 =
-empty the datalog).
+empty the datalog), plot_period_ms (plot column period; 160 columns span
+the screen), plot_v_full_mv / plot_i_full_ma (plot full scale = top edge;
+changing either restarts the plot).
 
 Wire format (rust/src/cfg.rs):
-  cfgrd             -> "OK" + n + n x (id u8, value u32 LE, min u32 LE,
-                       max u32 LE, flags u8) + CRC16/MODBUS (LE) over all
-                       preceding bytes
+  cfgrd [start]     -> "OK" + total u8 + start u8 + n u8 + n x (id u8,
+                       value u32 LE, min u32 LE, max u32 LE, flags u8) +
+                       CRC16/MODBUS (LE) over all preceding bytes; at most
+                       13 entries per reply (one BLE buffer) — page until
+                       start + n == total
   cfgwr <id> <val>  (ASCII decimal args) -> "OK" | "ER" + code
 A setting's id is its EEPROM word index: address = 0x2000 + 4 * id (the
 stock firmware's config block, HARDWARE.md "EEPROM layout").
@@ -54,6 +58,9 @@ NAMES = {
     27: "log_clear",
     28: "idle_dv_mv",
     29: "idle_di_ma",
+    30: "plot_period_ms",
+    31: "plot_v_full_mv",
+    32: "plot_i_full_ma",
 }
 IDS = {v: k for k, v in NAMES.items()}
 
@@ -96,24 +103,32 @@ def read_reply(s, n_min, cap=2.0):
     return buf
 
 
-def cfgrd(s):
+def cfgrd_page(s, start):
     s.reset_input_buffer()
-    s.write(b"cfgrd")
-    head = read_reply(s, 3)
+    s.write(b"cfgrd" if start == 0 else f"cfgrd {start}".encode())
+    head = read_reply(s, 5)
     if head[:2] != b"OK":
         raise RuntimeError(f"cfgrd: {head!r}")
-    n = head[2]
-    total = 3 + 14 * n + 2
-    buf = head + read_reply(s, total - len(head))
-    if len(buf) < total:
-        raise RuntimeError(f"cfgrd: short reply {len(buf)}/{total} B")
-    if crc16_modbus(buf[: total - 2]) != struct.unpack_from("<H", buf, total - 2)[0]:
+    total, first, n = head[2], head[3], head[4]
+    size = 5 + 14 * n + 2
+    buf = head + read_reply(s, size - len(head))
+    if len(buf) < size:
+        raise RuntimeError(f"cfgrd: short reply {len(buf)}/{size} B")
+    if crc16_modbus(buf[: size - 2]) != struct.unpack_from("<H", buf, size - 2)[0]:
         raise RuntimeError("cfgrd: CRC mismatch")
-    out = []
-    for k in range(n):
-        sid, val, lo, hi, flags = struct.unpack_from("<BIIIB", buf, 3 + 14 * k)
-        out.append((sid, val, lo, hi, flags))
-    return out
+    rows = [struct.unpack_from("<BIIIB", buf, 5 + 14 * k) for k in range(n)]
+    return total, first, rows
+
+
+def cfgrd(s):
+    """Every setting as (id, value, min, max, flags), paging the reply."""
+    out, start = [], 0
+    while True:
+        total, first, rows = cfgrd_page(s, start)
+        out += rows
+        start = first + len(rows)
+        if not rows or start >= total:
+            return out
 
 
 def cfgwr(s, sid, value):

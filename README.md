@@ -31,7 +31,8 @@ gone) — our own protocol on top of a compatible base, and room to add features
 - **M2 — persistence: done (bench-verified build 113).** Stock-compatible
   EEPROM layout, so stock and custom firmware read each other's data:
   settings (rotation, brightness 0–9, screen, active energy group, screen
-  idle-off, datalog on/interval, USB/BLE command disable) read/written with
+  idle-off delay + wake thresholds, plot period + scale, datalog
+  on/interval, USB/BLE command disable) read/written with
   `cfgrd`/`cfgwr` (`tools/cfg.py`; BLE `bcfgrd`/`bcfgwr`), coalesced writes;
   run count + config-page serial in getva; both energy groups + run clocks
   in a wear-leveled, CRC-tagged ring (survive power cuts, ≤10 s lost);
@@ -42,8 +43,9 @@ gone) — our own protocol on top of a compatible base, and room to add features
   cut mid-session (torn-slot fallback) and the K2-hold reset.
 - **M3 — display: done.** ST7735S driver + four always-on screens
   (V/I/P; mAh/mWh + run clock; temperature + D+/D−; a full-screen
-  scrolling V/I plot using the panel's hardware scroll — `plot.rs`), K1 steps screens, K2
-  held 1 s resets energy, 15 s idle screen-off (burn-in protection; any
+  scrolling V/I plot using the panel's hardware scroll — `plot.rs`; period
+  and V/I full scale are settings), K1 steps screens, K2
+  held 1 s resets energy, idle screen-off (settings: delay + V/I thresholds) (burn-in protection; any
   key press wakes it — `rust/src/keys.rs`). Pixel streaming is
   DMA-driven and non-blocking (SPI0 TX on DMA ch2, pumped from the main
   loop — bench-verified via the MK_DSP markers); the first frame draws

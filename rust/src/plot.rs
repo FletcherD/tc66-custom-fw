@@ -16,11 +16,23 @@
 use crate::ina;
 use crate::tft;
 
-/* hardcoded for now: column period, full scale (top edge) of each trace */
-const PERIOD_TICKS: u32 = 125; /* 0.5 s at 250 Hz -> 160 columns = 80 s */
-const V_FULL_1E4: u32 = 200_000; /* 20 V; gridlines every 5 V */
-const I_FULL_1E5: u32 = 400_000; /* 4 A; gridlines every 1 A */
-const GRID_X: u32 = 20; /* a vertical gridline every 10 s */
+/* Column period and the traces' full scale (top edge) are settings
+ * (cfg.rs: plot_period_ms, default 500 ms -> 160 columns = 80 s;
+ * plot_v_full_mv / plot_i_full_ma, default 20 V / 4 A — gridlines at 1/4
+ * steps). */
+const GRID_X: u32 = 20; /* a vertical gridline every 20 columns */
+
+/// Column period in 4 ms sampler ticks (≥ 5: the setting's floor is 20 ms).
+fn period_ticks() -> u32 {
+    (crate::cfg::get(crate::cfg::ID_PLOT_PERIOD) / 4).max(1)
+}
+/// Full scale in wire units (1e-4 V, 1e-5 A).
+fn v_full() -> u32 {
+    crate::cfg::get(crate::cfg::ID_PLOT_V_FULL).max(1) * 10
+}
+fn i_full() -> u32 {
+    crate::cfg::get(crate::cfg::ID_PLOT_I_FULL).max(1) * 100
+}
 
 const W: u16 = tft::WIDTH;
 const H: u16 = tft::HEIGHT;
@@ -77,6 +89,14 @@ pub fn enter() {
     st().stage = ST_ENTER;
 }
 
+/// A scale setting changed: restart the plot if it is showing (the old
+/// history is at the old scale).
+pub fn rescale() {
+    if st().stage != ST_OFF {
+        enter();
+    }
+}
+
 /// Another screen selected: exit scroll mode + clear (no-op if not shown).
 pub fn leave() {
     let p = st();
@@ -87,7 +107,7 @@ pub fn leave() {
 
 /// Trace row of `val` at full scale `full` (0 = bottom edge, clamped top).
 fn row(val: u32, full: u32) -> u16 {
-    let s = val.min(full) * (H as u32 - 1) / full;
+    let s = (val.min(full) * (H as u32 - 1)).checked_div(full).unwrap_or(0);
     H - 1 - s as u16
 }
 
@@ -127,19 +147,19 @@ pub fn service() -> Result<bool, u8> {
             p.n = 0;
             p.pend = false;
             p.prev = None;
-            p.last_tick = ina::ticks().wrapping_sub(PERIOD_TICKS);
+            p.last_tick = ina::ticks().wrapping_sub(period_ticks());
             p.stage = ST_RUN;
             Ok(false)
         }
         ST_RUN => {
             if !p.pend {
                 let now = ina::ticks();
-                if now.wrapping_sub(p.last_tick) < PERIOD_TICKS {
+                if now.wrapping_sub(p.last_tick) < period_ticks() {
                     return Ok(true);
                 }
                 p.last_tick = now;
                 let (v, i) = ina::snapshot_vi();
-                let (vy, iy) = (row(v, V_FULL_1E4), row(i, I_FULL_1E5));
+                let (vy, iy) = (row(v, v_full()), row(i, i_full()));
                 let (pv, pi) = p.prev.unwrap_or((vy, iy));
                 p.v = span(vy, pv);
                 p.i = span(iy, pi);

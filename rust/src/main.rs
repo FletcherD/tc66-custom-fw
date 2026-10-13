@@ -81,7 +81,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 118;
+const BUILD_ID: u32 = 119;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -458,7 +458,8 @@ fn on_packet(buf: &[u8]) {
     } else if match5(buf, b"rawva") {
         do_rawva();
     } else if match5(buf, b"cfgrd") {
-        do_cfgrd();
+        /* cfgrd [start] — one page of the settings table (cfg::dump) */
+        do_cfgrd(cfg::dump_start(&buf[5..]));
     } else if match5(buf, b"cfgwr") {
         /* cfgwr <id> <value> (ASCII decimal) — cfg.rs */
         reply_ok_er(cfg::write_cmd(&buf[5..]));
@@ -711,12 +712,12 @@ fn do_getva() {
     write_all(&reply);
 }
 
-/// `cfgrd` -> every setting with its range (layout: cfg::dump).
+/// `cfgrd [start]` -> one page of settings with their ranges (cfg::dump).
 #[inline(never)]
-fn do_cfgrd() {
-    let mut reply = [0u8; cfg::DUMP_LEN];
-    cfg::dump(&mut reply);
-    write_all(&reply);
+fn do_cfgrd(start: usize) {
+    let mut reply = [0u8; cfg::DUMP_MAX];
+    let n = cfg::dump(&mut reply, start);
+    write_all(&reply[..n.min(cfg::DUMP_MAX)]);
 }
 
 /// `gtrec` (stock): every datalog record as its own 8-B packet (V, I as
@@ -773,8 +774,8 @@ fn on_ble_line(line: &[u8]) {
             Err(e) => bt::send(&[b'E', b'R', e]),
         };
         return;
-    } else if line == b"bcfgrd" {
-        do_bcfgrd();
+    } else if line.starts_with(b"bcfgrd") {
+        do_bcfgrd(cfg::dump_start(&line[6..]));
         return;
     }
     /* ble_cmd_off setting (stock 0x203c): everything but the settings
@@ -799,15 +800,16 @@ fn on_ble_line(line: &[u8]) {
     }
 }
 
-/* the whole settings table must fit the BLE TX buffer (one notification
- * burst); past ~13 settings cfgrd needs paging */
-const _: () = assert!(cfg::DUMP_LEN <= bt::TX_MAX);
+/* a cfgrd page must fit the BLE TX buffer (one notification burst) */
+const _: () = assert!(cfg::DUMP_MAX <= bt::TX_MAX);
 
 #[inline(never)]
-fn do_bcfgrd() {
+fn do_bcfgrd(start: usize) {
     if let Ok(buf) = bt::tx_buf() {
-        cfg::dump((&mut buf[..cfg::DUMP_LEN]).try_into().unwrap());
-        let _ = bt::send_buf(cfg::DUMP_LEN);
+        if let Some(page) = buf.first_chunk_mut::<{ cfg::DUMP_MAX }>() {
+            let n = cfg::dump(page, start);
+            let _ = bt::send_buf(n);
+        }
     }
 }
 

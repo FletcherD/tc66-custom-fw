@@ -27,6 +27,9 @@ pub const ID_LOG_ON: u8 = 26;
 pub const ID_LOG_CLEAR: u8 = 27;
 pub const ID_IDLE_DV: u8 = 28;
 pub const ID_IDLE_DI: u8 = 29;
+pub const ID_PLOT_PERIOD: u8 = 30;
+pub const ID_PLOT_V_FULL: u8 = 31;
+pub const ID_PLOT_I_FULL: u8 = 32;
 
 const ID_MAGIC: u8 = 24; /* our block's validity word (0x2060) */
 const MAGIC: u32 = 0x5443_4657; /* "WFCT" LE */
@@ -58,7 +61,7 @@ struct Def {
 /* Stock defaults except rotation: stock's default 0 (MADCTL 0x68) is
  * upside-down on this unit's mounting; 2 is the bench-verified orientation
  * and what an unreadable EEPROM falls back to. */
-const DEFS: [Def; 13] = [
+const DEFS: [Def; 16] = [
     Def { id: ID_GROUP, min: 0, max: 1, def: 0, flags: 0 },
     Def { id: ID_ROTATION, min: 0, max: 2, def: 2, flags: 0 },
     Def { id: ID_BRIGHTNESS, min: 0, max: 9, def: 6, flags: 0 },
@@ -72,8 +75,15 @@ const DEFS: [Def; 13] = [
     Def { id: ID_LOG_CLEAR, min: 0, max: 1, def: 0, flags: ACTION },
     Def { id: ID_IDLE_DV, min: 0, max: 30_000, def: 100, flags: OURS },
     Def { id: ID_IDLE_DI, min: 0, max: 6_000, def: 5, flags: OURS },
+    /* plot screen: column period (160 columns span the screen) and the
+     * full-scale (top edge) values of the V and I traces */
+    Def { id: ID_PLOT_PERIOD, min: 20, max: 60_000, def: 500, flags: OURS },
+    Def { id: ID_PLOT_V_FULL, min: 100, max: 30_000, def: 20_000, flags: OURS },
+    Def { id: ID_PLOT_I_FULL, min: 1, max: 6_000, def: 4_000, flags: OURS },
 ];
 const N: usize = DEFS.len();
+/* State::dirty has one bit per setting */
+const _: () = assert!(N <= 32);
 /* config words covered by `load`: ids 0..=max id in DEFS (ours start at 24) */
 const WORDS: usize = {
     let mut max = ID_MAGIC as usize;
@@ -92,7 +102,7 @@ unsafe impl<T> Sync for Racy<T> {}
 
 struct State {
     vals: [u32; N],
-    dirty: u16,
+    dirty: u32,
     changed_at: u32,
     loaded: bool,
 }
@@ -228,6 +238,8 @@ fn apply(id: u8, v: u32) {
         ID_SCREEN => crate::ui::set_screen(v as u8),
         ID_GROUP => crate::persist::set_group(v as usize),
         ID_LOG_CLEAR => crate::persist::log_clear(),
+        /* history drawn at the old scale would be misleading: restart */
+        ID_PLOT_V_FULL | ID_PLOT_I_FULL => crate::plot::rescale(),
         _ => {}
     }
 }
@@ -264,25 +276,43 @@ pub fn service() {
     s.changed_at = crate::ina::ticks();
 }
 
-/// Length of the `cfgrd` reply.
-pub const DUMP_LEN: usize = 3 + 14 * N + 2;
+/// Settings per `cfgrd` reply page: a page must fit the 192-B BLE TX
+/// buffer (one notification burst).
+pub const PAGE: usize = 13;
+/// Longest `cfgrd` reply (a full page).
+pub const DUMP_MAX: usize = 5 + 14 * PAGE + 2;
 
-/// `cfgrd` reply: "OK" + n + n × (id u8, value, min, max: u32 LE, flags u8)
-/// + CRC16/MODBUS (LE) of everything before it.
+/// `cfgrd [start]` reply page: "OK" + total u8 + start u8 + n u8 +
+/// n × (id u8, value, min, max: u32 LE, flags u8) + CRC16/MODBUS (LE) of
+/// everything before it. Entries are DEFS[start .. start+n], n ≤ PAGE; the
+/// host pages until start + n == total. Returns the reply length.
 #[inline(never)]
-pub fn dump(out: &mut [u8; DUMP_LEN]) {
+pub fn dump(out: &mut [u8; DUMP_MAX], start: usize) -> usize {
+    let start = start.min(N);
+    let n = (N - start).min(PAGE);
     out[..2].copy_from_slice(b"OK");
     out[2] = N as u8;
-    for (k, d) in DEFS.iter().enumerate() {
-        let o = 3 + 14 * k;
-        out[o] = d.id;
-        out[o + 1..o + 5].copy_from_slice(&st().vals[k].to_le_bytes());
-        out[o + 5..o + 9].copy_from_slice(&d.min.to_le_bytes());
-        out[o + 9..o + 13].copy_from_slice(&d.max.to_le_bytes());
-        out[o + 13] = d.flags & RO;
+    out[3] = start as u8;
+    out[4] = n as u8;
+    for (j, (d, v)) in DEFS.iter().zip(st().vals.iter()).skip(start).take(n).enumerate() {
+        let o = 5 + 14 * j;
+        let Some(e) = out.get_mut(o..o + 14) else { break };
+        e[0] = d.id;
+        e[1..5].copy_from_slice(&v.to_le_bytes());
+        e[5..9].copy_from_slice(&d.min.to_le_bytes());
+        e[9..13].copy_from_slice(&d.max.to_le_bytes());
+        e[13] = d.flags & RO;
     }
-    let crc = crate::getva::crc16_modbus(&out[..DUMP_LEN - 2]);
-    out[DUMP_LEN - 2..].copy_from_slice(&crc.to_le_bytes());
+    let len = 5 + 14 * n;
+    let crc = crate::getva::crc16_modbus(&out[..len]);
+    out[len..len + 2].copy_from_slice(&crc.to_le_bytes());
+    len + 2
+}
+
+/// Optional "<start>" argument of `cfgrd` (absent / unparsable = 0).
+pub fn dump_start(args: &[u8]) -> usize {
+    let mut it = args.split(|&b| b == b' ').filter(|t| !t.is_empty());
+    it.next().and_then(|t| parse_dec(t).ok()).unwrap_or(0) as usize
 }
 
 /// Parse "<id> <value>" (ASCII decimal, single spaces) from the bytes after
