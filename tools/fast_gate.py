@@ -2,11 +2,12 @@
 """Fast-flash placement gate (make fast-gate).
 
 The GD32F150 fetches zero-wait only below FAST_END (0x0800_8000); above it
-the manual promises "a long delay" per fetch (~10x, bench-measured via AES —
-QUIRKS.md §4). fast.x pins the hot path (.fasttext) right after the vector
-table. This gate fails the build if any CRITICAL symbol ends above FAST_END
-(e.g. the .fasttext list outgrew the region and its tail spilled), and
-reports the region budget + where the fast/slow boundary actually falls.
+every cold fetch costs tens of µs (QUIRKS.md §4, FIRMWARE.md "Fast-flash
+placement"). fast.x pins the hot path (.fasttext) right after the vector
+table. This gate fails the build if .fasttext itself crosses FAST_END
+(nothing may spill silently — decide what to demote), or if any CRITICAL
+symbol ends above FAST_END (catches a fast.x pattern that stopped matching,
+e.g. after a rename), and reports the region budget.
 
 Usage: fast_gate.py <elf>
 """
@@ -71,13 +72,14 @@ def main():
     print(f"fast-gate: .fasttext ends {efast:#x} — {fast_used}/{fast_cap} B of "
           f"the fast region ({bonus} B of .text also below the boundary)")
     if efast > FAST_END:
-        print(f"fast-gate: WARNING .fasttext itself crosses {FAST_END:#x} by "
-              f"{efast - FAST_END} B — its tail patterns are in slow flash")
+        sys.exit(f"fast-gate FAIL: .fasttext crosses {FAST_END:#x} by "
+                 f"{efast - FAST_END} B — demote something from fast.x / "
+                 f"#[link_section = \".fasttext.*\"] or shrink code")
     if bad:
         for addr, name in sorted(bad):
             print(f"  SLOW: {addr:#x} {name}")
         sys.exit(f"fast-gate FAIL: {len(bad)} critical symbol(s) above "
-                 f"{FAST_END:#x} — trim fast.x's tail tiers or shrink code")
+                 f"{FAST_END:#x} — fix its fast.x pattern or annotation")
     print("fast-gate ok")
 
 

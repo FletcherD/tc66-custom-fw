@@ -417,7 +417,7 @@ fn adc_burst() {
  * body. */
 #[cfg(feature = "pcprf")]
 core::arch::global_asm!(
-    ".section .text.TIMER5_DAC, \"ax\", %progbits",
+    ".section .fasttext.TIMER5_DAC, \"ax\", %progbits",
     ".global TIMER5_DAC",
     ".type TIMER5_DAC, %function",
     ".thumb_func",
@@ -436,7 +436,7 @@ core::arch::global_asm!(
 
 #[cfg(not(feature = "pcprf"))]
 core::arch::global_asm!(
-    ".section .text.TIMER5_DAC, \"ax\", %progbits",
+    ".section .fasttext.TIMER5_DAC, \"ax\", %progbits",
     ".global TIMER5_DAC",
     ".type TIMER5_DAC, %function",
     ".thumb_func",

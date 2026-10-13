@@ -186,6 +186,7 @@ pub fn draw(run_secs: u32) {
 /// Ok(true) = engine idle and nothing left to draw. Err = a job failed and
 /// was torn down (caller drops the always-on refresh, as before).
 #[inline(never)]
+#[link_section = ".fasttext.ui_service"]
 pub fn service() -> Result<bool, u8> {
     if !tft::service()? || !plot::service()? {
         return Ok(false);

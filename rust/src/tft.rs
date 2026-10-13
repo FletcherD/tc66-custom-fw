@@ -95,6 +95,7 @@ static ROWBUF: Racy<[u16; ROW_PX]> = Racy(core::cell::UnsafeCell::new([0; ROW_PX
 static FILL_WORD: Racy<u16> = Racy(core::cell::UnsafeCell::new(0));
 
 #[inline(never)]
+#[link_section = ".fasttext.tft_spi_write_byte"]
 fn spi_write_byte(b: u8) -> Result<(), u8> {
     let spi = unsafe { &*pac::Spi0::ptr() };
     spi.data().write(|w| w.data().bits(b as u16));
@@ -109,6 +110,7 @@ fn spi_write_byte(b: u8) -> Result<(), u8> {
 /// Wait until the shifter is idle — required before flipping DC, since TBE
 /// only means the data register emptied, not that the last bit left the pin.
 #[inline(never)]
+#[link_section = ".fasttext.tft_spi_wait_idle"]
 fn spi_wait_idle() -> Result<(), u8> {
     let spi = unsafe { &*pac::Spi0::ptr() };
     for _ in 0..TIMEOUT {
@@ -119,6 +121,7 @@ fn spi_wait_idle() -> Result<(), u8> {
     Err(2)
 }
 
+#[link_section = ".fasttext.tft_write_command"]
 fn write_command(cmd: u8) -> Result<(), u8> {
     let gpioa = unsafe { &*pac::Gpioa::ptr() };
     spi_wait_idle()?;
@@ -126,6 +129,7 @@ fn write_command(cmd: u8) -> Result<(), u8> {
     spi_write_byte(cmd)
 }
 
+#[link_section = ".fasttext.tft_write_data"]
 fn write_data(bytes: &[u8]) -> Result<(), u8> {
     let gpioa = unsafe { &*pac::Gpioa::ptr() };
     spi_wait_idle()?;
@@ -262,6 +266,7 @@ fn ensure_init() -> Result<(), u8> {
 }
 
 /// CASET/RASET with the panel's GRAM offset, then RAMWR; pixels follow as data.
+#[link_section = ".fasttext.tft_set_window"]
 fn set_window(x0: u16, y0: u16, x1: u16, y1: u16) -> Result<(), u8> {
     cmd(
         0x2A,
@@ -278,6 +283,7 @@ fn set_window(x0: u16, y0: u16, x1: u16, y1: u16) -> Result<(), u8> {
 
 /// Switch the SPI frame format. FF16 may only change while SPIEN is clear
 /// (and the caller must have seen TRANS idle first, or bits get chopped).
+#[link_section = ".fasttext.tft_spi_frame16"]
 fn spi_frame16(on: bool) {
     let spi = unsafe { &*pac::Spi0::ptr() };
     spi.ctl0().modify(|_, w| w.spien().disabled());
@@ -294,6 +300,7 @@ fn spi_frame16(on: bool) {
 /// Program + enable DMA channel 2 (the fixed SPI0_TX request): `cnt`
 /// halfword transfers from `maddr` (incrementing if `minc`) into SPI0 DATA.
 #[inline(never)]
+#[link_section = ".fasttext.tft_dma_kick"]
 fn dma_kick(maddr: u32, cnt: u16, minc: bool) {
     let dma = unsafe { &*pac::Dma::ptr() };
     let spi = unsafe { &*pac::Spi0::ptr() };
@@ -336,6 +343,7 @@ fn dma_kick(maddr: u32, cnt: u16, minc: bool) {
 
 /// Open a pixel session: window commands (polled, 8-bit), DC high, SPI to
 /// 16-bit frames, TX DMA request on. On error nothing is left half-switched.
+#[link_section = ".fasttext.tft_pixel_session_begin"]
 fn pixel_session_begin(x0: u16, y0: u16, x1: u16, y1: u16) -> Result<(), u8> {
     set_window(x0, y0, x1, y1)?;
     spi_wait_idle()?;
@@ -349,6 +357,7 @@ fn pixel_session_begin(x0: u16, y0: u16, x1: u16, y1: u16) -> Result<(), u8> {
 
 /// Close the pixel session: DMA request off, channel off, SPI back to 8-bit.
 /// Caller must have seen TRANS idle (drain phase) on the success path.
+#[link_section = ".fasttext.tft_pixel_session_end"]
 fn pixel_session_end() {
     let dma = unsafe { &*pac::Dma::ptr() };
     let spi = unsafe { &*pac::Spi0::ptr() };
@@ -379,6 +388,7 @@ fn abort(stage: u8) -> u8 {
 /// Expand one 1-bpp glyph row into ROWBUF as RGB565. The 16-bit SPI frame
 /// shifts MSB-first, so native u16 values go out hi-byte-first as the panel
 /// expects — no byte swizzling.
+#[link_section = ".fasttext.tft_stage_row"]
 fn stage_row(row: usize) {
     let e = unsafe { &*ENGINE.0.get() };
     let buf = unsafe { &mut *ROWBUF.0.get() };
@@ -395,6 +405,7 @@ fn stage_row(row: usize) {
 /// is idle again; the caller decides what to do about the display).
 /// Cheap when idle — the main loop calls this every pass.
 #[inline(never)]
+#[link_section = ".fasttext.tft_service"]
 pub fn service() -> Result<bool, u8> {
     let e = unsafe { &mut *ENGINE.0.get() };
     match e.phase {
@@ -449,9 +460,10 @@ pub fn service() -> Result<bool, u8> {
 
 /// Pump service() until the engine goes idle. Terminates because every
 /// phase carries a poll budget. Blocking: a glyph is ~1 ms (0.3 ms of
-/// SPI), a full-screen fill ~8.5 ms. The engine lives in fast flash (fast.x
-/// tier 4b) — from slow flash a glyph cost 4.5-50 ms depending on layout.
+/// SPI), a full-screen fill ~8.5 ms. The engine lives in fast flash
+/// (`.fasttext`) — from slow flash a glyph cost 4.5-50 ms depending on layout.
 #[inline(never)]
+#[link_section = ".fasttext.tft_pump_idle"]
 pub fn pump_idle() -> Result<(), u8> {
     loop {
         if service()? {
@@ -461,6 +473,7 @@ pub fn pump_idle() -> Result<(), u8> {
 }
 
 /// Kick an async solid fill. Engine must be idle (callers pump first).
+#[link_section = ".fasttext.tft_start_fill"]
 fn start_fill(x0: u16, y0: u16, x1: u16, y1: u16, color: u16) -> Result<(), u8> {
     let e = unsafe { &mut *ENGINE.0.get() };
     if e.phase != PH_IDLE {
@@ -481,6 +494,7 @@ fn start_fill(x0: u16, y0: u16, x1: u16, y1: u16, color: u16) -> Result<(), u8> 
 /// The full cell is overwritten, so no clear, no flicker. Engine must be
 /// idle; unknown characters draw nothing (engine stays idle, Ok).
 #[inline(never)]
+#[link_section = ".fasttext.tft_start_char"]
 pub fn start_char(x: u16, y: u16, ch: u8, fg: u16, bg: u16) -> Result<(), u8> {
     ensure_init()?;
     let e = unsafe { &mut *ENGINE.0.get() };

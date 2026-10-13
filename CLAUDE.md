@@ -34,7 +34,9 @@ path is pinned below the GD32's 32 KB zero-wait flash boundary
 (`rust/fast.x` + `make fast-gate` — FIRMWARE.md "Fast-flash placement";
 query 0.2 / rawva 0.6 / getva 2.3 ms; the TFT pixel engine too — full
 redraw ~30 ms, tools/uitime.py). Slow-region cost is per cold fetch and
-layout-sensitive: anything with a polling loop belongs in fast.x, and
+layout-sensitive: anything with a polling loop belongs in fast flash
+(`#[link_section = ".fasttext.<name>"]` on our fns, fast.x patterns for
+other crates/modules; fast-gate fails on any overflow — no silent spill), and
 per-pass `service()` calls keep their idle check `#[inline(always)]` in
 the fast main loop (pass ~20 µs). Profile with the on-device PC
 sampler (`pcprf` verb + tools/pcprofile.py; the DWT is a stub — never

@@ -81,7 +81,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 123;
+const BUILD_ID: u32 = 124;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -119,6 +119,7 @@ fn main() -> ! {
 }
 
 #[inline(never)]
+#[link_section = ".fasttext.run"]
 fn run() -> ! {
     mk(MK_BOOT, 0xB007_B007);
     mk(MK_BUILD, BUILD_ID);
@@ -433,11 +434,13 @@ fn run() -> ! {
 }
 
 #[inline(never)]
+#[link_section = ".fasttext.match5"]
 fn match5(b: &[u8], cmd: &[u8; 5]) -> bool {
     b.len() >= 5 && b[..5] == cmd[..]
 }
 
 #[inline(never)]
+#[link_section = ".fasttext.on_packet"]
 fn on_packet(buf: &[u8]) {
     if buf.len() >= 4 {
         mk(
@@ -706,6 +709,7 @@ fn on_packet(buf: &[u8]) {
  * multi-path accounting), so splitting turns that sum into a max. */
 
 #[inline(never)]
+#[link_section = ".fasttext.do_getva"]
 fn do_getva() {
     let mut reply = [0u8; 192];
     getva::build(&mut reply, &live_fields());
@@ -756,6 +760,7 @@ fn do_pcprf() {
 /// dev verb: same fields as getva, plaintext + CRC16, no AES — for fast
 /// host streaming (layout in getva.rs; tools/rawva.py)
 #[inline(never)]
+#[link_section = ".fasttext.do_rawva"]
 fn do_rawva() {
     let mut reply = [0u8; getva::RAW_LEN];
     getva::build_raw(&mut reply, &live_fields());
@@ -917,6 +922,7 @@ fn do_btget() {
 /// -> "OK" + rlen bytes, or "ER" + [stage, stat0.lo, stat0.hi, stat1.lo]
 #[cfg(feature = "dev-verbs")]
 #[inline(never)]
+#[link_section = ".fasttext.do_i2crd"]
 fn do_i2crd(buf: &[u8]) {
     let mut reply = [0u8; 34];
     let n = i2c_command(buf, &mut reply);
@@ -926,6 +932,7 @@ fn do_i2crd(buf: &[u8]) {
 /// dev verb: adcrd <ch> -> "OK" + u32 LE sum-of-16, or "ER" + stage
 #[cfg(feature = "dev-verbs")]
 #[inline(never)]
+#[link_section = ".fasttext.do_adcrd"]
 fn do_adcrd(buf: &[u8]) {
     let mut reply = [0u8; 6];
     let n = if buf.len() >= 6 {
@@ -993,6 +1000,7 @@ fn do_pdcap() {
 /// Snapshot the published measurements + derived values + window seq for a
 /// getva/rawva reply.
 #[inline(never)]
+#[link_section = ".fasttext.live_fields"]
 fn live_fields() -> getva::Fields {
     let m = ina::snapshot();
     let (p, r) = ina::derive(m.v_1e4, m.i_1e5);
@@ -1113,6 +1121,7 @@ static IRQ_PARKED: core::sync::atomic::AtomicBool =
 /// frozen). The ISR parks itself (NVIC mask) instead; the thread unmasks
 /// after popping a slot and the still-pending CTR refires the ISR once.
 #[inline(never)]
+#[link_section = ".fasttext.drain_serial"]
 fn drain_serial(serial: &mut Serial) -> bool {
     loop {
         let h = CMD_RING.head.load(Ordering::Relaxed);
@@ -1141,6 +1150,7 @@ fn drain_serial(serial: &mut Serial) -> bool {
 /// `grace_only`, everything except the escape-hatch verbs (`query`,
 /// `updat`) is dropped — the grace-window restriction.
 #[inline(never)]
+#[link_section = ".fasttext.run_pending_cmds"]
 fn run_pending_cmds(grace_only: bool) {
     loop {
         let t = CMD_RING.tail.load(Ordering::Relaxed);
@@ -1181,6 +1191,7 @@ fn run_pending_cmds(grace_only: bool) {
 /// (stm32-usbd/usbd-serial never busy-wait); the long work (AES replies)
 /// stays in thread mode. MK_USB_STATE phases localize a wedge; see markers.rs.
 #[interrupt]
+#[link_section = ".fasttext.USBD_LP"]
 fn USBD_LP() {
     mk(MK_USB_IRQS, mk_get(MK_USB_IRQS) + 1);
     mk(MK_USB_STATE, 1);
@@ -1242,6 +1253,7 @@ fn USBD_LP() {
 /// TX_ST bit 7)? Read-only scan — EPxCS ST flags are rc_w0, so reads are
 /// side-effect-free (unlike ISTR on this clone). Unconfigured EPxCS read 0.
 #[inline(never)]
+#[link_section = ".fasttext.ep_events_pending"]
 fn ep_events_pending() -> bool {
     let usbd = unsafe { &*pac::Usbd::ptr() };
     for n in 0..8u32 {
@@ -1265,6 +1277,7 @@ fn ep_events_pending() -> bool {
 /// Build + publish the powerz reply (thread mode; the copy into
 /// powerz::REPLY runs inside the critical section).
 #[inline(never)]
+#[link_section = ".fasttext.refresh_powerz_payload"]
 fn refresh_powerz_payload() {
     let pl = powerz_payload();
     with_usb(|_, pz, _| pz.set_payload(&pl));
@@ -1276,6 +1289,7 @@ fn refresh_powerz_payload() {
 /// else 0), Vdd from the Vrefint ratio; temp is clamped at 0 (the kernel
 /// driver's byte pair can't encode sub-zero).
 #[inline(never)]
+#[link_section = ".fasttext.powerz_payload"]
 fn powerz_payload() -> [u8; powerz::ADC_PAYLOAD_LEN] {
     let m = ina::snapshot();
     let mut p = [0u8; powerz::ADC_PAYLOAD_LEN];
@@ -1309,6 +1323,7 @@ fn powerz_payload() -> [u8; powerz::ADC_PAYLOAD_LEN] {
 }
 
 #[inline(never)]
+#[link_section = ".fasttext.reply_ok_er"]
 fn reply_ok_er(r: Result<(), u8>) {
     match r {
         Ok(()) => write_all(b"OK"),
@@ -1319,6 +1334,7 @@ fn reply_ok_er(r: Result<(), u8>) {
 /// Parse + run an `i2crd` packet; fill `reply`, return its length.
 #[cfg(feature = "dev-verbs")]
 #[inline(never)]
+#[link_section = ".fasttext.i2c_command"]
 fn i2c_command(buf: &[u8], reply: &mut [u8; 34]) -> usize {
     if buf.len() < 10 {
         reply[..2].copy_from_slice(b"ER");
@@ -1361,6 +1377,7 @@ fn i2c_command(buf: &[u8], reply: &mut [u8; 34]) -> usize {
 /// packet itself; endpoint_in_complete flushes the rest), so WouldBlock here
 /// just means "wait for the ISR to drain some".
 #[inline(never)]
+#[link_section = ".fasttext.write_all"]
 fn write_all(data: &[u8]) {
     let mut sent = 0usize;
     let mut budget = 200_000u32;
@@ -1405,6 +1422,7 @@ fn write_all(data: &[u8]) {
 /// not the CDC data endpoint updat streams through. Read-only peek at
 /// registers the USB stack owns.
 #[inline(never)]
+#[link_section = ".fasttext.find_bulk_ep"]
 fn find_bulk_ep() -> Option<u32> {
     let usbd = unsafe { &*pac::Usbd::ptr() };
     for n in 2..8u32 {

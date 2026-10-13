@@ -427,7 +427,7 @@ Related subtleties, all load-bearing:
   `ui::service` draws at most one glyph per pass (~1 ms, 0.3 ms of it SPI;
   a full 24-cell screen ~30 ms — `tools/uitime.py` times it via `uiscr`),
   so the idle 2 Hz refresh costs nothing. The pixel engine and
-  `ui::service` are pinned in fast flash (fast.x tier 4b): from slow flash
+  `ui::service` are pinned in fast flash (`.fasttext`): from slow flash
   the same redraw took 0.15-1.3 s depending on where unrelated commits
   shifted it. USB stays ISR-serviced throughout;
   only thread-mode command dispatch waits out the glyph. (One *row* per
@@ -689,27 +689,35 @@ image spans the boundary, so placement decides performance: moving the hot
 path fast took getva 48.6 → 2.3 ms, rawva 9.2 → 0.6 ms, query 4.5 → 0.2 ms
 and erased the ~8 ms latency staircase. (The M4 code growth has since spent
 the region: `getva::build` — the encrypted compat packet builder, not the
-AES loops or `build_raw` — is now deliberately `.slowtext`, the first
-casualty of the documented spill order; expect getva somewhat above that
-2.3 ms figure.)
+AES loops or `build_raw` — is deliberately `.slowtext`; expect getva
+somewhat above that 2.3 ms figure.)
 
-`rust/fast.x` defines `.fasttext` (priority-ordered hot patterns, placed
-right after the vector table; the TAIL of the list is what spills past the
-boundary if it outgrows the region) and `.slowtext` (cold enum-time/one-shot
-machinery force-demoted so the hot globs can't drag it in — mangled generic
-names contain type-parameter crates, so crate globs over-match). Mechanics
-that are load-bearing: fast.x must be passed to the linker BEFORE link.x
-(input sections are claimed in script order); `_stext = __efasttext`
-overrides link.x so `.text` follows contiguously. `make fast-gate`
-(tools/fast_gate.py) fails the build if a critical symbol (ISRs, USB poll
-path, AES/getva) lands above the boundary, and reports the budget. The
+`.fasttext` (placed right after the vector table) is filled two ways:
+**our own functions carry `#[link_section = ".fasttext.<unique name>"]`**
+(USBD_LP, the TIMER5 asm veneer's `.section`, `run` + the powerz refresh,
+command dispatch, do_getva/do_rawva, the TFT pixel engine, `ui::service`);
+**`rust/fast.x` patterns** cover what can't be annotated — other crates'
+code (USB stack, aes, builtins), whole modules (`ina`, `i2c`, `powerz`,
+`usb_bus`, `getva`) and generic `with_usb` with its closures. A callee
+the compiler doesn't inline stays slow unless it is annotated too.
+`.slowtext` force-demotes cold enum-time/one-shot machinery the globs
+would otherwise drag in (mangled generic names contain type-parameter
+crates, so crate globs over-match). Mechanics that are load-bearing:
+fast.x must be passed to the linker BEFORE link.x (input sections are
+claimed in script order); `_stext = __efasttext` overrides link.x so
+`.text` follows contiguously. `make fast-gate` (tools/fast_gate.py)
+**fails the build if `.fasttext` crosses the boundary** — there is no
+priority order and nothing spills silently; on overflow, decide what to
+demote (rough priority in fast.x's header) — and if a critical symbol
+(ISRs, USB poll path, AES/getva) lands slow, which catches a pattern that
+stopped matching after a rename. It also reports the budget. The
 linker emits `__Thumbv7ABSLongThunk_*` veneers for some cross-section
 calls; stack_gate.py collapses them in its call graph.
 
-When adding code, decide its region: hot loops → a fast.x tier (and check
+When adding code, decide its region: hot loops → `.fasttext` (and check
 the fast-gate report); straight-line per-command code tolerates slow (one
 traversal costs µs — but see the cold-call cost below). The TFT pixel
-engine is fast (tier 4b); TFT init/commands, `ui::draw` and the per-pass
+engine is fast; TFT init/commands, `ui::draw` and the per-pass
 `pd`/`cfg`/`bt`/`plot` service calls are slow-region.
 Re-measure with the PC profiler (below) after moving things.
 
