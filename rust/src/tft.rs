@@ -9,8 +9,10 @@
 //! RAMWR, init) stay polled 8-bit writes, but bulk pixel data goes out as
 //! 16-bit SPI frames fed by DMA channel 2 (the fixed SPI0_TX request on this
 //! part). Callers kick a job (`start_char`, or the blocking `fill_rect`) and
-//! the main loop pumps `service()` to advance it; nothing busy-waits on
-//! pixels outside the bounded dev-verb/boot pumps. Jobs:
+//! pump `service()` to advance it — or `pump_idle()` to finish it in one go
+//! (ui.rs finishes each glyph within the main-loop pass that kicked it: a
+//! loop pass is ~0.6 ms of cold slow-flash calls, so a row per pass made
+//! characters visibly fill in one by one). Jobs:
 //!   - fill: one DMA transfer from a single staged color word with the
 //!     memory-increment disabled — zero staging RAM;
 //!   - glyph: per-row staging — one 18-px row (36 B) is expanded 1 bpp ->
@@ -446,9 +448,11 @@ pub fn service() -> Result<bool, u8> {
 }
 
 /// Pump service() until the engine goes idle. Terminates because every
-/// phase carries a poll budget. Blocking — dev verbs / boot only.
+/// phase carries a poll budget. Blocking: a glyph is ~4.5 ms (0.3 ms of
+/// SPI; the rest is this engine's slow-flash fetches), a full-screen fill
+/// ~8.5 ms.
 #[inline(never)]
-fn pump_idle() -> Result<(), u8> {
+pub fn pump_idle() -> Result<(), u8> {
     loop {
         if service()? {
             return Ok(());

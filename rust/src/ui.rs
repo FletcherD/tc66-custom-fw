@@ -11,11 +11,12 @@
 //! flicker-free and cheap (idle screen redraws nothing). A screen switch
 //! marks every cell dirty (same char, different color must still repaint).
 //!
-//! Drawing is asynchronous: `draw` only formats the target text and marks
+//! Drawing is incremental: `draw` only formats the target text and marks
 //! changed cells dirty (cheap, never blocks); `service` — pumped every main
-//! loop pass — advances the tft DMA engine and kicks the next dirty cell's
-//! glyph when it goes idle. `flush` (boot first frame, `tftui` verb) pumps
-//! to completion and is bounded by the engine's per-phase poll budgets.
+//! loop pass — draws at most one dirty cell per pass, finishing its glyph
+//! DMA before returning (~4.5 ms; a full 24-cell screen ~125 ms).
+//! `flush` (boot first frame, `tftui` verb) pumps to completion and is
+//! bounded by the engine's per-phase poll budgets.
 
 use crate::font;
 use crate::ina;
@@ -180,8 +181,8 @@ pub fn draw(run_secs: u32) {
     }
 }
 
-/// One pump pass: advance the tft engine; when it is idle, kick the next
-/// dirty cell (at most one kick per call — the main loop stays responsive).
+/// One pump pass: advance the tft engine; when it is idle, draw the next
+/// dirty cell to completion (at most one glyph per call, ~4.5 ms).
 /// Ok(true) = engine idle and nothing left to draw. Err = a job failed and
 /// was torn down (caller drops the always-on refresh, as before).
 #[inline(never)]
@@ -207,6 +208,7 @@ pub fn service() -> Result<bool, u8> {
         BG,
     )?;
     *dirty &= !(1 << n);
+    tft::pump_idle()?;
     Ok(false)
 }
 

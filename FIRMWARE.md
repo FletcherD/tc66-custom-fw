@@ -396,7 +396,8 @@ Related subtleties, all load-bearing:
   part's fixed SPI0_TX request** (GD32F1x0 UM request map; same as the
   STM32F0 family). No interrupts: the main loop pumps `ui::service()` every
   pass, which advances `tft::service()` one poll (FTF/ERRIF flag checks) and,
-  when the engine is idle, kicks the next dirty cell's glyph. Jobs:
+  when the engine is idle, kicks the next dirty cell's glyph and pumps it to
+  completion (`tft::pump_idle`) within that pass. Jobs:
   - *fill*: one DMA transfer (≤12800 halfwords) from a single staged color
     word with the memory-increment (`MNAGA`) disabled — zero staging RAM;
   - *glyph*: one 18-px row (36 B, `ROWBUF`) expanded 1 bpp → RGB565 and
@@ -423,9 +424,12 @@ Related subtleties, all load-bearing:
   poisons the char cache so every cell repaints in the new colors. Cells are
   always fully overdrawn fg/bg (no clear → no flicker). `ui::draw` only
   formats and marks changed cells dirty (never blocks); the per-pass
-  `ui::service` streams at most one glyph-row kick per pass, so the idle
-  2 Hz refresh costs nothing and a full redraw never stalls USB (the powerz
-  reply deadline). TFT init + first frame run at boot **before `pa9_high`**
+  `ui::service` draws at most one glyph per pass (~4.5 ms: 0.3 ms of SPI,
+  the rest slow-flash fetches of the row engine — a full screen ~125 ms),
+  so the idle 2 Hz refresh costs nothing. USB stays ISR-serviced throughout;
+  only thread-mode command dispatch waits out the glyph. (One *row* per
+  pass made characters visibly fill in one by one: a main-loop pass is
+  ~0.6 ms, see "Fast-flash placement".) TFT init + first frame run at boot **before `pa9_high`**
   via `ui::flush()` — the init's ~400 ms of delays must not stall USB
   enumeration, and the blocking pump there is required. A failed job
   disables the always-on refresh for that boot (`tft_alive`), keeping a
@@ -701,9 +705,19 @@ calls; stack_gate.py collapses them in its call graph.
 
 When adding code, decide its region: hot loops → a fast.x tier (and check
 the fast-gate report); straight-line per-command code tolerates slow (one
-traversal costs µs). The TFT path is deliberately slow-region until the
-spi-dma refactor lands. Re-measure with the PC profiler (below) after
-moving things.
+traversal costs µs — but see the cold-call cost below). The TFT path and
+the per-pass `pd`/`cfg`/`bt`/`ui`/`plot` service calls are slow-region.
+Re-measure with the PC profiler (below) after moving things.
+
+**Slow-region cost is per cold fetch, not a flat ~10x** (SysTick section
+timing, 2026-10): `pd::service`'s ~15-instruction early-return path costs
+~89 µs on its first call in a main-loop pass and 1.9 µs when called again
+immediately — the slow region behaves like a tiny cache with ~40 µs
+misses, so code that alternates between several slow functions (a polling
+loop over `tft::service`/`stage_row`/`dma_kick`) misses on nearly every
+call. The steady-state main-loop pass is ~0.6 ms, almost all of it
+cold calls into slow-region service functions. Warm tight loops (AES) see
+the ~10x figure.
 
 ### PC profiler (`pcprf` verb + tools/pcprofile.py)
 
