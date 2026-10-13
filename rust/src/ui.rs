@@ -57,6 +57,12 @@ pub fn set_screen(n: u8) {
     }
 }
 
+/// Rotation setting: flip the panel, then repaint every cell.
+pub fn set_rotation(rot: u8) {
+    let _ = tft::set_rotation(rot);
+    set_screen(screen());
+}
+
 pub fn next_screen() {
     set_screen(screen() + 1);
 }

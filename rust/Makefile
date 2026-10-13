@@ -6,8 +6,9 @@ ELF = target/thumbv7m-none-eabi/release/tc66-fw
 
 all: tc66fw.pad.bin
 
+# FEATURES=grace (etc.) builds with extra cargo features: make flash FEATURES=grace
 build:
-	cargo build --release
+	cargo build --release $(if $(FEATURES),--features $(FEATURES))
 	arm-none-eabi-size $(ELF)
 
 # cortex-m-rt's Reset copies __sidata -> __sdata..__edata and zeroes

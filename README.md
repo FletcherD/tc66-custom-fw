@@ -24,10 +24,22 @@ gone) — our own protocol on top of a compatible base, and room to add features
   EEPROM calibration, TIMER5-interrupt sampling at 250 Hz with an
   interleaved read schedule (~10 Hz publish, immune to main-loop blocking),
   NTC temperature (recovered stock β-model) and D+/D− via the
-  on-chip ADC, 1 Hz energy integration (RAM-only for now), all served in the
+  on-chip ADC (stock channel map), 1 Hz energy integration, all served in the
   stock encrypted+checksummed `getva` packet — plus our plaintext `rawva`
   verb with a window sequence number for fast lossless streaming
   (`tools/rawva.py`). Verified live on hardware.
+- **M2 — persistence: done (bench-verified build 113).** Stock-compatible
+  EEPROM layout, so stock and custom firmware read each other's data:
+  settings (rotation, brightness 0–9, screen, active energy group, screen
+  idle-off, datalog on/interval, USB/BLE command disable) read/written with
+  `cfgrd`/`cfgwr` (`tools/cfg.py`; BLE `bcfgrd`/`bcfgwr`), coalesced writes;
+  run count + config-page serial in getva; both energy groups + run clocks
+  in a wear-leveled, CRC-tagged ring (survive power cuts, ≤10 s lost);
+  stock datalog + `gtrec` (`tools/gtrec.py`). `tools/eedump.py` dumps and
+  decodes the chip. Bench-verified under an ~8 mA load: ring saves continue
+  the stock seq, both groups + run clocks + the group setting restore
+  across reboots, BLE settings verbs work. Not yet exercised: a real power
+  cut mid-session (torn-slot fallback) and the K2-hold reset.
 - **M3 — display: done.** ST7735S driver + three always-on screens
   (V/I/P; mAh/mWh + run clock; temperature + D+/D−), K1 steps screens, K2
   held 1 s resets energy, 15 s idle screen-off (burn-in protection; any
@@ -78,9 +90,8 @@ gone) — our own protocol on top of a compatible base, and room to add features
   source on the bench). Nothing runs at boot; a granted request **raises the
   OUT-port voltage** (trigger with nothing downstream).
 - **Next steps** (see also the open items in QUIRKS.md):
-  - **M2 — persistence** (real serial/run-count, energy write-back to the
-    wear-leveled EEPROM journal, `gtrec` log, EEPROM writes in the I²C
-    driver).
+  - Bench-test a power cut mid-session (torn-slot fallback), the K2-hold
+    reset, and D± readings against a known device/charger.
   - **M4 extensions:** FCP/SCP on the existing D+/D− engine
     (`charge_protocol_handshake` modes 2/3, sharing AFC's closed-loop
     `proto_send_word`; CRC-8 poly still to be solved from captures);
@@ -91,8 +102,8 @@ gone) — our own protocol on top of a compatible base, and room to add features
     event-loss mechanism) and stock-firmware Tier 2 comparison. (Both
     refactor branches are merged; the TFT loops are deliberately not in
     fast flash — DMA made them non-blocking instead.)
-  - Screen rotation (`rotat`/`brotat`), brightness setting, a PD/CC
-    status screen.
+  - On-device settings menu / group switch on the buttons, a PD/CC status
+    screen.
 
 ## Layout
 
@@ -110,6 +121,8 @@ CLAUDE.md           orientation + working rules for agent sessions
 rust/               the firmware — see FIRMWARE.md for the module map;
                     Makefile targets: flash / recover / markers / build gates
 tools/              app_update.py (hands-free flash via updat)
+                    cfg.py (settings), gtrec.py (datalog), getva.py,
+                    eedump.py (EEPROM dump/decode)
                     flash_image.py + encrypt.py (K1 bootloader recovery path)
                     i2cread.py, adcread.py (dev verbs), tc66lib.py (helpers)
 openocd.cfg         non-halting SRAM reads via a Pico debugprobe (CMSIS-DAP)

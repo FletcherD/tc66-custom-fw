@@ -49,6 +49,8 @@
 mod adc;
 mod board;
 mod bt;
+mod cfg;
+mod eeprom;
 mod flasher;
 mod font;
 mod getva;
@@ -58,6 +60,7 @@ mod keys;
 mod markers;
 #[cfg(feature = "dev-verbs")]
 mod pd;
+mod persist;
 mod powerz;
 #[cfg(feature = "dev-verbs")]
 mod qc;
@@ -77,7 +80,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 110;
+const BUILD_ID: u32 = 113;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -263,6 +266,18 @@ fn run() -> ! {
         mk(MK_PROBE, 0);
     }
 
+    /* Persistence (M2) — deliberately AFTER the grace window, like every
+     * new feature until it is proven (a fault here stays recoverable by
+     * power-cycle + `make flash`), and while the I2C bus is still ours:
+     * settings (applied over the default first frame), the run-count bump,
+     * then the energy ring scan (~0.25 s) restores both groups + run
+     * clocks. */
+    if cfg::load() {
+        cfg::apply_boot();
+    }
+    cfg::commit_boot();
+    persist::boot();
+
     /* Sampler: reprogram TIMER5 as the 250 Hz tick ISR and unmask its NVIC
      * line (ina.rs) — deliberately only now, after the grace window, so a
      * sampler/I2C fault stays escapable by power-cycle + `make flash`. */
@@ -273,22 +288,20 @@ fn run() -> ! {
     bt::init(false);
     bt::set_dispatch();
 
-    /* 1 Hz energy integration (RAM only, starts at 0; persistence is M2):
-     * every 250 ticks accumulate published I and P for one second.
-     * mAh = sum(I_1e5 * 1s) / 360000, mWh = sum(P_1e4 * 1s) / 36000. */
+    /* 1 Hz energy integration into the active group (persist.rs — saved to
+     * the EEPROM ring, restored at boot): every 250 ticks the published I
+     * and P are accumulated for one second. */
     let mut sec_ticks: u32 = 0;
-    let mut acc_i_1e5s: u64 = 0;
-    let mut acc_p_1e4s: u64 = 0;
-    /* seconds since power-on / last energy reset (energy screen clock) */
-    let mut run_secs: u32 = 0;
-    /* K2 held >= 1 s resets energy + run time; one shot per hold */
+    /* K2 held >= 1 s resets the active group's energy + run clock; one
+     * shot per hold */
     let mut k2_hold: u32 = 0;
 
     /* screen refresh every 125 ticks (0.5 s); only changed cells are drawn
      * (ui.rs dirty tracking), so an idle refresh costs nothing */
     let mut ui_ticks: u32 = 0;
 
-    /* Screen idle timeout: after 15 s without a *change* in the measured
+    /* Screen idle timeout: after idle_off_s (setting, default 15 s; 0 =
+     * never) without a *change* in the measured
      * input the panel is blanked (DISPOFF + backlight off) — an overnight
      * static screen caused real LCD image persistence, and a steady source
      * parked on IN is exactly as static as no input. Activity = the 1 Hz
@@ -296,7 +309,6 @@ fn run() -> ! {
      * (well above bench noise, ~25 mV / ~20 uA); plug, unplug, load steps
      * and PD renegotiations wake within a second. The reference updates
      * every second, so slow drift never wakes it. Draw verbs also wake. */
-    const IDLE_OFF_SECS: u32 = 15;
     const IDLE_V_DELTA: u32 = 1_000; /* 100 mV in 1e-4 V units */
     const IDLE_I_DELTA: u32 = 500; /* 5 mA in 1e-5 A units */
     let mut idle_secs: u32 = 0;
@@ -328,17 +340,14 @@ fn run() -> ! {
                 let _ = tft::screen_on();
                 if pressed & 1 != 0 {
                     ui::next_screen();
-                    ui::draw(run_secs);
+                    ui::draw(persist::run_secs());
                 }
             }
             if keys::held() & 2 != 0 {
                 k2_hold = k2_hold.saturating_add(elapsed);
                 if k2_hold >= 250 && k2_hold < 250 + elapsed {
-                    acc_i_1e5s = 0;
-                    acc_p_1e4s = 0;
-                    run_secs = 0;
-                    ina::set_energy(0, 0);
-                    ui::draw(run_secs);
+                    persist::reset_active();
+                    ui::draw(persist::run_secs());
                 }
             } else {
                 k2_hold = 0;
@@ -350,14 +359,11 @@ fn run() -> ! {
                  * main-frame each at opt-1 (stack-gate budget) */
                 let (v, i) = ina::snapshot_vi();
                 let (pw, _) = ina::derive(v, i);
-                acc_i_1e5s += i as u64;
-                acc_p_1e4s += pw as u64;
-                run_secs = run_secs.saturating_add(1);
-                ina::set_energy(
-                    (acc_i_1e5s / 360_000) as u32,
-                    (acc_p_1e4s / 36_000) as u32,
-                );
+                persist::second(v, i, pw);
+                /* the screen index persists like a setting (K1, b-verbs) */
+                cfg::note(cfg::ID_SCREEN, ui::screen() as u32);
                 if tft_alive {
+                    let idle_off = cfg::get(cfg::ID_IDLE_OFF);
                     let moved = v.abs_diff(idle_ref_v) > IDLE_V_DELTA
                         || i.abs_diff(idle_ref_i) > IDLE_I_DELTA;
                     idle_ref_v = v;
@@ -370,9 +376,9 @@ fn run() -> ! {
                     if moved {
                         idle_secs = 0;
                         let _ = tft::screen_on(); /* no-op when already on */
-                    } else if idle_secs < IDLE_OFF_SECS {
+                    } else if idle_off != 0 && idle_secs < idle_off {
                         idle_secs += 1;
-                        if idle_secs == IDLE_OFF_SECS {
+                        if idle_secs == idle_off {
                             let r = tft::screen_off();
                             mk(MK_UI_OFFRES, r.map_or_else(|e| 2 + e as u32, |_| 1));
                         }
@@ -386,7 +392,7 @@ fn run() -> ! {
                 ui_ticks = 0;
                 /* format-only: marks changed cells dirty; the per-pass
                  * ui::service() below streams the glyphs out via DMA */
-                ui::draw(run_secs);
+                ui::draw(persist::run_secs());
             }
         }
         /* advance the display DMA engine one poll (cheap when idle; at most
@@ -404,6 +410,8 @@ fn run() -> ! {
         /* dispatch commands the ISR queued; replies (AES etc.) are built
          * right here in thread mode with interrupts enabled */
         run_pending_cmds(false);
+        /* coalesced settings writes (~2 s after the last change) */
+        cfg::service();
         /* BLE link pump: drain the RX DMA ring, dispatch complete b-verb
          * lines (no-op until bt::init has run — dev verbs for now) */
         bt::service(on_ble_line);
@@ -443,6 +451,16 @@ fn on_packet(buf: &[u8]) {
         do_getva();
     } else if match5(buf, b"rawva") {
         do_rawva();
+    } else if match5(buf, b"cfgrd") {
+        do_cfgrd();
+    } else if match5(buf, b"cfgwr") {
+        /* cfgwr <id> <value> (ASCII decimal) — cfg.rs */
+        reply_ok_er(cfg::write_cmd(&buf[5..]));
+    } else if match5(buf, b"gtrec") {
+        do_gtrec();
+    } else if match5(buf, b"rotat") {
+        /* stock: toggle 180° rotation (persisted), no reply */
+        toggle_rotation();
     } else if match5(buf, b"pcprf") {
         #[cfg(feature = "pcprf")]
         do_pcprf();
@@ -673,7 +691,7 @@ fn on_packet(buf: &[u8]) {
             cortex_m::interrupt::enable();
         }
     }
-    /* rotat / nextp / lastp / unknown -> silent */
+    /* nextp / lastp / unknown -> silent */
 }
 
 /* Each buffer-carrying verb handler gets its own frame: the stack gate sums
@@ -685,6 +703,28 @@ fn do_getva() {
     let mut reply = [0u8; 192];
     getva::build(&mut reply, &live_fields());
     write_all(&reply);
+}
+
+/// `cfgrd` -> every setting with its range (layout: cfg::dump).
+#[inline(never)]
+fn do_cfgrd() {
+    let mut reply = [0u8; cfg::DUMP_LEN];
+    cfg::dump(&mut reply);
+    write_all(&reply);
+}
+
+/// `gtrec` (stock): every datalog record as its own 8-B packet (V, I as
+/// LE u32), then "reck".
+#[inline(never)]
+fn do_gtrec() {
+    persist::log_dump(|rec| write_all(rec));
+    write_all(b"reck");
+}
+
+/// `rotat` / `brotat`: flip between the stock rotation values 0 and 2.
+fn toggle_rotation() {
+    let r = if cfg::get(cfg::ID_ROTATION) == 2 { 0 } else { 2 };
+    let _ = cfg::set(cfg::ID_ROTATION, r);
 }
 
 /// dev verb: dump the TIMER5-veneer PC-profiler ring (markers.rs
@@ -720,6 +760,22 @@ fn do_rawva() {
 /// status chatter — are silently ignored, like the stock firmware.
 #[inline(never)]
 fn on_ble_line(line: &[u8]) {
+    if line.starts_with(b"bcfgwr") {
+        let r = cfg::write_cmd(&line[6..]);
+        let _ = match r {
+            Ok(()) => bt::send(b"OK"),
+            Err(e) => bt::send(&[b'E', b'R', e]),
+        };
+        return;
+    } else if line == b"bcfgrd" {
+        do_bcfgrd();
+        return;
+    }
+    /* ble_cmd_off setting (stock 0x203c): everything but the settings
+     * verbs above is ignored */
+    if cfg::get(cfg::ID_BLE_OFF) != 0 {
+        return;
+    }
     if line == b"bgetva" {
         do_bgetva();
     } else if line == b"bquery" {
@@ -732,6 +788,16 @@ fn on_ble_line(line: &[u8]) {
         ui::next_screen(); /* the 2 Hz refresh repaints */
     } else if line == b"blastp" {
         ui::set_screen(ui::screen() + ui::SCREENS - 1);
+    } else if line == b"brotat" {
+        toggle_rotation();
+    }
+}
+
+#[inline(never)]
+fn do_bcfgrd() {
+    if let Ok(buf) = bt::tx_buf() {
+        cfg::dump((&mut buf[..cfg::DUMP_LEN]).try_into().unwrap());
+        let _ = bt::send_buf(cfg::DUMP_LEN);
     }
 }
 
@@ -925,6 +991,13 @@ fn live_fields() -> getva::Fields {
         r,
         mah: m.mah,
         mwh: m.mwh,
+        groups: {
+            let (a, b) = persist::group_energy(0);
+            let (c, d) = persist::group_energy(1);
+            [a, b, c, d]
+        },
+        serial: persist::serial(),
+        runs: cfg::get(cfg::ID_RUNCOUNT),
         temp_c: m.temp_c,
         dp: m.dp_1e2,
         dm: m.dm_1e2,
@@ -1077,7 +1150,14 @@ fn run_pending_cmds(grace_only: bool) {
             /* ring has space again — let the still-pending CTR refire */
             unsafe { cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USBD_LP) };
         }
-        if grace_only && !match5(&pkt[..len], b"query") && !match5(&pkt[..len], b"updat") {
+        let p = &pkt[..len];
+        let escape = match5(p, b"query") || match5(p, b"updat");
+        if grace_only && !escape {
+            continue;
+        }
+        /* usb_cmd_off setting (stock 0x2038): only the escape hatch and the
+         * settings verbs stay reachable, so it can always be turned back on */
+        if cfg::get(cfg::ID_USB_OFF) != 0 && !escape && !match5(p, b"cfgrd") && !match5(p, b"cfgwr") {
             continue;
         }
         on_packet(&pkt[..len]);
@@ -1216,7 +1296,6 @@ fn powerz_payload() -> [u8; powerz::ADC_PAYLOAD_LEN] {
     p
 }
 
-#[cfg(feature = "dev-verbs")]
 #[inline(never)]
 fn reply_ok_er(r: Result<(), u8>) {
     match r {

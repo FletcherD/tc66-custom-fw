@@ -62,6 +62,12 @@ static SCREEN_OFF: Racy<bool> = Racy(core::cell::UnsafeCell::new(false));
  * a wake from any path (verb, key, live input) restarts the 15 s count */
 static WOKE: Racy<bool> = Racy(core::cell::UnsafeCell::new(false));
 static LAST_BL: Racy<u16> = Racy(core::cell::UnsafeCell::new(499));
+/* MADCTL sent by the init sequence and by set_rotation (cfg rotation).
+ * Stock: rotation 0 -> 0x68, 2 -> 0xA8. 0xA8 is right-side up on this
+ * unit's mounting (webcam-verified) and the pre-settings default. */
+static MADCTL: Racy<u8> = Racy(core::cell::UnsafeCell::new(MADCTL_ROT2));
+const MADCTL_ROT0: u8 = 0x68;
+const MADCTL_ROT2: u8 = 0xA8;
 
 struct Engine {
     phase: u8,
@@ -154,7 +160,9 @@ const INIT_SEQ: &[u8] = &[
     0xC7, 1, 0x76,
     0x36, 1, 0xA8,                      /* MADCTL: landscape, BGR, 180° — the
                                          * stock flip variant; 0x68 is upside-
-                                         * down for this unit's mounting */
+                                         * down for this unit's mounting.
+                                         * Replaced by the MADCTL static
+                                         * (rotation setting) at init. */
     0x3A, 1, 0x55,                      /* COLMOD: RGB565 */
     0xE0, 16, 0x27, 0x0E, 0x07, 0x04, 0x11, 0x0B, 0x06, 0x0C,
               0x0E, 0x14, 0x1B, 0x3E, 0x06, 0x25, 0x07, 0x1F,
@@ -232,7 +240,11 @@ fn ensure_init() -> Result<(), u8> {
     let mut i = 0;
     while i < INIT_SEQ.len() {
         let n = (INIT_SEQ[i + 1] & !DELAY) as usize;
-        cmd(INIT_SEQ[i], &INIT_SEQ[i + 2..i + 2 + n])?;
+        if INIT_SEQ[i] == 0x36 {
+            cmd(0x36, &[unsafe { *MADCTL.0.get() }])?; /* rotation setting */
+        } else {
+            cmd(INIT_SEQ[i], &INIT_SEQ[i + 2..i + 2 + n])?;
+        }
         if INIT_SEQ[i + 1] & DELAY != 0 {
             board::delay_ms(100);
         }
@@ -547,7 +559,8 @@ fn backlight_init() {
             .set_bit()
     });
     tim.chctl2().modify(|_, w| w.ch1en().set_bit());
-    tim.ch1cv().write(|w| w.ch1val().bits(499)); /* ~50% */
+    let bl = unsafe { *LAST_BL.0.get() }; /* brightness setting (default ~50%) */
+    tim.ch1cv().write(|w| w.ch1val().bits(bl as u32));
     tim.swevg().write(|w| w.upg().set_bit()); /* latch PSC/CAR now */
     tim.ctl0().modify(|_, w| w.cen().enabled());
 }
@@ -561,6 +574,46 @@ pub fn backlight_set(compare: u16) -> Result<(), u8> {
     let tim = unsafe { &*pac::Timer1::ptr() };
     let c = if compare > 999 { 999 } else { compare };
     unsafe { *LAST_BL.0.get() = c };
+    tim.ch1cv().write(|w| w.ch1val().bits(c as u32));
+    Ok(())
+}
+
+/// Rotation setting (stock values: 0 = normal, 2 = 180°). Before init it
+/// only latches the value for the init sequence; afterwards it sends
+/// MADCTL and clears the panel (GRAM content isn't rotated, so the old
+/// frame would sit mirrored under the new one); the caller repaints.
+#[inline(never)]
+pub fn set_rotation(rot: u8) -> Result<(), u8> {
+    let m = if rot == 2 { MADCTL_ROT2 } else { MADCTL_ROT0 };
+    if unsafe { *MADCTL.0.get() } == m {
+        return Ok(());
+    }
+    unsafe { *MADCTL.0.get() = m };
+    if !unsafe { *INITED.0.get() } {
+        return Ok(());
+    }
+    pump_idle()?; /* never send a command mid-pixel-session */
+    cmd(0x36, &[m])?;
+    fill_rect_raw(0, 0, WIDTH - 1, HEIGHT - 1, 0x0000)
+}
+
+/// Backlight PWM compare for a 0..=9 brightness setting — the stock
+/// mapping (level·77 + 100 of the 1000 period: 10 % .. 79.3 %).
+fn level_compare(level: u8) -> u16 {
+    level.min(9) as u16 * 77 + 100
+}
+
+/// Brightness setting 0..=9. Latched for init (backlight_init starts at
+/// it) and applied live unless the screen is idle-blanked (the wake then
+/// restores it).
+#[inline(never)]
+pub fn set_brightness(level: u8) -> Result<(), u8> {
+    let c = level_compare(level);
+    unsafe { *LAST_BL.0.get() = c };
+    if !unsafe { *INITED.0.get() } || unsafe { *SCREEN_OFF.0.get() } {
+        return Ok(());
+    }
+    let tim = unsafe { &*pac::Timer1::ptr() };
     tim.ch1cv().write(|w| w.ch1val().bits(c as u32));
     Ok(())
 }

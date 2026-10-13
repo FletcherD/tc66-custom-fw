@@ -1,7 +1,9 @@
 //! Polled on-chip ADC (F1-style: CLB calibration, SWRCST software trigger).
 //! Used for the NTC temperature divider and the D+/D- dividers (HARDWARE.md:
-//! published D± = sum_of_16 * 330 / 65520 -> 1e-2 V). Channels are identified
-//! empirically via the `adcrd` dev verb (tools/adcread.py --scan).
+//! published D± = sum_of_16 * 330 / 65520 -> 1e-2 V). The channel map is the
+//! stock firmware's (recovered from its ADC init): ch0 = PA0 NTC, ch1 = PA1
+//! D+, ch9 = PB1 D−, ch16/17 internal — and exactly those three pins are put
+//! in analog mode, as stock does (PB0 is the BLE UART RX — never analog).
 //!
 //! Same safety pattern as i2c.rs: bounded waits, Option returns, lazy init.
 
@@ -21,6 +23,15 @@ fn ensure_init() -> Result<(), u8> {
     }
     let rcu = unsafe { &*pac::Rcu::ptr() };
     let adc = unsafe { &*pac::Adc::ptr() };
+
+    let gpioa = unsafe { &*pac::Gpioa::ptr() };
+    let gpiob = unsafe { &*pac::Gpiob::ptr() };
+    rcu.ahben().modify(|_, w| w.paen().enabled().pben().enabled());
+    /* PA0 (NTC), PA1 (D+), PB1 (D−): analog, no pulls */
+    gpioa.pud().modify(|_, w| w.pud0().floating().pud1().floating());
+    gpioa.ctl().modify(|_, w| w.ctl0().analog().ctl1().analog());
+    gpiob.pud().modify(|_, w| w.pud1().floating());
+    gpiob.ctl().modify(|_, w| w.ctl1().analog());
 
     rcu.apb2en().modify(|_, w| w.adcen().enabled());
     /* CK_ADC comes from the dedicated IRC14M oscillator (CFG2.ADCSEL reset

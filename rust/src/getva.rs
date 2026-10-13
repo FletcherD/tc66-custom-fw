@@ -5,10 +5,9 @@
 //! of each block** (verified against the known-good static packet), then
 //! AES-256-ECB encrypted with the meter's fixed key.
 //!
-//! TEMPLATE below is the decrypted known-good static packet (serial 0x00C0FFEE,
-//! fw "1.18", runcount 1, temp 25 C); build() patches the live fields and
-//! recomputes checksums. Fields not yet measured (energy groups, temp, D+/D-)
-//! keep template values.
+//! TEMPLATE below is the decrypted known-good static packet (fw "1.18");
+//! build() patches every live field (serial, run count, V/I/P/R, both
+//! energy groups, temp, D±, seq) and recomputes checksums.
 
 use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockEncrypt, KeyInit};
@@ -65,7 +64,7 @@ pub fn init() {
     }
 }
 
-fn crc16_modbus(data: &[u8]) -> u16 {
+pub fn crc16_modbus(data: &[u8]) -> u16 {
     let mut crc: u16 = 0xFFFF;
     for &b in data {
         crc ^= b as u16;
@@ -87,8 +86,14 @@ pub struct Fields {
     pub i: u32,
     pub p: u32,
     pub r: u32,
+    /// active energy group (rawva)
     pub mah: u32,
     pub mwh: u32,
+    /// both groups: g0 mAh, g0 mWh, g1 mAh, g1 mWh (getva 72..88)
+    pub groups: [u32; 4],
+    /// per-unit serial (flash config page) and boot count (EEPROM 0x202c)
+    pub serial: u32,
+    pub runs: u32,
     pub temp_c: i32,
     pub dp: u32,
     pub dm: u32,
@@ -127,12 +132,11 @@ pub fn build(out: &mut [u8; 192], f: &Fields) {
     put_u32(out, 52, f.i);
     put_u32(out, 56, f.p);
     put_u32(out, 68, f.r);
-    /* both energy groups carry the same since-boot integration (no per-group
-     * UI yet; persistence is M2) */
-    put_u32(out, 72, f.mah);
-    put_u32(out, 76, f.mwh);
-    put_u32(out, 80, f.mah);
-    put_u32(out, 84, f.mwh);
+    put_u32(out, 12, f.serial);
+    put_u32(out, 44, f.runs);
+    for (k, &g) in f.groups.iter().enumerate() {
+        put_u32(out, 72 + 4 * k, g);
+    }
     put_u32(out, 88, if f.temp_c < 0 { 1 } else { 0 }); /* temp sign */
     put_u32(out, 92, f.temp_c.unsigned_abs());
     put_u32(out, 96, f.dp);

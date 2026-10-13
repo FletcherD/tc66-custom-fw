@@ -89,13 +89,10 @@ pub struct Cal {
     pub refz: u32,    // EEPROM 0x2058 (sum of 16 offset-binary shunt raws at 0 A)
 }
 
-/* ADC channels, identified empirically via `adcrd` scans (see HARDWARE.md):
- * ch8/ch9 = PB0/PB1 = D+/D- (direct, USB idle J-state signature);
- * ch1 = PA1 = NTC divider on this unit (rock-stable, reads room temp on a
- * cool board with the stock constants; ch0 and ch3 drift = floating, even
- * though the stock firmware reads ch3 on the hardware rev it targets). */
-const CH_NTC: u8 = 1;
-const CH_DP: u8 = 8;
+/* ADC channels — the stock map, recovered from its ADC init (HARDWARE.md
+ * "On-chip ADC"): PA0 = NTC, PA1 = D+, PB1 = D−. */
+const CH_NTC: u8 = 0;
+const CH_DP: u8 = 1;
 const CH_DM: u8 = 9;
 const CH_VREF: u8 = 17; /* internal 1.2 V reference -> Vdd for powerz */
 
@@ -108,8 +105,6 @@ fn d_line_1e2(sum16: u32) -> u32 {
 /// firmware (HARDWARE.md "Temperature (NTC) & D±"): 10k @ 25 C, beta = 3450,
 /// on the bottom of an 11.5k divider:
 ///   R = avg * 11500 / (4095 - avg);  T = 1/(1/298.15 + ln(R/10000)/3450)
-/// (Stock reads ch3 on the rev it targets; on THIS unit the divider is
-/// measurably on ch1 — ch3 floats. Verified: reads room temp on a cool board.)
 fn ntc_temp_c(sum16: u32) -> i32 {
     let avg = sum16 as f32 / 16.0;
     if avg < 1.0 || avg > 4094.0 {

@@ -135,8 +135,11 @@ Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the firs
 |---|---|---|
 | `getva` | 192 B (AES-256-ECB) | poll measurements (see below) |
 | `query` | `firm` (app) / `boot` (bootloader) | identify what's running |
-| `rotat` / `nextp` / `lastp` | none | rotate / cycle on-device screen |
-| `gtrec` | N×8 B + `reck` | dump the on-device ~1 Hz V/I log |
+| `rotat` | none | toggle 180° rotation (stock values 0 ↔ 2; ours also persists it) |
+| `nextp` / `lastp` | none | cycle on-device screen (stock; silent no-ops here — the BLE `bnextp`/`blastp` work) |
+| `gtrec` | N×8 B + `reck` | dump the datalog: each record its own 8-B packet (V u32 LE 1e-4 V, I u32 LE 1e-5 A), then `reck` — no count header (tools/gtrec.py) |
+| `cfgrd` | `OK`+n+n×14 B+CRC16 | ours: every setting — id u8, value/min/max u32 LE, flags u8 (bit0 read-only) — CRC16/MODBUS over all preceding bytes (tools/cfg.py) |
+| `cfgwr` | `OK` / `ER`+code | ours: `cfgwr <id> <value>` ASCII decimal; ER 0x0F bad args, 0x10 unknown id, 0x11 out of range, 0x12 read-only; applies at once, EEPROM write ~2 s after the last change |
 | `updat` | `uprdy`, then per-chunk `OK` | our app self-update |
 | `rawva` | 46 B plaintext | our dev verb: getva fields + window seq, no AES — use for streaming (tools/rawva.py) |
 | `pcprf` | 516 B plaintext | our dev verb: PC-profiler ring dump (u32 counter + 128 u32 PCs; FIRMWARE.md "PC profiler", tools/pcprofile.py) |
@@ -180,14 +183,14 @@ Decrypt, then read little-endian `uint32` fields:
 | 0 | `"pac1"` marker | — |
 | 4 | model (`TC66`) | 4 ASCII |
 | 8 | firmware version | 4 ASCII |
-| 12 | serial | uint32 |
-| 44 | run count | uint32 |
+| 12 | serial | uint32 (flash config page word `0x0800fc04`) |
+| 44 | run count | uint32 (EEPROM `0x202c`, +1 per boot) |
 | 48 | voltage | /10000 → V |
 | 52 | current | /100000 → A |
 | 56 | power | /10000 → W |
 | 64 | `"pac2"` marker | — |
 | 68 | resistance | /10 → Ω |
-| 72/76 | group0 mAh / mWh | uint32 |
+| 72/76 | group0 mAh / mWh | uint32 (persisted, energy ring) |
 | 80/84 | group1 mAh / mWh | uint32 |
 | 88/92 | temp sign / temp | °C |
 | 96/100 | D+ / D− | /100 → V |
@@ -231,9 +234,10 @@ ten LE u32 fields, CRC16/MODBUS tail); client + deduping stream generator in
   reg 0xFE = 0x5449 "TI", die ID reg 0xFF = 0x2260), 7-bit I²C address **0x4A**.
   The stock firmware bit-bangs SCL = PB6 / SDA = PB7; **hardware I²C0 on the same
   pins (AF1, 100 kHz) works** — the custom firmware uses it (rust/src/i2c.rs).
-- EEPROM (256 Kbit) at 7-bit address **0x50** (0xA0 in 8-bit form) on the same
-  bus, **2-byte addressing** — per-unit calibration constants (verified readable
-  at the offsets below), energy accumulators, serial number.
+- EEPROM (BL24C256, 32 KB) at 7-bit address **0x50** (0xA0 in 8-bit form) on
+  the same bus, **2-byte addressing, 64-B pages, ~5 ms write cycle** — per-unit
+  calibration, settings, energy ring, datalog (layout below; no serial number —
+  that's in the flash config page).
 - Bus scan also ACKs **0x58** (the BL24C256 EEPROM's ID/serial page) and **0x22**
   (a **FUSB302 USB-PD controller** — see "USB Power Delivery" below).
 - INA226 registers: 0 config, 1 shunt V, 2 bus V, 3 power, 4 current, 5 calibration.
@@ -254,6 +258,44 @@ ten LE u32 fields, CRC16/MODBUS tail); client + deduping stream generator in
   poll-rate-independent sampling without needing the chip's hardware averaging.
 - Bench note: powering the meter via its PC-comms port does NOT power the
   measurement path — bus voltage/shunt read 0 until the IN port is fed.
+
+#### EEPROM layout (stock-compatible — both firmwares read each other's data)
+Recovered from the stock firmware (RE notes `~/tc66/firmware/ghidra/
+EEPROM_FINDINGS.md` + `PERSISTENCE_FINDINGS.md`); `tools/eedump.py show` decodes
+an image or the live chip.
+
+| Range | Contents |
+|---|---|
+| `0x0000–0x1FFF` | energy ring: 256 × 32-B slots — `+0` g0 mAh, `+4` g0 mWh, `+8` g1 mAh, `+0xc` g1 mWh, `+0x10` seq (stock's 20 B; newest = highest seq). Ours adds in the pad stock never touches: `+0x14`/`+0x18` g0/g1 run seconds, `+0x1c` tag `0xC0DE` (u16), `+0x1e` CRC16/MODBUS of `0..0x1c` |
+| `0x2000–0x205F` | config words (u32 LE, id = (addr−0x2000)/4) — table below |
+| `0x2060–0x206F` | ours: `0x2060` magic `"WFCT"` (block valid), `0x2064` idle_off_s, `0x2068` log_on |
+| `0x2200–0x2217` | factory calibration master (never written — firmware write guard) |
+| `0x2400–0x7DFF` | datalog: ≤1440 × 16-B records — `+0` V (1e-4 V), `+4` I (1e-5 A), `+8` seq = record index, `+0xc` pad (ours: tag `0xC0DE106A`). Before each record the next record's seq is zeroed (end marker); stops when full |
+
+Config words (cfg id in brackets; **cal** = calibration, never written):
+
+| Addr | Meaning |
+|---|---|
+| `0x2004/08/0c` | cal: gainV, gainCp, gainCn (working mirror of `0x2204/0c/10`) |
+| `0x2010` [4] | active energy group 0/1 |
+| `0x2014` [5] | rotation: 0 → MADCTL 0x68, 2 → 0xA8 (this unit right-side up at 2) |
+| `0x2018` | stock: screen timeout, minutes 0–9 (0 = never) — not used by us (we have idle_off_s) |
+| `0x201c` [7] | brightness 0–9 → PWM compare `level·77 + 100` of 1000 |
+| `0x2024` [9] | last screen index |
+| `0x202c` [11] | run count (+1 every boot) |
+| `0x2034` [13] | datalog interval, seconds 1–60 |
+| `0x2038` [14] / `0x203c` [15] | USB / BLE command disable (≠0 = ignore that link's verbs; ours keeps query/updat/cfgrd/cfgwr and bcfgrd/bcfgwr live) |
+| `0x2044/48/4c` | cal: offV + two extra current coeffs |
+| `0x2050` | stock: display panel init variant |
+| `0x2054` | stock: "trigger PD on next insertion" latch (NOT a defaults latch) |
+| `0x2058` | cal: current zero reference `ref` |
+
+Stock semantics we deliberately differ from: stock treats group 0 as a
+per-session counter (restarts once current flows) — ours keeps both groups
+cumulative; stock's datalog recording flag is RAM-only and off at boot —
+ours is the persisted `log_on` setting (no menu); stock's `rotat` doesn't
+persist — ours does; stock's log count drops the last record after a reboot
+— ours tags records so it doesn't.
 
 #### Calibration (per-unit constants live in the EEPROM)
 Averaged, calibrated readings:
@@ -293,13 +335,11 @@ Both come from the **GD32 on-chip 12-bit ADC** (DMA'd, 16-sample sums).
 
 **D+ / D−:** `D± = (Σ16 of the divider channel) · 330 / 65520` → 1e-2 V (getva 96/100).
 
-**Temperature (NTC):** the stock firmware reads an NTC on ADC **ch3** (on the
-hardware rev it targets — **on our unit the divider measurably sits on ch1**:
-ch1 is rock-stable and reads room temp on a cool board, while ch3/ch0 float
-and drift; see the ADC section below) and converts with a **β-equation**
-(floating point). Recovered exactly from the firmware:
+**Temperature (NTC):** the stock firmware reads an NTC on ADC **ch0 (PA0)** and
+converts with a **β-equation** (floating point). Recovered exactly from the
+firmware:
 ```
-avg  = (Σ16 of ch3) / 16                          # 0..4095, 12-bit
+avg  = (Σ16 of ch0) / 16                          # 0..4095, 12-bit
 R    = avg * 11500 / (4095 - avg)                 # ohms
 T_K  = 1 / ( 1/298.15 + ln(R / 10000) / 3450 )    # β equation, natural log
 T_°C = T_K - 273.15                               # display °F = °C*1.8 + 32
@@ -311,24 +351,26 @@ Constants (flash literals): R_series `0x2cec` = 11500, R0 `0x461c4000` = 10000.0
 separate `temp sign` field (offset 88) marks sub-zero.
 
 The getva temperature is a single `ln()` per second — trivial, but if you want to
-avoid pulling in `libm` you can use a small NTC lookup table instead. (Older hardware,
-`CFG+0x48 ≤ 0x144`, uses an integer piecewise-linear curve on a different channel;
-not present on current units.)
+avoid pulling in `libm` you can use a small NTC lookup table instead. (Units with
+a config-page serial ≤ 0x144 use a linear map of the internal die sensor, ch16,
+instead; this unit's serial is 55050.)
 
 #### On-chip ADC (verified on hardware)
 - **The ADC clock is IRC14M** (CFG2.ADCSEL reset default), a dedicated 14 MHz RC
   that is OFF at reset — enable `RCU_CTL1.IRC14MEN` first or calibration
   (RSTCLB/CLB) hangs forever. This cost a debug cycle.
-- Channel map (identified empirically, `adcrd` verb / tools/adcread.py):
-  **ch1 = PA1 = NTC divider** (stable across scans; ch0 = PA0 floats/drifts),
-  **ch8 = PB0 = D+**, **ch9 = PB1 = D−** (direct connection — USB idle reads
-  3.30 V / 0.00 V), ch2 = PA2 = BLE UART TX (idles 3.3 V), ch16 = internal die
-  temp (~1.38 V ≈ 41 °C warm), ch17 = Vrefint (1.18 V sanity check).
-- The firmware (rust/src/ina.rs) uses the recovered stock NTC model above on
-  **ch1**. Verified: 25 °C at room temp on a cool board; ~60 °C after hours
-  powered in the enclosure. (The internal die sensor is a poor cross-check —
-  the MCU self-heats to ambient +~15 °C within minutes regardless of board
-  temperature, and its V25/slope constants are uncalibrated per part.)
+- Channel map — **the stock firmware's, recovered from its ADC init**
+  (`~/tc66/firmware/ghidra/ADC_FINDINGS.md`; one board design, no revisions):
+  **ch0 = PA0 = NTC divider**, **ch1 = PA1 = D+**, **ch9 = PB1 = D−**,
+  ch16 = internal die temp, ch17 = Vrefint. Stock puts exactly PA0/PA1/PB1 in
+  analog mode, and so does adc.rs. **PB0 (ch8) is the BLE UART RX** (the
+  module's TX, idles 3.3 V) and PA2 the BLE TX — not ADC inputs. (Stock's
+  code reads them as inserted-group ranks 1/2/3; earlier notes mistook those
+  rank indices for channel numbers.)
+- Bench check (build 113): NTC 27 °C at room temperature; D± float to
+  ~1.5–2.3 V with nothing on the data lines (analog inputs, no pulls) —
+  verify against a real device/charger. (The internal die sensor is a poor
+  cross-check — the MCU self-heats to ambient +~15 °C within minutes.)
 
 ### USB Power Delivery (FUSB302, I²C 0x22)
 The device at I²C **0x22** (write `0x44` / read `0x45`) is a **FUSB302** USB Type-C /
@@ -411,12 +453,14 @@ The chip shares the INA226/EEPROM I²C bus — all access inside `ina::pause`.
   a module control line — unverified, unused by us). Advertises whenever the
   meter is powered; one connection at a time. The BLE command set mirrors the
   USB verbs with a `b` prefix + CRLF (`bgetva` = the same 192-B packet, arrives
-  as one notification). RF is weak on this board — hardware, not firmware.
+  as one notification; also `brotat`, and our `bquery`/`brawva` and
+  `bcfgrd`/`bcfgwr <id> <value>` — same replies as the USB verbs). RF is weak on this board — hardware, not firmware.
   Host tool: `tools/ble.py` (uv script: scan / send / getva / rxtest / spy / sta).
 
 ### Energy integration
-- A 1 Hz timer integrates the mAh/mWh accumulators from the published V/I, so energy
-  is poll-rate-independent.
+- A 1 Hz cadence (off the sampler tick) integrates the active group's mAh/mWh
+  from the published I/P while 10 µA < I < 6 A (the stock window), so energy is
+  poll-rate-independent; totals persist in the EEPROM energy ring (above).
 
 ## VBUS note
 The output VBUS is a **passive pass-through** (input → shunt → output); there is no
