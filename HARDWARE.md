@@ -268,7 +268,7 @@ an image or the live chip.
 |---|---|
 | `0x0000–0x1FFF` | energy ring: 256 × 32-B slots — `+0` g0 mAh, `+4` g0 mWh, `+8` g1 mAh, `+0xc` g1 mWh, `+0x10` seq (stock's 20 B; newest = highest seq). Ours adds in the pad stock never touches: `+0x14`/`+0x18` g0/g1 run seconds, `+0x1c` tag `0xC0DE` (u16), `+0x1e` CRC16/MODBUS of `0..0x1c` |
 | `0x2000–0x205F` | config words (u32 LE, id = (addr−0x2000)/4) — table below |
-| `0x2060–0x206F` | ours: `0x2060` magic `"WFCT"` (block valid), `0x2064` idle_off_s, `0x2068` log_on |
+| `0x2060–0x21FF` | ours (stock never touches it; ids 24–127): `0x2060` magic `"WFCT"` (block valid), `0x2064` idle_off_s, `0x2068` log_on, (`0x206c` = id 27 log_clear, an action — never stored), `0x2070` idle_dv_mv, `0x2074` idle_di_ma |
 | `0x2200–0x2217` | factory calibration master (never written — firmware write guard) |
 | `0x2400–0x7DFF` | datalog: ≤1440 × 16-B records — `+0` V (1e-4 V), `+4` I (1e-5 A), `+8` seq = record index, `+0xc` pad (ours: tag `0xC0DE106A`). Before each record the next record's seq is zeroed (end marker); stops when full |
 

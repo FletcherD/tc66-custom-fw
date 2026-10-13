@@ -634,7 +634,11 @@ is skipped once).
   validates + applies at once, `service` writes dirty words ~2 s after the
   last change. ACTION entries (log_clear) run a function and store nothing.
   Adding a setting = one DEFS row (+ an `apply` arm if it needs one) + the
-  name in tools/cfg.py; ids ≥ 24 live in our block, ACTIONs anywhere unused.
+  name in tools/cfg.py; ids ≥ 24 live in our block (room to id 127),
+  ACTIONs anywhere unused. **Limit:** the whole `cfgrd` table goes out as
+  one BLE reply (14 B/setting, 192-B TX buffer) — 13 settings today, a
+  const assert in main.rs fails the build at 14; past that cfgrd needs
+  paging.
 - **Datalog:** `log_on` + `log_interval_s`; the record count is scanned
   lazily on first use (≤1440 seq reads, ~1.3 s once). `gtrec` streams 2
   records per pause.

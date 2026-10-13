@@ -25,6 +25,8 @@ pub const ID_BLE_OFF: u8 = 15;
 pub const ID_IDLE_OFF: u8 = 25;
 pub const ID_LOG_ON: u8 = 26;
 pub const ID_LOG_CLEAR: u8 = 27;
+pub const ID_IDLE_DV: u8 = 28;
+pub const ID_IDLE_DI: u8 = 29;
 
 const ID_MAGIC: u8 = 24; /* our block's validity word (0x2060) */
 const MAGIC: u32 = 0x5443_4657; /* "WFCT" LE */
@@ -56,7 +58,7 @@ struct Def {
 /* Stock defaults except rotation: stock's default 0 (MADCTL 0x68) is
  * upside-down on this unit's mounting; 2 is the bench-verified orientation
  * and what an unreadable EEPROM falls back to. */
-const DEFS: [Def; 11] = [
+const DEFS: [Def; 13] = [
     Def { id: ID_GROUP, min: 0, max: 1, def: 0, flags: 0 },
     Def { id: ID_ROTATION, min: 0, max: 2, def: 2, flags: 0 },
     Def { id: ID_BRIGHTNESS, min: 0, max: 9, def: 6, flags: 0 },
@@ -68,6 +70,8 @@ const DEFS: [Def; 11] = [
     Def { id: ID_IDLE_OFF, min: 0, max: 3600, def: 15, flags: OURS },
     Def { id: ID_LOG_ON, min: 0, max: 1, def: 0, flags: OURS },
     Def { id: ID_LOG_CLEAR, min: 0, max: 1, def: 0, flags: ACTION },
+    Def { id: ID_IDLE_DV, min: 0, max: 30_000, def: 100, flags: OURS },
+    Def { id: ID_IDLE_DI, min: 0, max: 6_000, def: 5, flags: OURS },
 ];
 const N: usize = DEFS.len();
 /* config words covered by `load`: ids 0..=max id in DEFS (ours start at 24) */

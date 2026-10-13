@@ -80,7 +80,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 113;
+const BUILD_ID: u32 = 115;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -305,12 +305,12 @@ fn run() -> ! {
      * input the panel is blanked (DISPOFF + backlight off) — an overnight
      * static screen caused real LCD image persistence, and a steady source
      * parked on IN is exactly as static as no input. Activity = the 1 Hz
-     * V/I sample moving vs the previous second's by >100 mV or >5 mA
-     * (well above bench noise, ~25 mV / ~20 uA); plug, unplug, load steps
-     * and PD renegotiations wake within a second. The reference updates
-     * every second, so slow drift never wakes it. Draw verbs also wake. */
-    const IDLE_V_DELTA: u32 = 1_000; /* 100 mV in 1e-4 V units */
-    const IDLE_I_DELTA: u32 = 500; /* 5 mA in 1e-5 A units */
+     * V/I sample moving vs the previous second's by more than idle_dv_mv
+     * or idle_di_ma (settings, default 100 mV / 5 mA — well above bench
+     * noise, ~25 mV / ~20 uA; 0 disables that trigger, both 0 = the screen
+     * always times out); plug, unplug, load steps and PD renegotiations
+     * wake within a second. The reference updates every second, so slow
+     * drift never wakes it. Draw verbs and keys also wake. */
     let mut idle_secs: u32 = 0;
     let mut idle_ref_v: u32 = 0;
     let mut idle_ref_i: u32 = 0;
@@ -364,8 +364,11 @@ fn run() -> ! {
                 cfg::note(cfg::ID_SCREEN, ui::screen() as u32);
                 if tft_alive {
                     let idle_off = cfg::get(cfg::ID_IDLE_OFF);
-                    let moved = v.abs_diff(idle_ref_v) > IDLE_V_DELTA
-                        || i.abs_diff(idle_ref_i) > IDLE_I_DELTA;
+                    /* mV -> 1e-4 V, mA -> 1e-5 A */
+                    let dv = cfg::get(cfg::ID_IDLE_DV) * 10;
+                    let di = cfg::get(cfg::ID_IDLE_DI) * 100;
+                    let moved = (dv != 0 && v.abs_diff(idle_ref_v) > dv)
+                        || (di != 0 && i.abs_diff(idle_ref_i) > di);
                     idle_ref_v = v;
                     idle_ref_i = i;
                     /* a verb (tftui/uiscr/...) woke the panel: restart the
@@ -376,9 +379,11 @@ fn run() -> ! {
                     if moved {
                         idle_secs = 0;
                         let _ = tft::screen_on(); /* no-op when already on */
-                    } else if idle_off != 0 && idle_secs < idle_off {
-                        idle_secs += 1;
-                        if idle_secs == idle_off {
+                    } else if idle_off != 0 {
+                        idle_secs = idle_secs.saturating_add(1);
+                        /* >= (not ==): idle_off_s may be lowered below the
+                         * running count; is_off keeps it one call per idle */
+                        if idle_secs >= idle_off && !tft::is_off() {
                             let r = tft::screen_off();
                             mk(MK_UI_OFFRES, r.map_or_else(|e| 2 + e as u32, |_| 1));
                         }
@@ -792,6 +797,10 @@ fn on_ble_line(line: &[u8]) {
         toggle_rotation();
     }
 }
+
+/* the whole settings table must fit the BLE TX buffer (one notification
+ * burst); past ~13 settings cfgrd needs paging */
+const _: () = assert!(cfg::DUMP_LEN <= bt::TX_MAX);
 
 #[inline(never)]
 fn do_bcfgrd() {

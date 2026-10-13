@@ -15,8 +15,10 @@ Settings: group (active energy group 0/1), rotation (stock 0/2 = 180°),
 brightness (0..9), screen (0..2), runcount (boots, read-only),
 log_interval_s (datalog period 1..60), usb_cmd_off / ble_cmd_off (ignore
 that link's verbs except query/updat/cfg*), idle_off_s (screen-off after
-N s without a reading change, 0 = never), log_on (datalog recording),
-log_clear (write 1 = empty the datalog).
+N s without a reading change, 0 = never), idle_dv_mv / idle_di_ma (a 1 s
+V / I change above this keeps the screen on; 0 disables that trigger, both
+0 = always time out), log_on (datalog recording), log_clear (write 1 =
+empty the datalog).
 
 Wire format (rust/src/cfg.rs):
   cfgrd             -> "OK" + n + n x (id u8, value u32 LE, min u32 LE,
@@ -50,6 +52,8 @@ NAMES = {
     25: "idle_off_s",
     26: "log_on",
     27: "log_clear",
+    28: "idle_dv_mv",
+    29: "idle_di_ma",
 }
 IDS = {v: k for k, v in NAMES.items()}
 
