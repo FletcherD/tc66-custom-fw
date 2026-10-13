@@ -722,9 +722,14 @@ loop over `tft::service`/`stage_row`/`dma_kick`) misses on nearly every
 call, and the cost is **layout-sensitive**: the identical glyph engine
 took 0.15 s or 1.3 s per full redraw depending only on how far unrelated
 code growth shifted it. Anything with a polling loop belongs in fast.x.
-The steady-state main-loop pass is ~0.6 ms, almost all of it cold calls
-into slow-region service functions. Warm tight loops (AES) see the ~10x
-figure.
+Warm tight loops (AES) see the ~10x figure. **Per-pass service entry
+points keep their idle check in fast code**: `pd::service`,
+`cfg::service`, `plot::service` and `bt::service`'s RX-pending test are
+`#[inline(always)]` wrappers (inlined into the fast-flash `run`/
+`ui::service`) that call the slow-region body (`service_due`,
+`write_dirty`, `service_shown`, `pop_byte`) only when there is work — the
+main-loop pass went 400 → ~20 µs. A new per-pass `service()` should follow
+the same split.
 
 ### PC profiler (`pcprf` verb + tools/pcprofile.py)
 

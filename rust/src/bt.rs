@@ -193,8 +193,17 @@ pub fn init(fast: bool) {
 }
 
 /// Ring index one past the newest DMA-written byte.
+#[inline(always)]
 fn write_index(dma: &pac::dma::RegisterBlock) -> usize {
     (RING - dma.ch4cnt().read().cnt().bits() as usize) % RING
+}
+
+/// Any received byte not yet popped. Inlined so the main loop's idle
+/// `service` pass never calls into slow flash (~45 µs cold).
+#[inline(always)]
+fn rx_pending() -> bool {
+    let dma = unsafe { &*pac::Dma::ptr() };
+    write_index(dma) != unsafe { (*RX.0.get()).rd }
 }
 
 /// Pop one received byte, if any. Thread mode only.
@@ -241,6 +250,9 @@ pub fn service(mut dispatch: impl FnMut(&[u8])) {
     let usart = unsafe { &*pac::Usart1::ptr() };
     if usart.stat().read().orerr().bit_is_set() {
         usart.intc().write(|w| w.orec().clear());
+    }
+    if !rx_pending() {
+        return;
     }
     /* at most one ring's worth per pass keeps this bounded */
     for _ in 0..RING {

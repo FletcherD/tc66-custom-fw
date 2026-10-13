@@ -113,6 +113,7 @@ static ST: Racy<State> = Racy(core::cell::UnsafeCell::new(State {
     loaded: false,
 }));
 
+#[inline(always)]
 fn st() -> &'static mut State {
     unsafe { &mut *ST.0.get() }
 }
@@ -254,13 +255,21 @@ pub fn apply_boot() {
 }
 
 /// Main loop: write dirty settings ~2 s after the last change. A failed
-/// word stays dirty and is retried after another quiet period.
-#[inline(never)]
+/// word stays dirty and is retried after another quiet period. The idle
+/// check is inlined into the fast-flash main loop (a cold slow-flash call
+/// costs ~90 µs); the write-out body is called only when due.
+#[inline(always)]
 pub fn service() {
     let s = st();
     if s.dirty == 0 || crate::ina::ticks().wrapping_sub(s.changed_at) < 500 {
         return;
     }
+    write_dirty();
+}
+
+#[inline(never)]
+fn write_dirty() {
+    let s = st();
     for (k, d) in DEFS.iter().enumerate() {
         if s.dirty & (1 << k) == 0 {
             continue;

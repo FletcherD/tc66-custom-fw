@@ -180,6 +180,7 @@ static PD: Racy<Pd> = Racy(core::cell::UnsafeCell::new(Pd {
     pps_tick: 0,
 }));
 
+#[inline(always)]
 fn pd() -> &'static mut Pd {
     unsafe { &mut *PD.0.get() }
 }
@@ -533,17 +534,26 @@ fn vcc_sweep(p: &mut Pd) -> Result<(), u8> {
 
 /* ---- the engine (called from the main loop every pass) ---- */
 
-#[inline(never)]
+/// The idle checks are inlined into the (fast-flash) main loop: a cold call
+/// into slow flash costs ~90 µs even when it returns at once. The engine
+/// body runs only when a poll is due.
+#[inline(always)]
 pub fn service() {
     let p = pd();
     if p.state == ST_OFF {
         return;
     }
-    let now = ina::ticks();
     let interval = if p.state >= ST_LISTEN { 2 } else { 12 };
-    if now.wrapping_sub(p.poll_tick) < interval {
+    if ina::ticks().wrapping_sub(p.poll_tick) < interval {
         return;
     }
+    service_due();
+}
+
+#[inline(never)]
+fn service_due() {
+    let p = pd();
+    let now = ina::ticks();
     p.poll_tick = now;
     let r = match p.state {
         ST_RD_CYCLE => {

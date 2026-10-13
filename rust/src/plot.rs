@@ -79,6 +79,7 @@ static PLOT: Racy<Plot> = Racy(core::cell::UnsafeCell::new(Plot {
     prev: None,
 }));
 
+#[inline(always)]
 fn st() -> &'static mut Plot {
     unsafe { &mut *PLOT.0.get() }
 }
@@ -129,9 +130,19 @@ fn color(p: &Plot, y: u16) -> u16 {
 
 /// Advance the plot one step; call only while the tft engine is idle.
 /// Ok(true) = nothing to do (screen not shown, or waiting for the next
-/// column); Ok(false) = a job was kicked or a command sent.
-#[inline(never)]
+/// column); Ok(false) = a job was kicked or a command sent. The off check
+/// is inlined into the fast-flash caller (ui::service) — a cold slow-flash
+/// call costs ~90 µs.
+#[inline(always)]
 pub fn service() -> Result<bool, u8> {
+    if st().stage == ST_OFF {
+        return Ok(true);
+    }
+    service_shown()
+}
+
+#[inline(never)]
+fn service_shown() -> Result<bool, u8> {
     let p = st();
     match p.stage {
         ST_EXIT => {
