@@ -6,7 +6,8 @@ M1 (real calibrated measurement), M2 persistence (eeprom.rs/cfg.rs/
 persist.rs: stock-compatible EEPROM layout — settings via `cfgrd`/`cfgwr`
 + tools/cfg.py, energy ring, datalog + `gtrec`, run count/serial in
 getva; HARDWARE.md "EEPROM layout", FIRMWARE.md "Persistence"), the M3 basics (ST7735S driver in
-tft.rs + three screens in ui.rs — V/I/P, energy + run clock, temp/D± —
+tft.rs + four screens in ui.rs — V/I/P, energy + run clock, temp/D±, and
+plot.rs's full-screen V/I plot on the panel's hardware rolling scroll —
 with no-change screen-off after `idle_off_s` (default 15 s); keys.rs polls K1/K2 — K1 next screen, K2
 held 1 s resets energy, any press wakes; `keyrd`/`uiscr` dev verbs), the
 FWDGT watchdog (wdg.rs, ~13 s, fed per loop pass + inside the flasher —

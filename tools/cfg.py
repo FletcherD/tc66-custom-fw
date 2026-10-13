@@ -12,7 +12,7 @@
                              writes it to EEPROM ~2 s after the last change)
 
 Settings: group (active energy group 0/1), rotation (stock 0/2 = 180°),
-brightness (0..9), screen (0..2), runcount (boots, read-only),
+brightness (0..9), screen (0..3, 3 = plot), runcount (boots, read-only),
 log_interval_s (datalog period 1..60), usb_cmd_off / ble_cmd_off (ignore
 that link's verbs except query/updat/cfg*), idle_off_s (screen-off after
 N s without a reading change, 0 = never), idle_dv_mv / idle_di_ma (a 1 s

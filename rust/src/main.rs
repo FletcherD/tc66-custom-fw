@@ -61,6 +61,7 @@ mod markers;
 #[cfg(feature = "dev-verbs")]
 mod pd;
 mod persist;
+mod plot;
 mod powerz;
 #[cfg(feature = "dev-verbs")]
 mod qc;
@@ -80,7 +81,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 115;
+const BUILD_ID: u32 = 118;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B

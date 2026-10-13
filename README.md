@@ -40,8 +40,9 @@ gone) — our own protocol on top of a compatible base, and room to add features
   the stock seq, both groups + run clocks + the group setting restore
   across reboots, BLE settings verbs work. Not yet exercised: a real power
   cut mid-session (torn-slot fallback) and the K2-hold reset.
-- **M3 — display: done.** ST7735S driver + three always-on screens
-  (V/I/P; mAh/mWh + run clock; temperature + D+/D−), K1 steps screens, K2
+- **M3 — display: done.** ST7735S driver + four always-on screens
+  (V/I/P; mAh/mWh + run clock; temperature + D+/D−; a full-screen
+  scrolling V/I plot using the panel's hardware scroll — `plot.rs`), K1 steps screens, K2
   held 1 s resets energy, 15 s idle screen-off (burn-in protection; any
   key press wakes it — `rust/src/keys.rs`). Pixel streaming is
   DMA-driven and non-blocking (SPI0 TX on DMA ch2, pumped from the main

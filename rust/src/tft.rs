@@ -500,6 +500,64 @@ pub fn start_char(x: u16, y: u16, ch: u8, fg: u16, bg: u16) -> Result<(), u8> {
     Ok(())
 }
 
+/// Kick an async whole-screen clear to black. Engine must be idle.
+pub fn start_clear() -> Result<(), u8> {
+    ensure_init()?;
+    start_fill(0, 0, WIDTH - 1, HEIGHT - 1, 0x0000)
+}
+
+/// Kick an async 1-px-wide vertical run (x, y0..=y1). Engine must be idle.
+pub fn start_vline(x: u16, y0: u16, y1: u16, color: u16) -> Result<(), u8> {
+    ensure_init()?;
+    start_fill(x, y0, x, y1, color)
+}
+
+/* ---------------- rolling scroll (plot screen) ----------------
+ * ST7735S datasheet V1.1 §9.11 / 10.1.26 (33h) / 10.1.30 (37h). The scroll
+ * runs along the 162 GRAM lines = the panel's 160-px axis, which is
+ * horizontal in our landscape (MV=1) orientation; MV only affects writes.
+ * Lines 0 and 161 are off-panel (COL_OFF), so they are the fixed areas:
+ * TFA=1, VSA=160, BFA=1 (must sum to 162). SSA = 1 + k shows GRAM line
+ * 1 + (p + k) mod 160 on panel line 1 + p. Commands only while the engine
+ * is idle. */
+
+/// Enter rolling-scroll mode at the identity position (no visible change).
+pub fn scroll_on() -> Result<(), u8> {
+    ensure_init()?;
+    if unsafe { (*ENGINE.0.get()).phase } != PH_IDLE {
+        return Err(5);
+    }
+    cmd(0x33, &[0, 1, 0, WIDTH as u8, 0, 1])?;
+    cmd(0x37, &[0, 1])
+}
+
+/// Column `x` (screen coordinate, written while scrolling) is the newest:
+/// scroll so it shows at the right edge and x+1 (the oldest) at the left.
+/// Whether GRAM line rises or falls with screen x depends on MADCTL.
+pub fn scroll_newest(x: u16) -> Result<(), u8> {
+    if unsafe { (*ENGINE.0.get()).phase } != PH_IDLE {
+        return Err(5);
+    }
+    let x = x % WIDTH;
+    let k = if unsafe { *MADCTL.0.get() } == SCROLL_RISING {
+        (x + 1) % WIDTH
+    } else {
+        WIDTH - 1 - x
+    };
+    cmd(0x37, &[0, 1 + k as u8])
+}
+/* MADCTL whose screen x maps to a rising GRAM line (the other falls) */
+const SCROLL_RISING: u8 = MADCTL_ROT0; /* 0xA8 falls (bench-verified) */
+
+/// Leave scroll mode (NORON): the display maps GRAM 1:1 again.
+pub fn scroll_off() -> Result<(), u8> {
+    ensure_init()?;
+    if unsafe { (*ENGINE.0.get()).phase } != PH_IDLE {
+        return Err(5);
+    }
+    write_command(0x13)
+}
+
 #[cfg(feature = "dev-verbs")]
 /// Blocking solid fill (dev verbs / test pattern / init clear): waits out
 /// any running job, kicks the fill, pumps it to completion. Bounded.

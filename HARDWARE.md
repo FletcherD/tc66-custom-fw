@@ -419,6 +419,7 @@ The chip shares the INA226/EEPROM I²C bus — all access inside `ina::pause`.
 - Pins: **SCK=PA5, MOSI=PA7** (no MISO), **DC=PA4** (0=cmd/1=data), **RST=PA3** (active low), CS tied low.
 - **Backlight: PA9 = enable** (high = on), **PB3 = PWM brightness** (TIMER1 channel, ~1.5 kHz).
 - Bring-up: hardware RST pulse → SLPOUT(0x11)+100 ms → INVON(0x21) → frame/power/VCOM config (0xB1–0xC7) → MADCTL(0x36) → COLMOD(0x3A)=0x55 → 32 bytes gamma → +100 ms → DISPON(0x29). Draw with CASET(0x2A)/RASET(0x2B) (apply the +1/+26 offset) → RAMWR(0x2C) → pixel stream. No RAM framebuffer (8 KB can't hold a frame) — draw straight to GRAM.
+- **Rolling scroll** (datasheet V1.1 §9.11, cmds 33h/37h, exit 13h NORON): it runs along the 162 GRAM *lines* = the panel's 160-px axis, i.e. **horizontal** in our landscape (MV=1 only affects writes). Lines 0/161 are off-panel, so full-width scroll is TFA=1, VSA=160, BFA=1 (must sum to 162); SSA=1+k shows GRAM line 1+(p+k) mod 160 on panel line 1+p. Datasheet: https://www.waveshare.com/w/upload/e/e2/ST7735S_V1.1_20111121.pdf
 - **MADCTL on this unit: `0xA8`** (stock's "180°" variant) is right-side up; `0x68` renders upside-down (webcam-verified). Colors are correct with the BGR bit as stock sets it.
 - **PA9 (backlight enable) is shared with the USB D+ soft-connect** — the firmware already holds it high after enumeration, so backlight brightness is controlled purely by the PB3 PWM (compare 0 = dark).
 

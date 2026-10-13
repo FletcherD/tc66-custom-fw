@@ -3,6 +3,7 @@
 //!   0  V / I / P            (yellow / cyan / green)
 //!   1  mAh / mWh / hh:mm:ss (energy since power-on or the last K2 reset)
 //!   2  temperature / D+ / D−
+//!   3  scrolling V/I plot   (plot.rs — full screen, no cells)
 //!
 //! Fixed layout of 8 monospace font cells per line (font.rs, 18x24). Cells
 //! are always fully overdrawn by the tft glyph engine, and only cells whose
@@ -18,6 +19,7 @@
 
 use crate::font;
 use crate::ina;
+use crate::plot;
 use crate::tft;
 
 const COLS: usize = 8;
@@ -26,12 +28,14 @@ const Y0: u16 = 1;
 const Y_STEP: u16 = font::CELL_H + 3;
 
 const BG: u16 = 0x0000;
-pub const SCREENS: u8 = 3;
+pub const SCREENS: u8 = 4;
+pub const PLOT: u8 = 3;
 /* per-screen line colors (RGB565) */
 const COLORS: [[u16; 3]; SCREENS as usize] = [
     [0xFFE0, 0x07FF, 0x07E0], /* V yellow, I cyan, P green */
     [0xFD20, 0xF81F, 0xFFFF], /* mAh orange, mWh magenta, time white */
     [0xFBEA, 0xFFFF, 0xAFFF], /* temp salmon, D+ white, D- light blue */
+    [0; 3],                   /* plot: no cells */
 ];
 
 struct Racy<T>(core::cell::UnsafeCell<T>);
@@ -50,10 +54,19 @@ pub fn screen() -> u8 {
 
 /// Select a screen (wraps). Poisons the char cache so the next `draw`
 /// marks every cell dirty (same char in a new color must repaint too).
+/// Entering or leaving the plot is deferred to `service` (tft commands
+/// need an idle engine).
 pub fn set_screen(n: u8) {
+    let n = n % SCREENS;
+    if n == PLOT {
+        plot::enter();
+    } else {
+        plot::leave();
+    }
     unsafe {
-        *SCREEN.0.get() = n % SCREENS;
+        *SCREEN.0.get() = n;
         *LAST.0.get() = [[0; COLS]; 3];
+        *DIRTY.0.get() = 0;
     }
 }
 
@@ -113,6 +126,9 @@ fn fmt1_5(line: &mut [u8; COLS], val: u32, unit: u8) {
 /// touches the hardware; `service`/`flush` do the drawing.
 #[inline(never)]
 pub fn draw(run_secs: u32) {
+    if screen() == PLOT {
+        return;
+    }
     let m = ina::snapshot();
     let mut lines = [[b' '; COLS]; 3];
     match screen() {
@@ -170,8 +186,11 @@ pub fn draw(run_secs: u32) {
 /// was torn down (caller drops the always-on refresh, as before).
 #[inline(never)]
 pub fn service() -> Result<bool, u8> {
-    if !tft::service()? {
+    if !tft::service()? || !plot::service()? {
         return Ok(false);
+    }
+    if screen() == PLOT {
+        return Ok(true);
     }
     let dirty = unsafe { &mut *DIRTY.0.get() };
     if *dirty == 0 {
