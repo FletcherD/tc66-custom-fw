@@ -16,7 +16,7 @@ edition = "2021"
 # - dev-board: board debug verbs (i2crd adcrd gpird clkrd keyrd rstrd wdtst
 #   idlrd).
 # - dev-bt: BLE bring-up verbs (btini btcmd btget btrun btsta btspy).
-# - dev-tft: display bring-up verbs (tftfl tftbl tftui uiscr).
+# - dev-tft: display bring-up verbs (tftfl tftbl tftui uiscr tftrd).
 # - dev-verbs: all four groups above.
 # - pcprf: the TIMER5-veneer PC profiler (ina.rs) + its `pcprf` dump verb
 #   (without it TIMER5_DAC branches straight to the tick body).

@@ -89,7 +89,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 148;
+const BUILD_ID: u32 = 149;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -719,6 +719,9 @@ fn on_packet(buf: &[u8]) {
             Err(e) => write_all(&[b'E', b'R', e]),
         }
         }
+    } else if match5(buf, b"tftrd") {
+        #[cfg(feature = "dev-tft")]
+        do_tftrd(buf);
     } else if match5(buf, b"tftbl") {
         #[cfg(feature = "dev-tft")]
         {
@@ -823,6 +826,50 @@ fn do_eeprd(buf: &[u8]) {
         Ok(()) => write_all(&reply[..2 + len]),
         Err(e) => write_all(&[b'E', b'R', e]),
     }
+}
+
+/// tftrd <cmd> <dummy bits> <n u16 LE> [x0 y0 x1 y1]: panel readback
+/// (tft.rs "GRAM / register readback"). Sends `cmd` (after a CASET/RASET
+/// window in screen coordinates, if given — for RAMRD 0x2E), clocks
+/// `dummy` bits, reads `n` bytes. -> "OK" + MADCTL + SSA (0 = no scroll) +
+/// n bytes + status u8 (0, or the tft.rs stage of the post-read panel
+/// re-init), or "ER" + code before any data (0x0F bad args, tft.rs stages).
+/// The panel is reset + re-initialized after every read (~0.3 s blank).
+#[cfg(feature = "dev-tft")]
+#[inline(never)]
+fn do_tftrd(buf: &[u8]) {
+    let (c, dummy, n) = match (buf.get(5), buf.get(6), buf.get(7), buf.get(8)) {
+        (Some(&c), Some(&d), Some(&lo), Some(&hi)) => (c, d, lo as u16 | (hi as u16) << 8),
+        _ => {
+            write_all(&[b'E', b'R', 0x0F]);
+            return;
+        }
+    };
+    let win = match buf.get(9..13) {
+        Some(&[x0, y0, x1, y1])
+            if x0 <= x1 && y0 <= y1 && (x1 as u16) < tft::WIDTH && (y1 as u16) < tft::HEIGHT =>
+        {
+            Some([x0, y0, x1, y1])
+        }
+        Some(_) => {
+            write_all(&[b'E', b'R', 0x0F]);
+            return;
+        }
+        None => None,
+    };
+    match tft::read_begin(win) {
+        Ok((madctl, ssa)) => write_all(&[b'O', b'K', madctl, ssa]),
+        Err(e) => {
+            write_all(&[b'E', b'R', e]);
+            return;
+        }
+    }
+    tft::read_stream(c, dummy, n, |chunk| write_all(chunk));
+    let st = match tft::read_end() {
+        Ok(()) => 0,
+        Err(e) => e,
+    };
+    write_all(&[st]);
 }
 
 /// versn -> "OK" + ASCII BUILD_ID, e.g. "OK144"

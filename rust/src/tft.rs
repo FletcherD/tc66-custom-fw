@@ -275,6 +275,22 @@ fn ensure_init() -> Result<(), u8> {
     });
     spi.ctl0().modify(|_, w| w.spien().enabled());
 
+    panel_reset_init()?;
+
+    unsafe { *INITED.0.get() = true };
+    /* raw variant: fill_rect's ensure_init guard would recurse into this
+     * function, which the static stack-gate (correctly) refuses to bound */
+    fill_rect_raw(0, 0, WIDTH - 1, HEIGHT - 1, 0x0000)?; /* clear to black */
+    backlight_init();
+    Ok(())
+}
+
+/// Hardware reset pulse + the init sequence. Frame memory survives RESX
+/// (datasheet §9.15.1), so the readback verb reuses this to recover the
+/// interface after a read.
+#[inline(never)]
+fn panel_reset_init() -> Result<(), u8> {
+    let gpioa = unsafe { &*pac::Gpioa::ptr() };
     /* hardware reset pulse on PA3 (no SW-reset 0x01 in the stock sequence) */
     gpioa.bc().write(|w| w.cr3().set_bit());
     board::delay_ms(100);
@@ -294,12 +310,6 @@ fn ensure_init() -> Result<(), u8> {
         }
         i += 2 + n;
     }
-
-    unsafe { *INITED.0.get() = true };
-    /* raw variant: fill_rect's ensure_init guard would recurse into this
-     * function, which the static stack-gate (correctly) refuses to bound */
-    fill_rect_raw(0, 0, WIDTH - 1, HEIGHT - 1, 0x0000)?; /* clear to black */
-    backlight_init();
     Ok(())
 }
 
@@ -593,7 +603,9 @@ pub fn scroll_on() -> Result<(), u8> {
         return Err(5);
     }
     cmd(0x33, &[0, 1, 0, WIDTH as u8, 0, 1])?;
-    cmd(0x37, &[0, 1])
+    cmd(0x37, &[0, 1])?;
+    note_ssa(1);
+    Ok(())
 }
 
 /// Column `x` (screen coordinate, written while scrolling) is the newest:
@@ -609,7 +621,9 @@ pub fn scroll_newest(x: u16) -> Result<(), u8> {
     } else {
         WIDTH - 1 - x
     };
-    cmd(0x37, &[0, 1 + k as u8])
+    cmd(0x37, &[0, 1 + k as u8])?;
+    note_ssa(1 + k as u8);
+    Ok(())
 }
 /* MADCTL whose screen x maps to a rising GRAM line (the other falls) */
 const SCROLL_RISING: u8 = MADCTL_ROT0; /* 0xA8 falls (bench-verified) */
@@ -620,7 +634,133 @@ pub fn scroll_off() -> Result<(), u8> {
     if unsafe { (*ENGINE.0.get()).phase } != PH_IDLE {
         return Err(5);
     }
-    write_command(0x13)
+    write_command(0x13)?;
+    note_ssa(0);
+    Ok(())
+}
+
+/* Current scroll start address (0 = scroll mode off) — the readback verb
+ * reports it so the host can unroll the plot screen, and restores it after
+ * the post-read panel reset. Only tracked in dev-tft builds. */
+#[cfg(feature = "dev-tft")]
+static SSA: Racy<u8> = Racy(core::cell::UnsafeCell::new(0));
+#[cfg(feature = "dev-tft")]
+fn note_ssa(v: u8) {
+    unsafe { *SSA.0.get() = v };
+}
+#[cfg(not(feature = "dev-tft"))]
+fn note_ssa(_: u8) {}
+
+/* ---------------- GRAM / register readback (dev-tft) ----------------
+ * The panel has no MISO: SDA (our MOSI, PA7) is bidirectional (datasheet
+ * §9.4.2). A read bit-bangs SCK/SDA as GPIOs: command byte out with DC low,
+ * then SDA to input, DC high, and the reply is clocked in — the panel shifts
+ * on SCL's falling edge, we sample after the rising edge. The datasheet
+ * requires CSX high before the next command, but CS is tied low here, so a
+ * read always ends with RESX + the init sequence (`read_end`); frame memory
+ * survives RESX (§9.15.1). RAMRD (2Eh) returns 18-bit pixels regardless of
+ * COLMOD. Dummy-bit counts (RDDID: 1, RAMRD: likely 8) are the host's to
+ * pass, so the format can be probed without reflashing. */
+
+#[cfg(feature = "dev-tft")]
+/// Prepare a read: engine idle, optional CASET/RASET window (screen coords,
+/// for RAMRD), shifter drained. Returns (MADCTL, SSA) for the host header.
+/// Nothing has touched the bus pins yet if this fails.
+#[inline(never)]
+pub fn read_begin(win: Option<[u8; 4]>) -> Result<(u8, u8), u8> {
+    ensure_init()?;
+    pump_idle()?;
+    if let Some([x0, y0, x1, y1]) = win {
+        cmd(0x2A, &[0, x0 + COL_OFF, 0, x1 + COL_OFF])?;
+        cmd(0x2B, &[0, y0 + ROW_OFF, 0, y1 + ROW_OFF])?;
+    }
+    spi_wait_idle()?;
+    Ok(unsafe { (*MADCTL.0.get(), *SSA.0.get()) })
+}
+
+#[cfg(feature = "dev-tft")]
+/* half an SCL period: >= 8 cycles @ 48 MHz = 167 ns (read needs >= 60 ns
+ * high/low, 150 ns cycle; TACC <= 50 ns) */
+#[inline(always)]
+fn half() {
+    cortex_m::asm::delay(8);
+}
+
+#[cfg(feature = "dev-tft")]
+/// Bit-bang `c`, clock `dummy` bits, then `n` bytes into `out` in 64-B
+/// chunks. Infallible (no waits); leaves SDA as an input and SCK a GPIO —
+/// `read_end` must follow.
+#[inline(never)]
+pub fn read_stream(c: u8, dummy: u8, n: u16, mut out: impl FnMut(&[u8])) {
+    let gpioa = unsafe { &*pac::Gpioa::ptr() };
+    gpioa.bc().write(|w| w.cr5().set_bit().cr4().set_bit()); /* SCL low, DC low */
+    gpioa.ctl().modify(|_, w| w.ctl5().output().ctl7().output());
+    for i in (0..8).rev() {
+        if c & (1 << i) != 0 {
+            gpioa.bop().write(|w| w.bop7().set_bit());
+        } else {
+            gpioa.bc().write(|w| w.cr7().set_bit());
+        }
+        half();
+        gpioa.bop().write(|w| w.bop5().set_bit()); /* panel samples here */
+        half();
+        if i == 0 {
+            /* release SDA before the falling edge that shifts the reply */
+            gpioa.ctl().modify(|_, w| w.ctl7().input());
+            gpioa.bop().write(|w| w.bop4().set_bit()); /* DC high */
+        }
+        gpioa.bc().write(|w| w.cr5().set_bit());
+    }
+    let bit = || {
+        half();
+        gpioa.bop().write(|w| w.bop5().set_bit());
+        half();
+        let v = gpioa.istat().read().bits() >> 7 & 1;
+        gpioa.bc().write(|w| w.cr5().set_bit());
+        v as u8
+    };
+    for _ in 0..dummy {
+        bit();
+    }
+    let mut chunk = [0u8; 64];
+    let mut fill = 0;
+    for _ in 0..n {
+        let mut b = 0u8;
+        for _ in 0..8 {
+            b = b << 1 | bit();
+        }
+        if let Some(slot) = chunk.get_mut(fill) {
+            *slot = b;
+        }
+        fill += 1;
+        if fill == chunk.len() {
+            out(&chunk);
+            fill = 0;
+        }
+    }
+    if fill > 0 {
+        out(chunk.get(..fill).unwrap_or(&chunk));
+    }
+}
+
+#[cfg(feature = "dev-tft")]
+/// End a read: RESX low (the panel releases SDA), pins back to SPI0, then
+/// the init sequence and the scroll / display-off state as before the read.
+#[inline(never)]
+pub fn read_end() -> Result<(), u8> {
+    let gpioa = unsafe { &*pac::Gpioa::ptr() };
+    gpioa.bc().write(|w| w.cr3().set_bit());
+    gpioa.ctl().modify(|_, w| w.ctl5().alternate().ctl7().alternate());
+    panel_reset_init()?;
+    let ssa = unsafe { *SSA.0.get() };
+    if ssa != 0 {
+        cmd(0x33, &[0, 1, 0, WIDTH as u8, 0, 1])?;
+        cmd(0x37, &[0, ssa])?;
+    }
+    if unsafe { *SCREEN_OFF.0.get() } {
+        write_command(0x28)?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "dev-tft")]

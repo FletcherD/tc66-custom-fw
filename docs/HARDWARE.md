@@ -169,6 +169,7 @@ Verbs:
 | `tftfl` | `OK` / `ER`+stage | our dev verb: TFT test pattern (no args) or solid fill (RGB565 LE u16); ER stages in tft.rs (tools/tft.py) |
 | `tftbl` | `OK` / `ER`+stage | our dev verb: backlight PWM compare, LE u16 0..=999 (tools/tft.py) |
 | `tftui` | `OK` / `ER`+stage | our dev verb: force a main-screen refresh (tools/tft.py) |
+| `tftrd` | `OK`+MADCTL+SSA+n B+status / `ER`+stage | our dev verb: `tftrd <cmd> <dummy bits> <n u16 LE> [x0 y0 x1 y1]` panel readback — sends `cmd` (after a CASET/RASET window in screen coords, if given), clocks `dummy` bits, reads n bytes over the bidirectional SDA; SSA = scroll start address (0 = no scroll); trailing status 0 or the stage of the post-read panel reset + re-init (tft.rs, tools/tftgrab.py) |
 | `pdctl` | `OK` / `ER`+stage | our trigger verb: PD sink engine off (0) / arm (1) / hard-reset (2 — while sniffing: makes the pair renegotiate; works only when the locked CC is CC1) / listen-only sniffer (3) (pd.rs, tools/pd.py) |
 | `pdsta` | `OK`+20 B | our trigger verb: PD engine state (layout: `pd::status`; while sniffing — state 7 — byte 3 = a sink is attached) |
 | `pdcap` | `OK`+n+n×4 B | our trigger verb: received source PDOs (LE u32 each) |
@@ -188,7 +189,7 @@ sets"): the product verbs above (`getva query rotat gtrec cfgrd cfgwr updat
 versn eeprd rawva`) are always served; the trigger verbs (`pdctl pdsta pdcap
 pdinf pdreq qctrg qc3ct qcdet afctr qcoff`) need `triggers` (in release builds);
 the dev verbs need their group — `dev-board` (`i2crd adcrd gpird clkrd
-keyrd rstrd wdtst idlrd`), `dev-tft` (`uiscr tftfl tftbl tftui`), `dev-bt`
+keyrd rstrd wdtst idlrd`), `dev-tft` (`uiscr tftfl tftbl tftui tftrd`), `dev-bt`
 (`btini btcmd btget btrun btsta btspy`), `fcp` (the untested
 `fcptr`/`fcprd`/`scptr`) — and `pcprf` its own feature; dev builds carry the
 Makefile's `DEV_FEATURES` subset.
@@ -476,6 +477,7 @@ trigger holds them; `qcoff` releases all four pins.
 - **ST7735S** controller, **160×80 RGB565**, memory offset **(col +1, row +26)**, inversion on.
 - **SPI0** (base `0x40013000`), master, mode 0, 8-bit, MSB-first, ~half-PCLK.
 - Pins: **SCK=PA5, MOSI=PA7** (no MISO), **DC=PA4** (0=cmd/1=data), **RST=PA3** (active low), CS tied low.
+- **Readback** (datasheet §9.4.2): SDA is bidirectional, so reads bit-bang PA5/PA7 as GPIOs — command with DC low, release SDA before SCL's next falling edge, DC high, sample after each rising edge (read timing: ≥60 ns SCL high/low). A read must end with CSX high, which this board can't do, so every read ends with RESX + the init sequence; frame memory survives RESX (§9.15.1). Bench-verified on build 149: RDDID (04h) and RDID1-3 (DAh-DCh) take 1 dummy clock, the 8-bit register reads (0Ah-0Fh) none; this module's ID is `83 76 0F` (not the datasheet's default 0x7C). RAMRD (2Eh) needs **9** dummy clocks, then 18-bit pixels, R first (3 B, 6 bits MSB-aligned; a zero R/B channel of a non-black pixel reads back as 1 — the panel's 565→666 fill bit, so decode R/B from their top 5 bits). Full 160×80 grab ≈ 2 s incl. the re-init.
 - **Backlight: PA9 = enable** (high = on), **PB3 = PWM brightness** (TIMER1 CH1, AF2; ours 1 kHz, compare 0..=999 of a 1000 period).
 - Bring-up: hardware RST pulse → SLPOUT(0x11)+100 ms → INVON(0x21) → frame/power/VCOM config (0xB1–0xC7) → MADCTL(0x36) → COLMOD(0x3A)=0x55 → 32 bytes gamma → +100 ms → DISPON(0x29). Draw with CASET(0x2A)/RASET(0x2B) (apply the +1/+26 offset) → RAMWR(0x2C) → pixel stream. No RAM framebuffer (8 KB can't hold a frame) — draw straight to GRAM.
 - **Rolling scroll** (datasheet V1.1 §9.11, cmds 33h/37h, exit 13h NORON): it runs along the 162 GRAM *lines* = the panel's 160-px axis, i.e. **horizontal** in our landscape (MV=1 only affects writes). Lines 0/161 are off-panel, so full-width scroll is TFA=1, VSA=160, BFA=1 (must sum to 162); SSA=1+k shows GRAM line 1+(p+k) mod 160 on panel line 1+p. Datasheet: https://www.waveshare.com/w/upload/e/e2/ST7735S_V1.1_20111121.pdf
