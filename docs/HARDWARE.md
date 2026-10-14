@@ -442,8 +442,8 @@ host tool in the command table above / tools/pd.py; engine internals in
 FIRMWARE.md "USB-PD sink". **INT_N = PA15** (open-drain, active-low; needs
 the GPIO's internal pull-up, as stock configures it) — bench-verified: an
 unmasked I_COMP_CHNG pulls PA15 low, reading Interrupt or setting
-Control0.INT_MASK releases it, no other GPIOA/B/F pin moves. Our engine
-polls instead (not used yet). **The chip's VBUS pin is not wired to VBUS**:
+Control0.INT_MASK releases it, no other GPIOA/B/F pin moves. pd.rs reads it
+as a GPIO to wake the PD engine. **The chip's VBUS pin is not wired to VBUS**:
 Status0.VBUSOK stays 0 with 5 V present, so MEAS_VBUS is useless — measure
 CC only.
 The chip shares the INA226/EEPROM I²C bus — all access inside `ina::pause`.

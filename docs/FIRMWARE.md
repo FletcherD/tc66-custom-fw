@@ -474,11 +474,17 @@ past the ~10 s keepalive deadline).
 
 - **Structure:** all thread-mode (main-loop `pd::service()` + verb handlers —
   one context, so the `PD` static needs no synchronization). Every FUSB302
-  I²C access runs inside `ina::pause` (shared bus). INT_N (PA15) is not used
-  yet: status+interrupt registers are polled every 2 ticks
-  (8 ms) once attached (every 12 ticks before); the tight PD timing (GoodCRC in 195 µs) is the chip's
-  AUTO_CRC hardware. Idle cost: zero. Active cost: one 7-byte status burst
-  per 2 ticks ≈ 1 ms of sampler pause per 8 ms.
+  I²C access runs inside `ina::pause` (shared bus). **INT_N-driven**: the
+  inlined `service()` check reads PA15 (FUSB302 INT_N, a plain GPIO — no new
+  MCU interrupt) every main-loop pass; while attached or sniffing, low =
+  poll now (unmasked: CC activity edges, GoodCRC sent, TX sent/retry-fail,
+  hard/soft reset; Control0 keeps INT_MASK clear — `C0_TX_FLUSH`), else a
+  backup poll every `BACKUP_POLL` = 12 ticks (48 ms) for timeouts, detach
+  (10 quiet polls) and the CC sweep; attach polling every 12 ticks. The
+  Request goes out in the same ms as the Source_Cap. The tight PD timing
+  (GoodCRC in 195 µs) is the chip's AUTO_CRC hardware. Idle cost: zero.
+  Active cost: one 7-byte status burst (≈ 1 ms sampler pause) per wire
+  event + one per 48 ms.
 - **Flow:** arm → **Rd-cycle** (drop the pulldowns ~600 ms, then re-present —
   a source plugged in before we armed has exhausted its Source_Capabilities
   retries against a silent sink and stopped listening; only a detach makes it
@@ -515,11 +521,11 @@ past the ~10 s keepalive deadline).
 - **Sniffer** (`pdctl 3`, state `ST_SNIFF`): listen-only — Switches0 with no
   Rd (the ~500 ms MDAC sweep also runs without Rd), Switches1 without
   AUTO_CRC or TXCC, never transmits. `sniff_poll` locks the receiver onto the
-  CC above ~0.2 V (the higher one), polls every tick (4 ms — the 80-B RX
-  FIFO), drains up to 8 frames per poll into the capture ring (both sides'
+  CC above ~0.2 V (the higher one), polls on every INT_N wake (CC activity
+  edges — each frame on the wire), drains up to 8 frames per poll into the capture ring (both sides'
   messages incl. GoodCRCs), re-arms the PD logic after a hard reset, and
   unlocks when the active CC falls below ~0.2 V. `pdsta` err 0xE5 = the RX
-  FIFO filled between polls. `rx_capture` is shared with the sink's
+  FIFO filled between polls (frames lost). `rx_capture` is shared with the sink's
   `rx_frame`.
 - Host tool: `tools/pd.py` (`arm/off/hardreset/sniff/status/caps/req/watch`, decodes
   PDOs and the 20-B `pdsta` reply — field layout in `pd::status`).

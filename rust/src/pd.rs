@@ -12,21 +12,24 @@
 //! fixed PDO. **A granted Request raises the OUT-port voltage** — bench
 //! rule: nothing attached downstream when triggering.
 //!
-//! Everything runs in thread mode from the main loop (`service()`, ~every
-//! 8 ms while active) and the verb handlers — same context, so the `PD`
-//! static is thread-exclusive (no ISR ever touches it). All I²C goes
-//! through `ina::pause` per the bus rule. INT_N is on PA15 (active-low,
-//! needs the internal pull-up — docs/HARDWARE.md) but unused: the FUSB302
-//! interrupt/status registers are polled; the tight timing (GoodCRC within
-//! 195 µs) is AUTO_CRC hardware.
+//! Everything runs in thread mode from the main loop (`service()`) and the
+//! verb handlers — same context, so the `PD` static is thread-exclusive (no
+//! ISR ever touches it). All I²C goes through `ina::pause` per the bus rule.
+//! The FUSB302's INT_N (PA15, active-low, internal pull-up) is read as a
+//! plain GPIO in the main loop — not an MCU interrupt: while attached or
+//! sniffing, a low INT_N runs a poll at once (CC activity edges, GoodCRC
+//! sent, TX done/failed, resets — the MASK_* constants), else a backup poll
+//! every BACKUP_POLL ticks (48 ms) covers timeouts, detach and the CC sweep.
+//! The tight timing (GoodCRC within 195 µs) is AUTO_CRC hardware.
 //!
-//! Poll cost while armed: one 7-byte status burst per 2 ticks ≈ 1 ms of
-//! sampler pause per 8 ms — the measurement window stretches slightly
-//! while a PD session is active. Idle (state 0, the default): zero cost.
+//! Poll cost: one 7-byte status burst ≈ 1 ms of sampler pause per poll —
+//! per wire event plus one per 48 ms while armed; attach polling (no source
+//! yet) every 48 ms. Idle (state 0, the default): zero cost.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::i2c;
+use gd32f1::gd32f150 as pac;
 use crate::ina;
 
 const ADDR: u8 = 0x22;
@@ -62,7 +65,17 @@ fn sw1_rev(rev: u8) -> u8 {
     rev << 5
 }
 /* Control0/1 */
-const C0_INT_MASK_TXFLUSH: u8 = 0x60;
+const C0_TX_FLUSH: u8 = 0x40; /* INT_MASK (0x20) clear: INT_N live */
+/* interrupt masks (1 = masked). INT_N (PA15) wakes service(): CC activity
+ * edges (start/end of every frame on the wire) in both modes; the sink
+ * also on GoodCRC-sent (a frame received), TX done/failed and resets. */
+const MASK_ACTIVITY_ONLY: u8 = 0xBF;
+const MASKA_SINK: u8 = 0xE0; /* RETRYFAIL HARDSENT TXSENT SOFTRST HARDRST */
+const MASKA_SNIFF: u8 = 0xFE; /* HARDRST */
+const MASKB_SINK: u8 = 0x00; /* GCRCSENT */
+const MASKB_SNIFF: u8 = 0x01;
+/* backup poll while attached/sniffing (ticks): timeouts, detach, CC sweep */
+const BACKUP_POLL: u32 = 12;
 const C1_RX_FLUSH: u8 = 0x04;
 /* Control3: AUTO_RETRY + N_RETRIES=3 */
 const C3_RETRIES: u8 = 0x07;
@@ -349,11 +362,12 @@ fn arm_as(state: u8) -> Result<(), u8> {
     crate::board::delay_ms(2);
     wr(R_POWER, 0x0F)?;
     wr(R_CONTROL3, C3_RETRIES)?;
-    /* INT_N (PA15) unused: mask everything, we poll */
-    wr(R_MASK, 0xFF)?;
-    wr(R_MASKA, 0xFF)?;
-    wr(R_MASKB, 0x01)?;
-    wr(R_CONTROL0, C0_INT_MASK_TXFLUSH)?;
+    let sniff = state == ST_SNIFF;
+    wr(R_MASK, MASK_ACTIVITY_ONLY)?;
+    wr(R_MASKA, if sniff { MASKA_SNIFF } else { MASKA_SINK })?;
+    wr(R_MASKB, if sniff { MASKB_SNIFF } else { MASKB_SINK })?;
+    wr(R_CONTROL0, C0_TX_FLUSH)?;
+    int_n_init();
     wr(R_CONTROL1, C1_RX_FLUSH)?;
     /* Drop Rd first (service restores it after ~600 ms): a source plugged
      * before we armed has exhausted its Source_Capabilities retries against
@@ -552,20 +566,35 @@ fn vcc_sweep(p: &mut Pd) -> Result<(), u8> {
 
 /* ---- the engine (called from the main loop every pass) ---- */
 
+/// FUSB302 INT_N on PA15: open-drain, active-low — input with pull-up.
+fn int_n_init() {
+    let gpioa = unsafe { &*pac::Gpioa::ptr() };
+    gpioa.ctl().modify(|_, w| w.ctl15().input());
+    gpioa.pud().modify(|_, w| w.pud15().pull_up());
+}
+
+#[inline(always)]
+fn int_n_low() -> bool {
+    let gpioa = unsafe { &*pac::Gpioa::ptr() };
+    gpioa.istat().read().bits() & (1 << 15) == 0
+}
+
 /// The idle checks are inlined into the (fast-flash) main loop: a cold call
 /// into slow flash costs ~90 µs even when it returns at once. The engine
-/// body runs only when a poll is due.
+/// body runs only when a poll is due: at once when INT_N (PA15) is asserted
+/// while attached/sniffing, else on the backup interval.
 #[inline(always)]
 pub fn service() {
     let p = pd();
     if p.state == ST_OFF {
         return;
     }
-    let interval = match p.state {
-        ST_SNIFF => 1, /* the 80-B RX FIFO must not fill between polls */
-        s if s >= ST_LISTEN => 2,
-        _ => 12,
-    };
+    let attached = p.state >= ST_LISTEN && p.state != ST_RD_CYCLE;
+    if attached && int_n_low() {
+        service_due();
+        return;
+    }
+    let interval = if attached { BACKUP_POLL } else { 12 };
     if ina::ticks().wrapping_sub(p.poll_tick) < interval {
         return;
     }
@@ -797,8 +826,9 @@ fn active_poll(p: &mut Pd, now: u32) -> Result<(), u8> {
         p.detach = 0;
     }
 
-    /* drain RX (bounded: at most 4 frames per poll) */
-    for _ in 0..4 {
+    /* drain RX (bounded: at most 8 frames per poll — the INT_N wake only
+     * comes per CC activity edge, so leave nothing queued) */
+    for _ in 0..8 {
         let mut s = [0u8; 1];
         rd(R_STATUS1, &mut s)?;
         if s[0] & S1_RX_EMPTY != 0 {
@@ -946,7 +976,7 @@ fn send(p: &mut Pd, mtype: u8, objs: &[u8]) -> Result<(), u8> {
 /// the negotiated spec rev, our rolling message id (incremented on I_TXSENT).
 #[inline(never)]
 fn send_frame(p: &mut Pd, mtype: u8, nobj: u8, objs: &[u8]) -> Result<(), u8> {
-    wr(R_CONTROL0, C0_INT_MASK_TXFLUSH)?; /* flush any stale TX */
+    wr(R_CONTROL0, C0_TX_FLUSH)?; /* flush any stale TX */
     let hdr = (mtype as u16)
         | ((p.rev as u16) << 6)
         | ((p.msg_id as u16) << 9)
