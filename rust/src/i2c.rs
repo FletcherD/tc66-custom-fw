@@ -19,7 +19,7 @@ pub struct I2cErr {
     pub stage: u8,
     pub stat0: u16,
     /* read only by the i2crd verb's ER reply */
-    #[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
+    #[cfg_attr(not(feature = "dev-board"), allow(dead_code))]
     pub stat1: u16,
 }
 

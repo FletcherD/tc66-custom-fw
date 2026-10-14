@@ -576,7 +576,7 @@ pub fn scroll_off() -> Result<(), u8> {
     write_command(0x13)
 }
 
-#[cfg(feature = "dev-verbs")]
+#[cfg(feature = "dev-tft")]
 /// Blocking solid fill (dev verbs / test pattern / init clear): waits out
 /// any running job, kicks the fill, pumps it to completion. Bounded.
 #[inline(never)]
@@ -592,7 +592,7 @@ fn fill_rect_raw(x0: u16, y0: u16, x1: u16, y1: u16, color: u16) -> Result<(), u
     pump_idle()
 }
 
-#[cfg(feature = "dev-verbs")]
+#[cfg(feature = "dev-tft")]
 /// Bring-up pattern: white border + R/G/B bands + a black square in the
 /// top-left corner. Verifies the GRAM offset (border reaches all four edges),
 /// color order, and — via the asymmetric square — both rotation axes.
@@ -641,7 +641,7 @@ fn backlight_init() {
     tim.ctl0().modify(|_, w| w.cen().enabled());
 }
 
-#[cfg(feature = "dev-verbs")]
+#[cfg(feature = "dev-tft")]
 /// Set backlight PWM compare directly (0 = dark .. 999 = full). Also the
 /// wake-restore value for the idle screen-off.
 #[inline(never)]

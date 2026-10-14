@@ -100,6 +100,12 @@ features.
 - **Next steps** (see also the open items in QUIRKS.md):
   - Bench-test a power cut mid-session (torn-slot fallback), the K2-hold
     reset, and D± readings against a known device/charger.
+  - Bench-verify the positive QC and AFC paths of `tools/detect.py`
+    (`qcdet` class 2, the `afctr 0x08` probe, `qctrg` after the detecting
+    entry) against the QC/AFC charger. Verified so far: a PC host port (all
+    negative) and an Apple USB-C PD charger (DCP with D± tied at 1.51 V,
+    Rp 3.0 A, PD 5/9/15/20 V; `qctrg`/`qc3ct` refuse with ER 0x21 and VBUS
+    stays at 5 V).
   - **M4 extensions:** bench-test FCP/SCP against a Huawei charger
     (`fcprd` reg 0x21, n 3 first — read-only — then `fcptr`; scope D− and compare
     with `tools/accp_decode.py`); an SCP voltage raise (VSET 0xb8/b9 + a
@@ -151,14 +157,18 @@ Cargo features pick what the image serves (rust/Cargo.toml):
 | build | features | used for |
 |---|---|---|
 | release (`make release`, CI release) | default = `triggers` | published images |
-| dev (`make flash`, `make recover`) | + `dev-verbs pcprf` | the bench loop |
+| dev (`make flash`, `make recover`) | + Makefile `DEV_FEATURES` (now `fcp dev-board pcprf`) | the bench loop |
 | either + `FEATURES=grace` | + boot grace window | risky always-on bring-up |
 
 The product protocol (powerz, `query getva rawva updat cfgrd cfgwr gtrec
-eeprd versn rotat`, BLE verbs) is never gated. `triggers` = the PD/QC/AFC verbs;
-`dev-verbs` = the bring-up/debug verbs (HARDWARE.md "CDC verb protocol")
-plus the untested FCP/SCP verbs `fcptr`/`fcprd`/`scptr`.
-Disabled verbs match and silently do nothing.
+eeprd versn rotat`, BLE verbs) is never gated. `triggers` = the PD/QC/AFC
+trigger and detection verbs. The dev groups (HARDWARE.md "CDC verb
+protocol"): `fcp` (untested FCP/SCP `fcptr`/`fcprd`/`scptr`, ~2.1 KB),
+`dev-board` (`i2crd adcrd clkrd keyrd rstrd wdtst idlrd`), `dev-bt` (BLE
+bring-up), `dev-tft` (display bring-up); `dev-verbs` = all four, which no
+longer fits the image together with everything else — `DEV_FEATURES`
+carries only the groups in current use (`make gates` compile-checks all of
+them). Disabled verbs match and silently do nothing.
 
 ## Versioning
 

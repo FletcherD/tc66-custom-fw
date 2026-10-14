@@ -50,7 +50,8 @@ def ok(r, what):
         print("%s: OK" % what)
         return True
     e = r[2] if len(r) > 2 and r[:2] == b"ER" else -1
-    print("%s: %r" % (what, r))
+    print("%s: %r%s" % (what, r, {0x20: " — no D+/D- short: not a dedicated (QC) charger",
+                                  0x21: " — dedicated charger without QC"}.get(e, "")))
     return False
 
 

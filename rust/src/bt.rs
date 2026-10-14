@@ -222,7 +222,7 @@ fn pop_byte() -> Option<u8> {
 
 /// Drain raw bytes (bring-up visibility for the `btrd` verb; bypasses the
 /// line assembler). Returns the number of bytes written into `buf`.
-#[cfg(feature = "dev-verbs")]
+#[cfg(feature = "dev-bt")]
 #[inline(never)]
 pub fn read_raw(buf: &mut [u8]) -> usize {
     let mut n = 0;

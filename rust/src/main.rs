@@ -81,7 +81,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 130;
+const BUILD_ID: u32 = 131;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -479,16 +479,16 @@ fn on_packet(buf: &[u8]) {
         #[cfg(feature = "pcprf")]
         do_pcprf();
     } else if match5(buf, b"i2crd") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "dev-board")]
         do_i2crd(buf);
     } else if match5(buf, b"adcrd") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "dev-board")]
         do_adcrd(buf);
     } else if match5(buf, b"clkrd") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "dev-board")]
         do_clkrd();
     } else if match5(buf, b"rstrd") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "dev-board")]
         {
             /* "OK" + RCU_RSTSCK at boot (u32 LE; bit 29 = watchdog reset) */
             let mut r = [b'O', b'K', 0, 0, 0, 0];
@@ -496,7 +496,7 @@ fn on_packet(buf: &[u8]) {
             write_all(&r);
         }
     } else if match5(buf, b"wdtst") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "dev-board")]
         {
             /* watchdog test: reply, then hang the thread until the FWDGT
              * bites (~13 s) — the meter reboots and rstrd shows bit 29 */
@@ -506,7 +506,7 @@ fn on_packet(buf: &[u8]) {
             }
         }
     } else if match5(buf, b"idlrd") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "dev-board")]
         {
             /* "OK" + 4 x u32 LE: the MK_UI block (markers.rs) */
             let mut r = [0u8; 18];
@@ -517,7 +517,7 @@ fn on_packet(buf: &[u8]) {
             write_all(&r);
         }
     } else if match5(buf, b"keyrd") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "dev-board")]
         {
             /* "OK" + raw PF0/PF1 levels + debounced pressed mask (keys.rs) */
             write_all(&[b'O', b'K', keys::raw(), keys::held()]);
@@ -596,21 +596,36 @@ fn on_packet(buf: &[u8]) {
             reply_ok_er(r);
         }
     } else if match5(buf, b"fcptr") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "fcp")]
         /* fcptr: Huawei FCP 9 V request (fixed sequence). Blocks ~2.3 s. */
         reply_ok_er(qc::fcp());
     } else if match5(buf, b"scptr") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "fcp")]
         /* scptr: Huawei SCP stock 5 V / 5 A block. Blocks ~2.3 s. */
         reply_ok_er(qc::scp());
     } else if match5(buf, b"fcprd") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "fcp")]
         do_fcprd(buf);
     } else if match5(buf, b"qcoff") {
         #[cfg(feature = "triggers")]
         reply_ok_er(qc::off());
+    } else if match5(buf, b"qcdet") {
+        #[cfg(feature = "triggers")]
+        {
+            /* qcdet: QC handshake probe, never sets a voltage (~1.5 s) ->
+             * "OK" + class u8 (0 no D+/D- short, 1 DCP, 2 QC) + D+, D- early,
+             * D- late (u16 LE mV) */
+            let mut d = [0u16; 4];
+            qc::detect(&mut d);
+            let mut r = *b"OK\0\0\0\0\0\0\0";
+            r[2] = d[0] as u8;
+            r[3..5].copy_from_slice(&d[1].to_le_bytes());
+            r[5..7].copy_from_slice(&d[2].to_le_bytes());
+            r[7..9].copy_from_slice(&d[3].to_le_bytes());
+            write_all(&r);
+        }
     } else if match5(buf, b"btini") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "dev-bt")]
         {
             /* dev verb: (re)start the BLE UART in raw mode for module
              * probing (btcmd/btget); `btini f` = 115200 instead of 9600 */
@@ -618,19 +633,19 @@ fn on_packet(buf: &[u8]) {
             write_all(b"OK");
         }
     } else if match5(buf, b"btcmd") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "dev-bt")]
         do_btcmd(buf);
     } else if match5(buf, b"btget") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "dev-bt")]
         do_btget();
     } else if match5(buf, b"btsta") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "dev-bt")]
         do_btsta();
     } else if match5(buf, b"btspy") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "dev-bt")]
         do_btspy(buf);
     } else if match5(buf, b"btrun") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "dev-bt")]
         {
             /* dev verb: switch the BLE link to b-verb dispatch mode */
             if mk_get(MK_BT_STATE) == 0 {
@@ -641,7 +656,7 @@ fn on_packet(buf: &[u8]) {
             }
         }
     } else if match5(buf, b"tftfl") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "dev-tft")]
         {
         /* dev verb: tftfl -> test pattern; tftfl <lo> <hi> -> solid RGB565 fill
          * -> "OK", or "ER" + stage (tft.rs: 1 SPI TBE timeout, 2 shift-idle
@@ -656,7 +671,7 @@ fn on_packet(buf: &[u8]) {
         reply_ok_er(r);
         }
     } else if match5(buf, b"tftui") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "dev-tft")]
         {
         /* dev verb: draw/refresh the main screen from published values
          * (kick + pump to completion — dev verbs may block) */
@@ -665,7 +680,7 @@ fn on_packet(buf: &[u8]) {
         reply_ok_er(ui::flush());
         }
     } else if match5(buf, b"uiscr") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "dev-tft")]
         {
         /* dev verb: uiscr <n> -> select screen n (as K1 would), redraw
          * to completion; no arg = next screen. Replies OK + screen index. */
@@ -681,7 +696,7 @@ fn on_packet(buf: &[u8]) {
         }
         }
     } else if match5(buf, b"tftbl") {
-        #[cfg(feature = "dev-verbs")]
+        #[cfg(feature = "dev-tft")]
         {
         /* dev verb: tftbl <lo> <hi> -> backlight PWM compare 0..=999 */
         let _ = tft::screen_on();
@@ -907,7 +922,7 @@ fn do_brawva() {
 
 /// dev verb: `btcmd <bytes>` — forward raw bytes (TTM commands) to the
 /// BLE module. -> "OK", or "ER" + bt::send stage.
-#[cfg(feature = "dev-verbs")]
+#[cfg(feature = "dev-bt")]
 #[inline(never)]
 fn do_btcmd(buf: &[u8]) {
     if buf.len() < 7 || buf[5] != b' ' {
@@ -919,7 +934,7 @@ fn do_btcmd(buf: &[u8]) {
 
 /// dev verb: `btsta` -> "OK" + 7 x u32 LE: USART1 STAT, CTL0, BAUD,
 /// DMA CH4CTL, CH4CNT (RX ring), CH3CTL, CH3CNT (TX) — the link's plumbing.
-#[cfg(feature = "dev-verbs")]
+#[cfg(feature = "dev-bt")]
 #[inline(never)]
 fn do_btsta() {
     let rd = |a: u32| unsafe { core::ptr::read_volatile(a as *const u32) };
@@ -944,7 +959,7 @@ fn do_btsta() {
 /// dev verb: `btspy <port 0=A/1=B> <pin>` -> sample that pin's ISTAT bit
 /// for ~1 s (any GPIO mode) and reply "OK" + u32 transitions + u32 low
 /// samples + u32 total samples. Blocks the loop (dev verb — allowed).
-#[cfg(feature = "dev-verbs")]
+#[cfg(feature = "dev-bt")]
 #[inline(never)]
 fn do_btspy(buf: &[u8]) {
     let (Some(&port), Some(&pin)) = (buf.get(5), buf.get(6)) else {
@@ -977,7 +992,7 @@ fn do_btspy(buf: &[u8]) {
 
 /// dev verb: `btget` -> "OK" + whatever raw bytes the module sent (up to
 /// 32) — bring-up visibility without a BLE connection.
-#[cfg(feature = "dev-verbs")]
+#[cfg(feature = "dev-bt")]
 #[inline(never)]
 fn do_btget() {
     let mut reply = [0u8; 34];
@@ -989,7 +1004,7 @@ fn do_btget() {
 /// dev/bring-up verb (ours, not stock):
 ///   i2crd <addr7> <wlen 0..=2> <w0> <w1> <rlen 0..=32>
 /// -> "OK" + rlen bytes, or "ER" + [stage, stat0.lo, stat0.hi, stat1.lo]
-#[cfg(feature = "dev-verbs")]
+#[cfg(feature = "dev-board")]
 #[inline(never)]
 #[link_section = ".fasttext.do_i2crd"]
 fn do_i2crd(buf: &[u8]) {
@@ -999,7 +1014,7 @@ fn do_i2crd(buf: &[u8]) {
 }
 
 /// dev verb: adcrd <ch> -> "OK" + u32 LE sum-of-16, or "ER" + stage
-#[cfg(feature = "dev-verbs")]
+#[cfg(feature = "dev-board")]
 #[inline(never)]
 #[link_section = ".fasttext.do_adcrd"]
 fn do_adcrd(buf: &[u8]) {
@@ -1029,7 +1044,7 @@ fn do_adcrd(buf: &[u8]) {
 /// QUIRKS §1's loose end: the bootloader hands off the clock tree and we
 /// never touch the AHB/APB prescalers (CFG0[10:4]) — the UM requires APB1
 /// > 24 MHz for the USBD. Read-only register peek.
-#[cfg(feature = "dev-verbs")]
+#[cfg(feature = "dev-board")]
 #[inline(never)]
 fn do_clkrd() {
     let mut reply = [0u8; 10];
@@ -1043,7 +1058,7 @@ fn do_clkrd() {
 
 /// dev verb: fcprd <reg> [n] -> "OK" + n register bytes (n clamped to 1..=8,
 /// default 1), or ER + a qc::fcp_read code. Untested.
-#[cfg(feature = "dev-verbs")]
+#[cfg(feature = "fcp")]
 #[inline(never)]
 fn do_fcprd(buf: &[u8]) {
     let reg = *buf.get(5).unwrap_or(&0);
@@ -1417,7 +1432,7 @@ fn reply_ok_er(r: Result<(), u8>) {
 }
 
 /// Parse + run an `i2crd` packet; fill `reply`, return its length.
-#[cfg(feature = "dev-verbs")]
+#[cfg(feature = "dev-board")]
 #[inline(never)]
 #[link_section = ".fasttext.i2c_command"]
 fn i2c_command(buf: &[u8], reply: &mut [u8; 34]) -> usize {

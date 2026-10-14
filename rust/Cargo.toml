@@ -6,14 +6,18 @@ edition = "2021"
 [features]
 # The default set is the RELEASE build (`make release`): the product protocol
 # (powerz, getva/rawva/query/updat/cfgrd/cfgwr/gtrec/eeprd/versn — never
-# gated) plus the charge triggers. The dev loop (`make flash`) adds
-# dev-verbs + pcprf. Gated verbs match and silently do nothing when disabled.
-# - triggers: the PD sink + QC/AFC D+/D- trigger verbs (pdctl pdsta pdcap
-#   pdreq qctrg qc3ct afctr qcoff), the PD engine service and the powerz PD
-#   capture attribute. A granted request RAISES THE OUT VOLTAGE.
-# - dev-verbs: the bring-up/debug verbs (i2crd adcrd clkrd keyrd rstrd
-#   wdtst idlrd uiscr tftfl tftbl tftui btini btcmd btget btrun btsta btspy)
-#   and the untested Huawei fcptr/fcprd/scptr verbs.
+# gated) plus the charge triggers. The dev loop (`make flash`) adds the
+# Makefile's DEV_FEATURES. Gated verbs match and silently do nothing when
+# disabled. Flash is tight: enable only the dev groups in current use.
+# - triggers: the PD sink + QC/AFC D+/D- trigger and detection verbs (pdctl
+#   pdsta pdcap pdreq qctrg qc3ct qcdet afctr qcoff), the PD engine service
+#   and the powerz PD capture attribute. A granted request RAISES THE OUT
+#   VOLTAGE.
+# - fcp: the untested Huawei FCP/SCP verbs (fcptr fcprd scptr), ~2.1 KB.
+# - dev-board: board debug verbs (i2crd adcrd clkrd keyrd rstrd wdtst idlrd).
+# - dev-bt: BLE bring-up verbs (btini btcmd btget btrun btsta btspy).
+# - dev-tft: display bring-up verbs (tftfl tftbl tftui uiscr).
+# - dev-verbs: all four groups above.
 # - pcprf: the TIMER5-veneer PC profiler (ina.rs) + its `pcprf` dump verb
 #   (without it TIMER5_DAC branches straight to the tick body).
 # - grace: the 10 s boot grace window (pseudo-bootloader escape hatch:
@@ -24,7 +28,11 @@ edition = "2021"
 default = ["triggers"]
 triggers = []
 pcprf = []
-dev-verbs = ["triggers"]
+fcp = ["triggers"]
+dev-board = []
+dev-bt = []
+dev-tft = []
+dev-verbs = ["fcp", "dev-board", "dev-bt", "dev-tft"]
 grace = []
 
 [dependencies]

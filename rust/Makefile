@@ -6,10 +6,12 @@
 
 ELF = target/thumbv7m-none-eabi/release/tc66-fw
 
-# The dev loop adds the debug verbs + PC profiler to the default (release)
-# feature set; RELEASE=1 builds the defaults only. Extra features stack on
-# either: make flash FEATURES=grace
-DEV_FEATURES = dev-verbs pcprf
+# The dev loop adds the dev groups in current use + the PC profiler to the
+# default (release) feature set; RELEASE=1 builds the defaults only. Flash is
+# tight — swap groups here (Cargo.toml lists them: fcp dev-board dev-bt
+# dev-tft, or dev-verbs for all). Extra features stack on either:
+# make flash FEATURES=grace
+DEV_FEATURES = fcp dev-board pcprf
 CARGO_FEATURES = $(strip $(if $(RELEASE),,$(DEV_FEATURES)) $(FEATURES))
 
 all: tc66fw.pad.bin
@@ -61,10 +63,12 @@ release:
 	cp tc66fw.enc.bin tc66fw-release.enc.bin
 	@echo "release image: rust/tc66fw-release.enc.bin"
 
-# Every gate on both feature sets (CI runs this on each push)
+# Every gate on both feature sets (CI runs this on each push), plus a
+# compile check of every dev group (all together may not fit the image)
 gates:
 	$(MAKE) tc66fw.bin
 	$(MAKE) RELEASE=1 tc66fw.bin
+	cargo check --release --features "dev-verbs pcprf grace"
 
 # Bootloader recovery path (AES image; hold K1 while plugging in first)
 tc66fw.enc.bin: tc66fw.bin

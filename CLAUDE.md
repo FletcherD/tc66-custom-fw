@@ -19,7 +19,7 @@ bench-verified with
 tools/ble.py), and the M4
 charge triggers (pd.rs: FUSB302 PD 2.0/3.0 sink — `pdctl`/`pdsta`/`pdcap`/
 `pdreq` + tools/pd.py, fixed PDOs + PPS + hard reset, bench-verified
-5-20 V and PPS 3.3-11 V; qc.rs: Quick Charge 2.0 D+/D− — `qctrg`/`qcoff`
+5-20 V and PPS 3.3-11 V; qc.rs: Quick Charge 2.0 D+/D− — `qctrg`/`qcoff` (entry detects QC first; `qcdet` probe)
 + tools/qc.py, bench-verified 5/9/12 V, plus QC3.0 `qc3ct` and Samsung AFC
 `afctr` — a CLOSED-LOOP D− serial that reads the charger Sping on PB4,
 bench-verified 5↔9 V; **a granted request raises the OUT
@@ -66,9 +66,13 @@ asset. Users flash it with the standalone `tools/tc66flash.py` (uv script:
 `flash` via K1 bootloader, `stock` downloads RuiDeng's V1.18 from their
 server — never redistribute vendor binaries, `backup-eeprom` via `eeprd`,
 `version`). **Feature sets**: cargo default = release = `triggers` (PD/QC/
-AFC verbs); `make flash`/`make recover` add `dev-verbs pcprf` (dev-verbs
-implies triggers); `make release` / `RELEASE=1` builds the defaults only.
-New debug verbs go behind `dev-verbs`. **Version**: Cargo semver + BUILD_ID,
+AFC trigger + detection verbs); `make flash`/`make recover` add the
+Makefile's `DEV_FEATURES` — dev verb groups `fcp`/`dev-board`/`dev-bt`/
+`dev-tft` (`dev-verbs` = all; they no longer fit together, so carry only the
+groups in current use) + `pcprf`; `make release` / `RELEASE=1` builds the
+defaults only. New debug verbs go behind a dev group (or a new one).
+Charger protocol detection at 5 V: `tools/detect.py` (`qcdet`, `afctr 0x08`
+probe, `fcprd`, PD caps). **Version**: Cargo semver + BUILD_ID,
 shown on the ~2 s boot splash (ui.rs `SPLASH`) and by the `versn` verb.
 Host trigger tools (pd.py/qc.py) go through tools/trigger_guard.py
 (default --max-v 9, confirmation unless --yes).

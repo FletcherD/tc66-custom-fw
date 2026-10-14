@@ -598,11 +598,16 @@ from `pd.rs` (different pins, no FUSB302, no CC). Host-armed verbs
   **PB4** = D− boost. Push-pull outputs, drive high = on. The four QC2 combos:
   mode 0 = 5 V (D+ 0.6/D− 0), 1 = 9 V (3.3/0.6), 2 = 12 V (0.6/0.6),
   3 = 20 V (3.3/3.3). Full table in the qc.rs module doc.
-- **Entry:** hold mode 0 (D+ 0.6 V) for 1.5 s so the charger leaves 5 V mode
-  and drops its D+/D− short; then any mode sets the voltage. A static
-  `ENTERED` flag skips re-entry on a later change; `qcoff` clears it and
-  releases the pins (D± float, charger reverts to 5 V, our D± ADC + SWD work
-  again). `qctrg`'s first call blocks ~1.5 s.
+- **Entry = detection** (`qc_enter` → `hvdcp_entry`): D+ 0.6 V with D−
+  released; the ADC reads D− at 0.1 s (a dedicated charger's D+/D− short
+  makes it follow D+) and at 1.5 s (a QC charger has opened the short and
+  pulls D− low). Anything but a QC charger → pins released and `ER 0x20`
+  (no short) / `0x21` (DCP without QC); a QC charger → then any mode sets the
+  voltage. `qcdet` runs the same probe and always releases the pins (never
+  sets a voltage). A static `ENTERED` flag skips re-entry on a later change;
+  `qcoff` clears it and releases the pins (D± float, charger reverts to 5 V,
+  SWD works again). Hold timing uses SysTick (`hold_50ms`) —
+  `board::delay_ms` is a busy-loop that runs ~3.4× long from slow flash.
 - **PA13/PA14 are SWDIO/SWCLK** — `make markers` is dead while a QC trigger is
   active; `qcoff` restores SWD.
 - Bench-verified against a Class-A QC2.0 charger: 5.11 / 9.13 / 12.14 V on the
@@ -625,7 +630,9 @@ from `pd.rs` (different pins, no FUSB302, no CC). Host-armed verbs
   simplified 1.5 s D+ 0.6 V hold (the stock adds a 200 ms D+3.3/D−3.3
   preamble).
 - **Samsung AFC** (`afctr <byte> [reps]`, stock `charge_protocol_handshake`
-  mode 4): a **closed-loop** single-wire serial on D− (D+ held at 0.6 V).
+  mode 4): a **closed-loop** single-wire serial on D− (D+ held at 0.6 V);
+  `ER 0x22` if no repeat got a Sping after every Mping, so `afctr 0x08`
+  (5 V) is the AFC probe.
   Entry (first call after `qcoff`): release all four pins 200 ms, then D+
   0.6 V with D− released for 2050 ms. Then the request byte (`0x46` = 9 V,
   `0x08` = 5 V) is sent `reps` times (default 3, 10 ms apart) through
@@ -646,6 +653,9 @@ from `pd.rs` (different pins, no FUSB302, no CC). Host-armed verbs
   ACKed (`ER 0x40|i` no reply, `0x50|i` NACK). `scptr` sends the stock
   5.00 V / 5 A SCP block. Frame format, timings and the capture evidence:
   docs/AFC_DECODE_NOTES.md.
+- `tools/detect.py`: charger protocol detection at 5 V — rawva D±
+  (Apple/Samsung dividers), `qcdet`, `afctr 0x08`, `fcprd` (if built), then
+  PD (`pdctl 1`, `pdsta` Rp level, `pdcap`); `qcoff` between steps.
 - Host tool: `tools/qc.py` (`5|9|12|20`, `up [n]`, `down [n]`, `qc3`, `off`,
   `sweep`; voltage-raising commands go through `tools/trigger_guard.py`).
   No host tool for `afctr`/`fcptr`/`fcprd`/`scptr` — send the verb
@@ -693,7 +703,7 @@ is skipped once).
 
 All wrapped in `rust/Makefile`:
 
-- `make flash` — dev build (default features + `dev-verbs pcprf`) → gates
+- `make flash` — dev build (default features + `DEV_FEATURES`) → gates
   (below) → objcopy → pad to 51840 B → hands-free flash via the running
   app's `updat` (`tools/app_update.py`). `FEATURES=grace` (any cargo
   features) builds with the escape-hatch window for bring-up.
@@ -717,8 +727,9 @@ back proves the new image is actually running.
 Cargo features (rust/Cargo.toml; DEVELOPMENT.md "Feature sets"): the
 default set is the release build — `triggers` (PD/QC/AFC verbs, the PD
 engine service, the powerz PD attribute). The dev loop (`make flash`) adds
-`dev-verbs` (bring-up/debug verbs + the untested fcptr/fcprd/scptr; implies
-`triggers`) and `pcprf` (the PC profiler + its verb); `grace` is opt-in.
+the Makefile's `DEV_FEATURES`: dev verb groups `fcp` / `dev-board` /
+`dev-bt` / `dev-tft` (`dev-verbs` = all, too big to fit together) and
+`pcprf` (the PC profiler + its verb); `grace` is opt-in.
 Disabled verbs match and silently do nothing. The product protocol
 (query/getva/rawva/updat/cfgrd/cfgwr/gtrec/eeprd/versn/powerz) is never
 gated. CI (`.github/workflows/ci.yml`) runs `make gates` — every gate on

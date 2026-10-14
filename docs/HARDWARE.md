@@ -169,9 +169,10 @@ Verbs:
 | `pdsta` | `OK`+20 B | our trigger verb: PD engine state (layout: `pd::status`) |
 | `pdcap` | `OK`+n+n×4 B | our trigger verb: received source PDOs (LE u32 each) |
 | `pdreq` | `OK` / `ER` | our trigger verb: `pdreq <n> [mv u16][ma u16]` — request source PDO n (1-based; fixed, or PPS APDO with a setpoint) — **raises OUT voltage** |
-| `qctrg` | `OK` / `ER` | our trigger verb: `qctrg <mode>` QC2.0 D+/D− trigger, mode 0/1/2/3 = 5/9/12/20 V (blocks ~1.5 s on first call) — **raises OUT voltage** (qc.rs, tools/qc.py) |
+| `qctrg` | `OK` / `ER`+code | our trigger verb: `qctrg <mode>` QC2.0 D+/D− trigger, mode 0/1/2/3 = 5/9/12/20 V; the first call runs the detecting QC handshake (~1.5 s) and fails with ER 0x20 (no D+/D− short) / 0x21 (DCP without QC), pins released — **raises OUT voltage** (qc.rs, tools/qc.py) |
+| `qcdet` | `OK`+8 B | our trigger verb: QC handshake probe, never sets a voltage (~1.5 s): class u8 (0 = no D+/D− short, 1 = DCP without QC, 2 = QC) + D+, D− at 0.1 s, D− at 1.5 s (u16 LE mV); pins released after (tools/detect.py) |
 | `qc3ct` | `OK` / `ER` | our trigger verb: `qc3ct <dir> <count>` QC3.0 continuous, dir 0/1 = up/down, count 200 mV steps — **raises OUT voltage** |
-| `afctr` | `OK` / `ER` | our trigger verb: `afctr <byte> [reps]` Samsung AFC serial trigger on D−, byte = voltage/current nibbles (0x46 = 9 V, 0x08 = 5 V); closed-loop (reads the charger Sping on PB4); first call blocks ~2.3 s on entry — **raises OUT voltage** (qc.rs) |
+| `afctr` | `OK` / `ER`+code | our trigger verb: `afctr <byte> [reps]` Samsung AFC serial trigger on D−, byte = voltage/current nibbles (0x46 = 9 V, 0x08 = 5 V); closed-loop (reads the charger Sping on PB4); first call blocks ~2.3 s on entry; ER 0x22 = the charger never answered (so `afctr 0x08` is a 5 V AFC probe) — **raises OUT voltage** (qc.rs) |
 | `fcptr` / `scptr` | `OK` / `ER`+code | our dev verbs, **untested on a real charger**: Huawei FCP 9 V / SCP stock 5 V/5 A block on D− (qc.rs, docs/AFC_DECODE_NOTES.md); ER 0x40\|i = no/garbled reply to packet i, 0x50\|i = NACK; first call blocks ~2.3 s — `fcptr` **raises OUT voltage** |
 | `fcprd` | `OK`+n B / `ER`+code | our dev verb, **untested on a real charger**: `fcprd <reg> [n]` (raw bytes, n clamped 1..=8) reads n consecutive FCP/SCP registers with single reads — no write, voltage unchanged (0x21 = # raised voltages, 0x30+k = voltage k ×100 mV, 0x22 = max power ×0.5 W); ER as `fcptr` |
 | `qcoff` | `OK` / `ER` | our trigger verb: release the QC/AFC D+/D− pins (charger reverts to 5 V; restores D± ADC + SWD) |
@@ -180,10 +181,12 @@ Keeping `getva` byte-compatible (same reply) lets existing host tools work
 unchanged. Verbs are grouped by cargo feature (docs/DEVELOPMENT.md "Feature
 sets"): the product verbs above (`getva query rotat gtrec cfgrd cfgwr updat
 versn eeprd rawva`) are always served; the trigger verbs (`pdctl pdsta pdcap
-pdreq qctrg qc3ct afctr qcoff`) need `triggers` (in release builds); the dev
-verbs (`i2crd adcrd clkrd keyrd rstrd wdtst idlrd uiscr tftfl tftbl
-tftui btini btcmd btget btrun btsta btspy`, the untested `fcptr`/`fcprd`/`scptr`) need
-`dev-verbs`, and `pcprf` its own `pcprf` feature — both only in dev builds.
+pdreq qctrg qc3ct qcdet afctr qcoff`) need `triggers` (in release builds);
+the dev verbs need their group — `dev-board` (`i2crd adcrd clkrd keyrd
+rstrd wdtst idlrd`), `dev-tft` (`uiscr tftfl tftbl tftui`), `dev-bt`
+(`btini btcmd btget btrun btsta btspy`), `fcp` (the untested
+`fcptr`/`fcprd`/`scptr`) — and `pcprf` its own feature; dev builds carry the
+Makefile's `DEV_FEATURES` subset.
 Disabled verbs match and silently do nothing.
 
 ### `getva` reply (192 B = three 64-byte blocks, AES-256-ECB)

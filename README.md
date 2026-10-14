@@ -51,7 +51,8 @@ else, including the stock firmware.
 - There is no on-device menu. Settings are changed from a computer with
   `tools/cfg.py`.
 - The stock "quick charge protocol detection" screen and the on-device
-  PD trigger menu are missing. Triggers are host-driven only.
+  PD trigger menu are missing. Triggers and detection are host-driven only
+  (`tools/detect.py`).
 - RuiDeng's own PC and phone apps are only partly supported: live
   readings and screen rotation work, but page switching (next/previous
   screen) works over BLE only.
@@ -126,6 +127,9 @@ image or stock.
 - **Datalog:** `tools/gtrec.py` downloads the on-device datalog.
 - **Charge triggers:** `tools/pd.py arm`, then `caps` and `req <n>`. QC
   uses `tools/qc.py 9`. Read the warnings in each tool's `--help` first.
+- **Charger protocol detection:** `tools/detect.py` reports what the
+  charger on IN supports (Apple/Samsung dividers, QC, AFC, Type-C current,
+  USB PD capabilities) without raising the voltage. Unplug OUT first.
 
 The serial protocol, packet formats, and the full command list are in
 [docs/HARDWARE.md](docs/HARDWARE.md).

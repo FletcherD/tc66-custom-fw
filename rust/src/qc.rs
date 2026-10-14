@@ -16,8 +16,10 @@
 //! |  2   |  12 V   |  1    0    0   1  | 0.6  0.6 |
 //! |  3   |  20 V   |  1    1    1   1  | 3.3  3.3 |
 //!
-//! Entry: hold mode 0 (D+ 0.6 V, D− 0 V) for >1.25 s so a QC charger leaves
-//! 5 V mode and detaches its D+/D− short; then any mode sets the voltage.
+//! Entry (`hvdcp_entry`): D+ 0.6 V with D− released for 1.5 s; a QC charger
+//! opens its D+/D− short and pulls D− low, which the D− ADC sees — entry fails
+//! on anything else, and `qcdet` is the same handshake as a probe. Then any
+//! mode sets the voltage.
 //! `qcoff` releases the four pins (D± float back to normal, charger reverts
 //! to 5 V after its own timeout) and re-enables our D± ADC read.
 //!
@@ -75,19 +77,81 @@ fn drive(levels: (bool, bool, bool, bool)) {
     gpiob.bop().write(|w| unsafe { w.bits(b) });
 }
 
-/// `qctrg <mode>`: request 5/9/12/20 V (mode 0..3). Runs QC entry (hold
-/// mode 0 for 1.5 s) on the first call after `off()`, then sets the target
-/// mode. Blocks up to ~1.5 s on entry (dev-verb, acceptable).
+/// A D± line via its ADC channel (1 = D+, 9 = D−) in mV; 0 on an ADC error.
+fn line_mv(ch: u8) -> u16 {
+    crate::adc::read_sum16(ch).map_or(0, |s| (s * 3300 / 65520) as u16)
+}
+
+/// Below this D− counts as released/pulled low, above it as following D+
+/// (QC VDAT_REF is 0.25-0.4 V; D+ sits at ~0.6 V).
+const DM_LOW_MV: u16 = 300;
+/// `ER` codes of a failed QC entry: no D+/D− short (not a dedicated charger),
+/// or a dedicated charger that kept the short (no QC).
+const E_NO_DCP: u8 = 0x20;
+const E_NO_HVDCP: u8 = 0x21;
+
+/// QC (HVDCP) handshake with detection: D+ 0.6 V, D− released, and the ADC
+/// reads D− after 100 ms (a dedicated charger's D+/D− short makes it follow
+/// D+) and after 1.5 s (a QC charger has opened the short and pulls D− low).
+/// Fills `out` = [class, D+ mV, D− early mV, D− late mV] (class 0 = no short,
+/// 1 = DCP without QC, 2 = QC); returns the class. Leaves D− released.
+fn hvdcp_entry(out: &mut [u16; 4]) -> u16 {
+    config_pins();
+    drive(LEVELS[0]); /* D+ 0.6 V */
+    dm_drive(false);
+    hold_50ms(2);
+    out[1] = line_mv(1);
+    out[2] = line_mv(9);
+    hold_50ms(28);
+    out[3] = line_mv(9);
+    out[0] = if out[2] < DM_LOW_MV {
+        0
+    } else if out[3] >= DM_LOW_MV {
+        1
+    } else {
+        2
+    };
+    out[0]
+}
+
+/// QC entry for `trigger`/`qc3` on the first call after `off()`: the
+/// detecting handshake; anything but a QC charger releases the pins and
+/// fails (`E_NO_DCP` / `E_NO_HVDCP`) instead of driving levels at it.
+fn qc_enter() -> Result<(), u8> {
+    if unsafe { *ENTERED.0.get() } {
+        return Ok(());
+    }
+    let mut d = [0u16; 4];
+    match hvdcp_entry(&mut d) {
+        2 => {
+            dm_drive(true);
+            unsafe { *ENTERED.0.get() = true };
+            Ok(())
+        }
+        c => {
+            let _ = off();
+            Err(if c == 0 { E_NO_DCP } else { E_NO_HVDCP })
+        }
+    }
+}
+
+/// `qcdet`: the QC handshake as a probe — `out` = [class, D+, D− early, D−
+/// late] (see `hvdcp_entry`); then releases the pins, so the charger falls
+/// back to 5 V DCP. Never sets a voltage.
+pub fn detect(out: &mut [u16; 4]) {
+    hvdcp_entry(out);
+    let _ = off();
+}
+
+/// `qctrg <mode>`: request 5/9/12/20 V (mode 0..3). The first call after
+/// `off()` runs the detecting QC handshake (~1.5 s) and fails without a QC
+/// charger; then sets the target mode.
 pub fn trigger(mode: u8) -> Result<(), u8> {
     if mode as usize >= LEVELS.len() {
         return Err(0x0F);
     }
     config_pins();
-    if !unsafe { *ENTERED.0.get() } {
-        drive(LEVELS[0]); /* D+ 0.6 V, D− 0 V */
-        crate::board::delay_ms(1500);
-        unsafe { *ENTERED.0.get() = true };
-    }
+    qc_enter()?;
     drive(LEVELS[mode as usize]);
     unsafe { *IN_QC3.0.get() = false };
     Ok(())
@@ -116,11 +180,7 @@ fn qc3_step(up: bool) {
 /// stepping from where they left off. `qcoff` or any `qctrg` exits QC3.
 pub fn qc3(down: bool, count: u8) -> Result<(), u8> {
     config_pins();
-    if !unsafe { *ENTERED.0.get() } {
-        drive(LEVELS[0]);
-        crate::board::delay_ms(1500);
-        unsafe { *ENTERED.0.get() = true };
-    }
+    qc_enter()?;
     if !unsafe { *IN_QC3.0.get() } {
         /* enter continuous mode: settle at the base D+ 0.6 V / D− 3.3 V */
         drive((true, false, true, true));
@@ -223,14 +283,16 @@ fn dm_read() -> bool {
 }
 
 /// Spin reading PB4 until it equals `want`, or `to_us` µs elapse (SysTick).
-fn wait_pb4(want: bool, to_us: u32) {
+/// Returns false on timeout.
+fn wait_pb4(want: bool, to_us: u32) -> bool {
     let lim = to_us * 48;
     let start = cortex_m::peripheral::SYST::get_current();
     while dm_read() != want {
         if start.wrapping_sub(cortex_m::peripheral::SYST::get_current()) & 0x00FF_FFFF >= lim {
-            break;
+            return false;
         }
     }
+    true
 }
 
 /// Stock `proto_wait_sping` @0x08004eb4: after a Mping, wait for the charger's
@@ -239,10 +301,12 @@ fn wait_pb4(want: bool, to_us: u32) {
 /// and its falling edge (≤3 ms). Reading this — not blind-delaying — is what
 /// advances the charger's protocol FSM, and waiting out the whole Sping keeps
 /// the next byte from colliding with it.
-fn proto_wait_sping() {
+/// Returns whether a Sping (rise and fall) was seen.
+fn proto_wait_sping() -> bool {
     wait_pb4(false, 3000); /* mark falls / line settles low */
-    wait_pb4(true, 3000); /* charger Sping rising */
-    wait_pb4(false, 3000); /* charger Sping falling */
+    let rose = wait_pb4(true, 3000); /* charger Sping rising */
+    let fell = wait_pb4(false, 3000); /* charger Sping falling */
+    rose && fell
 }
 
 /// Stock `proto_measure_response` @0x08004ef4: with D− released, wait out the
@@ -313,9 +377,10 @@ fn afc_byte_bits(b: u8) {
 /// Mping → wait Sping → measure the charger's echo] → Mping → wait Sping. Only
 /// the bit timing is interrupt-masked; the marks and the (read-based) waits
 /// tolerate ISR jitter.
-fn proto_send_word(buf: &[u8], flag: bool) {
+/// Returns whether the charger Spinged after every Mping.
+fn proto_send_word(buf: &[u8], flag: bool) -> bool {
     proto_line_idle();
-    proto_wait_sping();
+    let mut ok = proto_wait_sping();
     us(250);
     cortex_m::interrupt::free(|_| {
         afc_start();
@@ -325,24 +390,28 @@ fn proto_send_word(buf: &[u8], flag: bool) {
     });
     if flag {
         proto_line_idle();
-        proto_wait_sping();
+        ok &= proto_wait_sping();
         proto_measure_response();
         us(180);
     }
     proto_line_idle();
-    proto_wait_sping();
+    ok &= proto_wait_sping();
+    ok
 }
 
 /// `afctr <byte> [reps]`: Samsung AFC request. First call after entry/off runs
 /// the ~2.25 s AFC mode-4 entry, then frames the request byte `reps` times
 /// (default 3, 10 ms apart). Later calls re-send without re-entry (fast voltage
 /// change). `0x46` = 9 V, `0x08` = 5 V (high nibble = 5 V + n; low = current).
+/// `E_NO_AFC` if the charger never completed a closed-loop exchange, so
+/// `afctr 0x08` doubles as a 5 V AFC probe.
 pub fn afc(cmd: u8, reps: u8) -> Result<(), u8> {
     config_pins();
     accp_entry(); /* mode-4 entry, shared with FCP/SCP */
     let n = if reps == 0 { 3 } else { reps };
+    let mut acked = false;
     for k in 0..n {
-        proto_send_word(&[cmd], true);
+        acked |= proto_send_word(&[cmd], true);
         if k + 1 < n {
             us(10_000); /* 10 ms gap between repeats */
         }
@@ -350,8 +419,15 @@ pub fn afc(cmd: u8, reps: u8) -> Result<(), u8> {
     /* leave D− released (hi-Z); D+ stays 0.6 V and the charger holds the
      * negotiated voltage. */
     dm_drive(false);
-    Ok(())
+    if acked {
+        Ok(())
+    } else {
+        Err(E_NO_AFC)
+    }
 }
+
+/// `afctr` ER code: no repeat got a Sping after every Mping (no AFC charger).
+const E_NO_AFC: u8 = 0x22;
 
 /* ---- Huawei FCP / SCP (charge_protocol_handshake modes 2 / 3) ----
  *
@@ -375,7 +451,7 @@ const SYNC_US: u32 = 40;
 const RX_UI_US: u32 = 155;
 
 /// Spin `n` µs on SysTick (fast-flash copy of `us` for the framer).
-#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
+#[cfg_attr(not(feature = "fcp"), allow(dead_code))]
 #[link_section = ".fasttext.qc_spin_us"]
 #[inline(never)]
 fn spin_us(n: u32) {
@@ -412,7 +488,7 @@ fn accp_sync(p: bool, next: bool) {
 /// One master frame: per byte a SYNC, 8 data bits MSB-first and an odd-parity
 /// bit (per byte), then a closing SYNC toward the (high) Mping that follows.
 /// Interrupts masked: a stretched cell corrupts the frame. Leaves D− driven.
-#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
+#[cfg_attr(not(feature = "fcp"), allow(dead_code))]
 #[link_section = ".fasttext.qc_accp_frame"]
 #[inline(never)]
 fn accp_frame(buf: &[u8]) {
@@ -438,7 +514,7 @@ fn accp_frame(buf: &[u8]) {
 /// ping (a high ≥ 1.8 ms — a byte's longest high run is 9 bits ≈ 1.4 ms), a
 /// 4 ms low, 15 ms total, or a full buffer. D− must be released. Returns the
 /// run count (0 = nothing came).
-#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
+#[cfg_attr(not(feature = "fcp"), allow(dead_code))]
 #[link_section = ".fasttext.qc_accp_capture"]
 #[inline(never)]
 fn accp_capture(runs: &mut [u16]) -> usize {
@@ -479,7 +555,7 @@ fn accp_capture(runs: &mut [u16]) -> usize {
 /// quarter (byte boundary), anything longer is round(run / RX_UI_US) bits.
 /// Each byte must be 9 bits with odd parity; the last byte must be the CRC-8
 /// of the others. Returns the byte count without the CRC; Err(()) if garbled.
-#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
+#[cfg_attr(not(feature = "fcp"), allow(dead_code))]
 fn accp_decode(runs: &[u16], out: &mut [u8]) -> Result<usize, ()> {
     let mut level = true;
     let mut bits: u16 = 0;
@@ -519,7 +595,7 @@ fn accp_decode(runs: &[u16], out: &mut [u8]) -> Result<usize, ()> {
 }
 
 /// CRC-8, poly 0x39, init 0x00, MSB-first, over `data` (`crc8_huawei`).
-#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
+#[cfg_attr(not(feature = "fcp"), allow(dead_code))]
 fn crc8(data: &[u8]) -> u8 {
     let mut crc = 0u8;
     for &b in data {
@@ -552,7 +628,7 @@ fn accp_entry() {
 }
 
 /// Mping → Sping → `frame` → Mping → Sping.
-#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
+#[cfg_attr(not(feature = "fcp"), allow(dead_code))]
 #[inline(never)]
 fn accp_send(frame: &[u8]) {
     proto_line_idle();
@@ -565,7 +641,7 @@ fn accp_send(frame: &[u8]) {
 
 /// The 3 leading `01` sync pings (no CRC, no reply), 900 µs apart, then the
 /// 10 ms gap before the first packet.
-#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
+#[cfg_attr(not(feature = "fcp"), allow(dead_code))]
 fn accp_pings() {
     for k in 0..3 {
         accp_send(&[0x01]);
@@ -583,7 +659,7 @@ const E_NACK: u8 = 0x50;
 /// One register transaction: send `pkt` + CRC, read the charger's reply into
 /// `reply` (ACK first). Returns the reply length (ACK + data, no CRC); `i`
 /// tags the error byte.
-#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
+#[cfg_attr(not(feature = "fcp"), allow(dead_code))]
 fn accp_xfer(pkt: &[u8], reply: &mut [u8], i: u8) -> Result<usize, u8> {
     let mut frame = [0u8; 8];
     let n = pkt.len().min(7);
@@ -605,7 +681,7 @@ fn accp_xfer(pkt: &[u8], reply: &mut [u8], i: u8) -> Result<usize, u8> {
 
 /// Run `packets` as one exchange (pings first), 10 ms apart; stops at the
 /// first failed packet.
-#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
+#[cfg_attr(not(feature = "fcp"), allow(dead_code))]
 fn accp_exchange(packets: &[&[u8]]) -> Result<(), u8> {
     accp_pings();
     let mut reply = [0u8; 8];
@@ -626,7 +702,7 @@ fn accp_exchange(packets: &[&[u8]]) -> Result<(), u8> {
 /// `fcptr`: Huawei FCP 9 V request — the stock mode-2 exchange: read regs
 /// 04/21/31, write VOUT 0x2c = 90 (9 V, 100 mV units), read it back, write
 /// OUTPUT_CONTROL 0x2b = 1 (apply). Err = 0x40|i / 0x50|i for packet i.
-#[cfg(feature = "dev-verbs")] /* untested — not in release builds */
+#[cfg(feature = "fcp")] /* untested — not in release builds */
 pub fn fcp() -> Result<(), u8> {
     config_pins();
     accp_entry();
@@ -644,7 +720,7 @@ pub fn fcp() -> Result<(), u8> {
 /// `reg` with single reads — no write, so the voltage never changes
 /// (capability readout: 0x21 = number of raised voltages N, 0x30+k = voltage
 /// k in 100 mV, 0x22 = max power in 0.5 W). Err as `fcp` (i = register index).
-#[cfg(feature = "dev-verbs")] /* untested — not in release builds */
+#[cfg(feature = "fcp")] /* untested — not in release builds */
 pub fn fcp_read(reg: u8, out: &mut [u8]) -> Result<(), u8> {
     config_pins();
     accp_entry();
@@ -673,7 +749,7 @@ pub fn fcp_read(reg: u8, out: &mut [u8]) -> Result<(), u8> {
 /// watchdog (0xa1 = 0x06), VSET/ISET boundaries 0xb0 = 5500 mV / 0xb2 =
 /// 5000 mA, VSSET 0xca = 0xc8 (5.00 V), ISSET 0xcb = 0x64 (5 A) — the 5 V
 /// low-voltage direct-charge mode; it does not raise the voltage. Err as `fcp`.
-#[cfg(feature = "dev-verbs")] /* untested — not in release builds */
+#[cfg(feature = "fcp")] /* untested — not in release builds */
 pub fn scp() -> Result<(), u8> {
     config_pins();
     accp_entry();
