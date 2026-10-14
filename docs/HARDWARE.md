@@ -169,7 +169,7 @@ Verbs:
 | `tftfl` | `OK` / `ER`+stage | our dev verb: TFT test pattern (no args) or solid fill (RGB565 LE u16); ER stages in tft.rs (tools/tft.py) |
 | `tftbl` | `OK` / `ER`+stage | our dev verb: backlight PWM compare, LE u16 0..=999 (tools/tft.py) |
 | `tftui` | `OK` / `ER`+stage | our dev verb: force a main-screen refresh (tools/tft.py) |
-| `pdctl` | `OK` / `ER`+stage | our trigger verb: PD sink engine off (0) / arm (1) / hard-reset (2 — while sniffing: makes the pair renegotiate) / listen-only sniffer (3) (pd.rs, tools/pd.py) |
+| `pdctl` | `OK` / `ER`+stage | our trigger verb: PD sink engine off (0) / arm (1) / hard-reset (2 — while sniffing: makes the pair renegotiate; works only when the locked CC is CC1) / listen-only sniffer (3) (pd.rs, tools/pd.py) |
 | `pdsta` | `OK`+20 B | our trigger verb: PD engine state (layout: `pd::status`; while sniffing — state 7 — byte 3 = a sink is attached) |
 | `pdcap` | `OK`+n+n×4 B | our trigger verb: received source PDOs (LE u32 each) |
 | `pdinf` | `OK`+page+pages+n+n×22 B | our trigger verb: the PD screen's text (pdinfo.rs) — every line, 22 ASCII bytes each, space-padded; page = the one the screen shows (0-based). `pdinf\x01` first advances the page (as K2 on the PD screen) (tools/pd.py info) |

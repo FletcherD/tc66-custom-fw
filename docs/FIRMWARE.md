@@ -573,7 +573,11 @@ past the ~10 s keepalive deadline).
   renegotiates with the device on OUT (a re-plug without unplugging). The
   FUSB302 transmitter only drives after a PD-logic reset (RST_PD) with TXCC
   set — without it HARDSENT fires but nothing reaches the wire; TXCC is
-  dropped again (with RST_PD) on HARDSENT. **Slice**: arming (sink and sniff) sets the
+  dropped again (with RST_PD) on HARDSENT. **Works on CC1 only** (bench,
+  build 148): with the cables oriented so the sniffer locks on CC2,
+  receiving and CC measurement work, but the same register sequence
+  (TXCC2 + RST_PD + SEND_HARD_RESET) never reaches the charger — VBUS stays
+  up; cause unknown (CC2 TX path/routing?). **Slice**: arming (sink and sniff) sets the
   BMC slicer to `SLICE` = 0x58 (SDAC 0x18, reset 0x20; 85 mV hysteresis)
   — bench-swept with `pd.py hardreset` re-triggers: at the reset value the
   Apple charger's first VDM to a Moto drawing 2.8 A at 9 V was lost every

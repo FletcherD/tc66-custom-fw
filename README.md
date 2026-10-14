@@ -159,6 +159,9 @@ image or stock.
   then plug in the device. `uv run tools/pd.py hardreset` makes the charger
   and device renegotiate from scratch, and `uv run tools/pd.py off` ends
   sniffing. Notes:
+  - **Hard reset needs CC1:** it only works when the PD line runs on the
+    meter's CC1 (`pd.py status` shows `cc=1`). On CC2 it does nothing, so
+    flip one of the cables.
   - **Sudo:** `pdcap.py` needs root to claim the meter's USB interface
     from the Linux `powerz` driver.
   - **Missed messages:** the meter's PD chip can miss a frame when several
