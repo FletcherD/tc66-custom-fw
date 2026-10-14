@@ -25,3 +25,6 @@ INSERT AFTER .uninit;
    inserted section pushes to 0x2000_17xx — memory.x pins both back (a definition
    included BEFORE the PROVIDE suppresses it; a later one here does not, at least
    under rust-lld). See memory.x. */
+
+/* fast.x computes _stext before layout; prove it landed on .fasttext's end. */
+ASSERT(_stext == __efasttext, "fast.x: _stext != __efasttext (FLASH origin or .fasttext alignment changed)")

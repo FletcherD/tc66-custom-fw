@@ -71,6 +71,7 @@ SECTIONS
 
     /* ISR chains: whole modules + other crates' USB stack */
     *(.text.*7tc66_fw3ina*);            /* sampler tick, cal math */
+    *(.text.*7tc66_fw3ntc*);            /* adc_burst temperature (log2 loop) */
     *(.text.*7tc66_fw3i2c*);            /* I2C read inside the ISR */
     *(.text.*7tc66_fw6powerz*);         /* poll_cmd/arm/set_payload */
     *(.text.*7tc66_fw7usb_bus*);
@@ -109,5 +110,11 @@ SECTIONS
   } > FLASH
 } INSERT AFTER .vector_table;
 
-/* Place .text right after .fasttext (overrides link.x's PROVIDE). */
-_stext = __efasttext;
+/* Place .text right after .fasttext (overrides link.x's PROVIDE).
+ * Computed from SIZEOF, NOT `= __efasttext`: this assignment is evaluated
+ * before .fasttext is laid out, so on lld's first pass __efasttext reads 0,
+ * .text looks out of BL range, and lld emits a permanent movw/movt long-branch
+ * thunk for every cross-region call (~900 B). memory.x is not yet included
+ * here, so the FLASH origin is spelled out; flasher.x asserts the result.
+ * fast-gate fails on any Thumbv7ABSLongThunk. */
+_stext = 0x08002C00 + SIZEOF(.vector_table) + SIZEOF(.fasttext);

@@ -29,7 +29,8 @@ the ina.rs module doc.
 | `i2c.rs` | polled I2C0 master (INA226 + EEPROM + FUSB302 bus), `i2crd` dev verb backend, bus-unstick recovery |
 | `pd.rs` | (`triggers` feature) FUSB302 USB-PD sink engine (M4): attach/orientation, source-caps collection, voltage trigger, KM003C PD capture ring; `pdctl`/`pdsta`/`pdcap`/`pdreq` verb backends |
 | `qc.rs` | (`triggers` feature) D+/D− charge triggers (M4): PA13/PA14 + PB4/PB5 level synthesis — QC2.0 `qctrg`, QC3.0 `qc3ct`, Samsung AFC `afctr` (closed-loop D− serial), Huawei FCP/SCP `fcptr`/`fcprd`/`scptr` (dev-verbs only, untested), `qcoff` |
-| `ina.rs` | the measurement subsystem: TIMER5 250 Hz sampler ISR (interleaved INA226 reads), EEPROM calibration, NTC/D± conversion, published-measurement state (`Meas`/`snapshot()`), `pause()` bus rule |
+| `ina.rs` | the measurement subsystem: TIMER5 250 Hz sampler ISR (interleaved INA226 reads), EEPROM calibration, D± conversion, published-measurement state (`Meas`/`snapshot()`), `pause()` bus rule |
+| `ntc.rs` | NTC temperature from the ADC sum16: the stock beta model in fixed point (no float in the image); host-checked by tools/ntc_check |
 | `adc.rs` | polled on-chip ADC (stock channel map: ch0 PA0 NTC, ch1 PA1 D+, ch9 PB1 D−, ch17 internal Vrefint; puts those three pins in analog mode), `adcrd` dev verb backend |
 | `getva.rs` | real `getva` packet builder (template + CRC16/MODBUS + AES-256-ECB) |
 | `tft.rs` | ST7735S display driver (SPI0, stock init/window path), DMA pixel engine (polled, non-blocking) + 1-bpp glyph row stager, TIMER1 backlight PWM, rolling-scroll commands (`scroll_on`/`scroll_newest`/`scroll_off`), `tftfl`/`tftbl` dev verb backends |
@@ -780,8 +781,9 @@ All wrapped in `rust/Makefile`:
 - `make release` — `RELEASE=1` (default features only) → gates → AES image
   `tc66fw-release.enc.bin` (the GitHub release asset; `RELEASE=1` works on
   any target).
-- `make gates` — build + every gate on both the dev and release feature
-  sets (what CI runs).
+- `make gates` — `ntc-check` (host: tools/ntc_check proves src/ntc.rs
+  bit-identical to the stock f32 temperature model over all inputs) +
+  build + every gate on both the dev and release feature sets (what CI runs).
 - `make markers` — non-halting SRAM marker read via openocd (`openocd.cfg` at
   the repo root; Pico debugprobe wiring in HARDWARE.md).
 - Build gates, run on every build: **flasher-gate** (`.flasher` is
@@ -819,22 +821,25 @@ that 2.3 ms figure.
 (USBD_LP, the TIMER5 asm veneer's `.section`, `run` + the powerz refresh,
 command dispatch, do_getva/do_rawva, the TFT pixel engine, `ui::service`);
 **`rust/fast.x` patterns** cover what can't be annotated — other crates'
-code (USB stack, aes, builtins), whole modules (`ina`, `i2c`, `powerz`,
+code (USB stack, aes, builtins), whole modules (`ina`, `ntc`, `i2c`, `powerz`,
 `usb_bus`, `getva`) and generic `with_usb` with its closures. A callee
 the compiler doesn't inline stays slow unless it is annotated too.
 `.slowtext` force-demotes cold enum-time/one-shot machinery the globs
 would otherwise drag in (mangled generic names contain type-parameter
 crates, so crate globs over-match). Mechanics that are load-bearing:
 fast.x must be passed to the linker BEFORE link.x (input sections are
-claimed in script order); `_stext = __efasttext` overrides link.x so
-`.text` follows contiguously. `make fast-gate` (tools/fast_gate.py)
+claimed in script order); `_stext` (computed from `SIZEOF(.fasttext)`,
+asserted `== __efasttext` in flasher.x) overrides link.x so `.text`
+follows contiguously. Never write `_stext = __efasttext`: it is evaluated
+before layout, lld's first pass sees `.text` at 0, and it emits a
+permanent long-branch thunk for every cross-region call (~900 B). `make fast-gate` (tools/fast_gate.py)
 **fails the build if `.fasttext` crosses the boundary** — there is no
 priority order and nothing spills silently; on overflow, decide what to
 demote (rough priority in fast.x's header) — and if a critical symbol
 (ISRs, USB poll path, AES/getva) lands slow, which catches a pattern that
-stopped matching after a rename. It also reports the budget. The
-linker emits `__Thumbv7ABSLongThunk_*` veneers for some cross-section
-calls; stack_gate.py collapses them in its call graph.
+stopped matching after a rename, or if any `*LongThunk*` veneer appears
+(every in-flash BL is in range — a thunk means the `_stext` trap above).
+It also reports the budget.
 
 When adding code, decide its region: hot loops → `.fasttext` (and check
 the fast-gate report); straight-line per-command code tolerates slow (one

@@ -370,7 +370,9 @@ Constants (flash literals): R_series `0x2cec` = 11500, R0 `0x461c4000` = 10000.0
 273.15, and 1.8 / 32 for °F. The getva `temp` field carries the magnitude; the
 separate `temp sign` field (offset 88) marks sub-zero.
 
-Ours evaluates this per window with `libm::logf` (ina.rs). (Stock: units with
+Ours evaluates it per window in fixed point (ntc.rs: Q24 log2, integer
+only), bit-identical to the f32 form over every sum16 — `make ntc-check`
+(tools/ntc_check) proves it exhaustively. (Stock: units with
 a config-page serial ≤ 0x144 use a linear map of the internal die sensor, ch16,
 instead; this unit's serial is 55050.)
 

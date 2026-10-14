@@ -34,10 +34,9 @@ CRITICAL = [
     "3mem6memcpy",
 ]
 # ...except these (matched by a CRITICAL substring but deliberately slow —
-# see fast.x's .slowtext — or a linker-generated veneer that lives wherever
-# its slow caller does):
+# see fast.x's .slowtext):
 EXEMPT = ["get_descriptor", "control_out", "set_error", "handle_out",
-          "key_schedule", "try_cal", "Thumbv7ABSLongThunk"]
+          "key_schedule", "try_cal"]
 
 
 def main():
@@ -75,6 +74,11 @@ def main():
         sys.exit(f"fast-gate FAIL: .fasttext crosses {FAST_END:#x} by "
                  f"{efast - FAST_END} B — demote something from fast.x / "
                  f"#[link_section = \".fasttext.*\"] or shrink code")
+    thunks = [name for _, _, name in syms if "LongThunk" in name]
+    if thunks:
+        sys.exit(f"fast-gate FAIL: {len(thunks)} linker long-branch thunk(s) "
+                 f"(e.g. {thunks[0]}) — fast.x's _stext is being evaluated "
+                 f"before layout again; every in-flash BL is in range")
     if bad:
         for addr, name in sorted(bad):
             print(f"  SLOW: {addr:#x} {name}")

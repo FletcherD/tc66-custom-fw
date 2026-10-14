@@ -1,0 +1,11 @@
+[package]
+name = "ntc_check"
+edition = "2021"
+publish = false
+
+# Host-side exhaustive check of rust/src/ntc.rs against the stock f32 model.
+# Run: cargo run --release --manifest-path tools/ntc_check/Cargo.toml
+[dependencies]
+libm = "=0.2.16"
+
+[workspace]

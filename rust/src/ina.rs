@@ -101,20 +101,6 @@ fn d_line_1e2(sum16: u32) -> u32 {
     sum16 * 330 / 65520
 }
 
-/// NTC temperature — the STOCK model, recovered exactly from the stock
-/// firmware (docs/HARDWARE.md "Temperature (NTC) & D±"): 10k @ 25 C, beta = 3450,
-/// on the bottom of an 11.5k divider:
-///   R = avg * 11500 / (4095 - avg);  T = 1/(1/298.15 + ln(R/10000)/3450)
-fn ntc_temp_c(sum16: u32) -> i32 {
-    let avg = sum16 as f32 / 16.0;
-    if avg < 1.0 || avg > 4094.0 {
-        return 0; /* open/shorted divider — don't feed ln() garbage */
-    }
-    let r = avg * 11500.0 / (4095.0 - avg);
-    let inv_t = 1.0 / 298.15 + libm::logf(r / 10_000.0) / 3450.0;
-    (1.0 / inv_t - 273.15) as i32
-}
-
 fn eeprom_u32(off: u16) -> Option<u32> {
     let mut b = [0u8; 4];
     i2c::transact(EEPROM_ADDR, &[(off >> 8) as u8, off as u8], &mut b).ok()?;
@@ -394,7 +380,7 @@ fn adc_burst() {
         let m = &mut *PUBLISHED.0.get();
         m.dp_1e2 = dp.map(d_line_1e2).unwrap_or(0);
         m.dm_1e2 = dm.map(d_line_1e2).unwrap_or(0);
-        m.temp_c = ntc.map(ntc_temp_c).unwrap_or(0);
+        m.temp_c = ntc.map(crate::ntc::temp_c).unwrap_or(0);
         m.vdd_mv = vdd;
     });
     mk(MK_SMP_ADCB, mk_get(MK_SMP_ADCB) + 1);
