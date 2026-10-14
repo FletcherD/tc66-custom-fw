@@ -54,6 +54,8 @@ mod cfg;
 mod eeprom;
 mod flasher;
 mod font;
+#[cfg(feature = "triggers")]
+mod font_small;
 mod getva;
 mod i2c;
 mod ina;
@@ -62,6 +64,10 @@ mod markers;
 mod ntc;
 #[cfg(feature = "triggers")]
 mod pd;
+#[cfg(feature = "triggers")]
+mod pdinfo;
+#[cfg(feature = "triggers")]
+mod pdscr;
 mod persist;
 mod plot;
 mod powerz;
@@ -83,7 +89,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 146;
+const BUILD_ID: u32 = 148;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -291,8 +297,13 @@ fn run() -> ! {
      * and P are accumulated for one second. */
     let mut sec_ticks: u32 = 0;
     /* K2 held >= 1 s resets the active group's energy + run clock; one
-     * shot per hold */
+     * shot per hold. Released sooner = a short press (PD screen: next page,
+     * or start the sniffer if the engine is off) */
     let mut k2_hold: u32 = 0;
+    /* entering the PD screen starts the sniffer if the engine is off; the
+     * screen restored at boot (cfg::apply_boot, above) does not count */
+    #[cfg(feature = "triggers")]
+    let mut last_screen = ui::screen();
 
     /* screen refresh every 125 ticks (0.5 s); only changed cells are drawn
      * (ui.rs dirty tracking), so an idle refresh costs nothing */
@@ -348,7 +359,17 @@ fn run() -> ! {
                     ui::draw(persist::run_secs());
                 }
             } else {
+                if k2_hold != 0 && k2_hold < 250 && tft_alive {
+                    k2_short();
+                }
                 k2_hold = 0;
+            }
+            #[cfg(feature = "triggers")]
+            if ui::screen() != last_screen {
+                last_screen = ui::screen();
+                if last_screen == ui::PD && pd::is_off() {
+                    let _ = pd::sniff(); /* failure shows as "PD off" */
+                }
             }
             sec_ticks += elapsed;
             while sec_ticks >= 250 {
@@ -536,6 +557,9 @@ fn on_packet(buf: &[u8]) {
             };
             reply_ok_er(r);
         }
+    } else if match5(buf, b"pdinf") {
+        #[cfg(feature = "triggers")]
+        do_pdinf(buf.get(5) == Some(&1));
     } else if match5(buf, b"pdsta") {
         #[cfg(feature = "triggers")]
         do_pdsta();
@@ -1080,6 +1104,42 @@ fn do_fcprd(buf: &[u8]) {
     match r {
         Ok(()) => write_all(&reply[..2 + n]),
         Err(e) => write_all(&[b'E', b'R', e]),
+    }
+}
+
+/// K2 short press: on the PD screen, start the sniffer if the PD engine is
+/// off, else show the next page.
+#[inline(never)]
+fn k2_short() {
+    #[cfg(feature = "triggers")]
+    if ui::screen() == ui::PD {
+        if pd::is_off() {
+            let _ = pd::sniff(); /* failure shows as "PD off" */
+        } else {
+            pdscr::next_page();
+        }
+        ui::draw(persist::run_secs());
+    }
+}
+
+/// trigger verb: pdinf [1] -> "OK" + page + pages + n + n x COLS bytes: all
+/// of the PD screen's text lines (pdinfo.rs), space-padded; page is the
+/// one the screen shows (0-based). With arg 1, first advance the page (as
+/// K2 does on the PD screen).
+#[cfg(feature = "triggers")]
+#[inline(never)]
+fn do_pdinf(next: bool) {
+    if next {
+        pdscr::next_page();
+    }
+    ui::draw(persist::run_secs());
+    let n = pdinfo::lines();
+    let (page, pages) = pdscr::page();
+    write_all(&[b'O', b'K', page, pages, n as u8]);
+    for i in 0..n {
+        let mut l = [b' '; pdinfo::COLS];
+        pdinfo::line(i, &mut l);
+        write_all(&l);
     }
 }
 

@@ -15,14 +15,24 @@ else, including the stock firmware.
   hardware timer at 250 Hz, so how fast a host polls has no effect on how
   fresh the readings are. Also: NTC temperature, D+/D− voltages, and
   mAh/mWh energy counters with run time.
-- **Screens.** Four screens, and K1 steps through them:
+- **Screens.** Five screens, and K1 steps through them:
   1. V / A / W
   2. mAh, mWh, and run time
   3. temperature, D+, and D−
   4. a full-screen scrolling V/I plot
+  5. USB-PD info: the charger's offers, the negotiated contract, live
+     VBUS, the CC line and Type-C current, the cable's e-marker, and
+     message counters. Short-press K2 for the next page (a bar on the
+     right shows where you are).
 
   Hold K2 for 1 s to reset the energy counters. The screen turns off
   after 15 s with no change in the readings, and any key wakes it.
+
+  Switching to the PD screen starts PD sniffing (see below), and it keeps
+  running until `tools/pd.py off`. While sniffing, the meter stops
+  presenting itself as a USB-C sink, so a charger only supplies power while
+  a device is plugged into the other side. If the meter starts up on the PD
+  screen, sniffing stays off until you short-press K2.
 - **Linux `sensors` support.** The meter identifies itself as a ChargerLAB
   POWER-Z KM003C, so the mainline Linux `powerz` hwmon driver binds to it.
   `sensors` then shows live V/I. It handles over 5000 reads/s.
@@ -50,7 +60,8 @@ else, including the stock firmware.
   requests, accept/ready, vendor messages, and the charger's queries to an
   e-marked cable (whose vendor, current rating and speed get decoded). Plug
   and unplug events and corrupted packets are logged too, and the meter can
-  make the pair renegotiate on command, so you don't have to re-plug.
+  make the pair renegotiate on command, so you don't have to re-plug. The
+  PD screen shows the result live; `tools/pd.py info` prints it.
 - **Firmware updates without the button.** Once this firmware is installed,
   it can reflash itself over USB.
 - **Watchdog.** If the firmware hangs, the meter reboots.

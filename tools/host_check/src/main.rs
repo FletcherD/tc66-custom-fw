@@ -1,15 +1,43 @@
-//! Host-side proofs for the firmware's pure-math modules, compiled here
+//! Host-side proofs for the firmware's pure modules, compiled here
 //! verbatim from rust/src:
 //! - ntc.rs: fixed-point NTC conversion bit-identical to the stock f32 model
 //!   over every possible ADC sum16 (also reported against exact f64).
 //! - aes256.rs: S-box = the GF(2^8) definition, FIPS-197 C.3 vector, and
 //!   random blocks under the meter's getva key vs the RustCrypto `aes` crate.
+//! - pdinfo.rs: the PD parser + screen text replayed over a negotiation
+//!   (Source_Cap, Request, PS_RDY, PPS, Reject, cable identity, hard reset);
+//!   the frames' meaning cross-checked with tools/pd_decode.py.
 
 #[path = "../../../rust/src/ntc.rs"]
 mod ntc;
 #[allow(dead_code)]
 #[path = "../../../rust/src/aes256.rs"]
 mod aes256;
+#[path = "../../../rust/src/pdinfo.rs"]
+mod pdinfo;
+
+/// Stand-ins for the firmware modules pdinfo.rs formats from.
+#[allow(dead_code)]
+mod pd {
+    pub const MODE_OFF: u8 = 0;
+    pub const MODE_SINK: u8 = 1;
+    pub const MODE_SNIFF: u8 = 2;
+    pub struct Link {
+        pub mode: u8,
+        pub src: bool,
+        pub snk: bool,
+        pub cc: u8,
+        pub cc_mv: u16,
+    }
+    pub fn link() -> Link {
+        Link { mode: MODE_SNIFF, src: true, snk: true, cc: 1, cc_mv: 1680 }
+    }
+}
+mod ina {
+    pub fn snapshot_vi() -> (u32, u32) {
+        (90_210, 123_400) /* 9.021 V, 1.234 A */
+    }
+}
 
 use aes::cipher::{BlockEncrypt, KeyInit};
 
@@ -106,7 +134,96 @@ fn check_aes() -> bool {
     ok & (bad == 0)
 }
 
+fn pd_text() -> Vec<String> {
+    (0..pdinfo::lines())
+        .map(|i| {
+            let mut l = [b' '; pdinfo::COLS];
+            pdinfo::line(i, &mut l);
+            String::from_utf8_lossy(&l).trim_end().to_string()
+        })
+        .collect()
+}
+
+fn pd_expect(step: &str, want: &[&str]) -> bool {
+    let got = pd_text();
+    let ok = got == want;
+    println!("pdinfo: {step}: {}", if ok { "ok" } else { "WRONG" });
+    if !ok {
+        for (i, (g, w)) in got.iter().zip(want.iter().chain(std::iter::repeat(&"<none>"))).enumerate() {
+            println!("  {i:2} got {g:<22} want {w}");
+        }
+    }
+    ok
+}
+
+fn pd_msg(hdr: u16, objs: &[u32], sop: u8) {
+    let b: Vec<u8> = objs.iter().flat_map(|o| o.to_le_bytes()).collect();
+    pdinfo::on_msg(hdr, &b, sop);
+}
+
+/// Apple-style source: 5/9/15/20 V 3 A + PPS 3.3-11 V 3 A, PD 3.0 headers;
+/// header = type | rev 2 << 6 | power role (source) 1 << 8 | nobj << 12.
+fn check_pdinfo() -> bool {
+    const CAPS: [u32; 5] = [0x0801_912C, 0x0002_D12C, 0x0004_B12C, 0x0006_412C, 0xC0DC_213C];
+    const SRC_CAP: u16 = 0x51A1; /* data 1, DFP, 5 objects */
+    const REQUEST: u16 = 0x1082; /* data 2 from the sink */
+    const GOODCRC: u16 = 0x0081;
+    const PS_RDY: u16 = 0x0186;
+    const REJECT: u16 = 0x0184;
+    const SOP1_ID_ACK: u16 = 0x518F; /* SOP' VDM from the cable plug, 5 objects */
+    let mut ok = true;
+    pdinfo::reset();
+    ok &= pd_expect("idle", &[
+        "SNIFF       src snk", "no contract", "VBUS 9.021V 1.234A", "CC1 1.68V Rp 3.0A",
+        "no e-marker seen", "msg 0 crc 0 hr 0", "no source caps",
+    ]);
+    pd_msg(SRC_CAP, &CAPS, 0);
+    pd_msg(SRC_CAP, &CAPS, 0); /* retry: overwrites */
+    pd_msg(GOODCRC, &[], 0);
+    pd_msg(REQUEST, &[0x2003_212C], 0); /* PDO 2, 2 A op / 3 A max */
+    ok &= pd_expect("caps + request (Accept missed)", &[
+        "SNIFF PD3.x src snk", "?#2 9.00V 2.00A", "VBUS 9.021V 1.234A", "CC1 1.68V Rp 3.0A",
+        "no e-marker seen", "msg 4 crc 0 hr 0",
+        " 1  5.00V 3.00A", " 2  9.00V 3.00A", " 3 15.00V 3.00A", " 4 20.00V 3.00A",
+        " 5 PPS 3.3-11.0V 3.00A",
+    ]);
+    pd_msg(PS_RDY, &[], 0);
+    let contract9 = [
+        "SNIFF PD3.x src snk", ">#2 9.00V 2.00A", "VBUS 9.021V 1.234A", "CC1 1.68V Rp 3.0A",
+        "no e-marker seen", "msg 5 crc 0 hr 0",
+        " 1  5.00V 3.00A", ">2  9.00V 3.00A", " 3 15.00V 3.00A", " 4 20.00V 3.00A",
+        " 5 PPS 3.3-11.0V 3.00A",
+    ];
+    ok &= pd_expect("PS_RDY -> contract", &contract9);
+    pd_msg(REQUEST, &[0x5003_8628], 0); /* PPS 9.02 V 2 A */
+    pd_msg(REJECT, &[], 0);
+    pdinfo::on_event(0x32);
+    let mut want = contract9;
+    want[5] = "msg 7 crc 1 hr 0";
+    ok &= pd_expect("PPS request rejected", &want);
+    pd_msg(REQUEST, &[0x5003_8628], 0);
+    pd_msg(PS_RDY, &[], 0);
+    pd_msg(SOP1_ID_ACK, &[0xFF00_A041, 0x1800_05AC, 0, 0x1781_0000, 0x0008_0040], 1);
+    ok &= pd_expect("PPS contract + cable", &[
+        "SNIFF PD3.x src snk", ">#5 PPS 9.02V 2.00A", "VBUS 9.021V 1.234A", "CC1 1.68V Rp 3.0A",
+        "CBL 5A 20V USB2 05AC", "msg 10 crc 1 hr 0",
+        " 1  5.00V 3.00A", " 2  9.00V 3.00A", " 3 15.00V 3.00A", " 4 20.00V 3.00A",
+        ">5 PPS 3.3-11.0V 3.00A",
+    ]);
+    pdinfo::on_event(0x33);
+    ok &= pd_expect("hard reset", &[
+        "SNIFF       src snk", "no contract", "VBUS 9.021V 1.234A", "CC1 1.68V Rp 3.0A",
+        "CBL 5A 20V USB2 05AC", "msg 10 crc 1 hr 1", "no source caps",
+    ]);
+    pdinfo::source_gone();
+    ok &= pd_expect("source gone", &[
+        "SNIFF       src snk", "no contract", "VBUS 9.021V 1.234A", "CC1 1.68V Rp 3.0A",
+        "no e-marker seen", "msg 10 crc 1 hr 1", "no source caps",
+    ]);
+    ok
+}
+
 fn main() {
-    let ok = check_ntc() & check_aes();
+    let ok = check_ntc() & check_aes() & check_pdinfo();
     std::process::exit(!ok as i32);
 }

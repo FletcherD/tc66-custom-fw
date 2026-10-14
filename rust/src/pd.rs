@@ -293,6 +293,7 @@ fn cap_push(bytes: &[u8]) {
 /// Capture one PD wire message (header + data objects) as a wrapped event;
 /// `sop` 0 = SOP, 1 = SOP', 2 = SOP''.
 fn cap_msg(hdr: u16, objs: &[u8], sop: u8) {
+    crate::pdinfo::on_msg(hdr, objs, sop);
     let wire = 2 + objs.len();
     let mut e = [0u8; CAP_SLOT_LEN];
     e[0] = 0x80 | (wire as u8 + 5); /* size_flag: low 6 bits = N+5 */
@@ -305,6 +306,7 @@ fn cap_msg(hdr: u16, objs: &[u8], sop: u8) {
 
 /// Capture a connect (0x21) / disconnect (0x22) / CAP_RX_* event.
 fn cap_conn(code: u8) {
+    crate::pdinfo::on_event(code);
     let ms = now_ms();
     let e = [0x45, ms as u8, (ms >> 8) as u8, (ms >> 16) as u8, 0x00, code];
     cap_push(&e);
@@ -400,6 +402,7 @@ fn arm_as(state: u8) -> Result<(), u8> {
      * The cycle costs nothing when no source is attached yet. */
     wr(R_SWITCHES0, 0x00)?;
     wr(R_SWITCHES1, sw1_rev(REV20))?;
+    crate::pdinfo::reset();
     *p = Pd {
         state,
         cc: 0,
@@ -459,6 +462,44 @@ pub fn status(out: &mut [u8; 20]) {
     for i in 0..3 {
         out[14 + 2 * i..16 + 2 * i].copy_from_slice(&p.rx_hdr[i].to_le_bytes());
     }
+}
+
+pub const MODE_OFF: u8 = 0;
+pub const MODE_SINK: u8 = 1;
+pub const MODE_SNIFF: u8 = 2;
+
+/// What the PD screen shows about the link (pdinfo.rs).
+pub struct Link {
+    pub mode: u8,   /* MODE_* */
+    pub src: bool,  /* a source's Rp is seen (sniff: CC locked; sink: attached) */
+    pub snk: bool,  /* an Rd loads the CC (sniff: a sink attached; sink: ours) */
+    pub cc: u8,     /* active CC, 0 none */
+    pub cc_mv: u16, /* its voltage from the ~500 ms MDAC sweep */
+}
+
+pub fn link() -> Link {
+    let p = pd();
+    let mode = match p.state {
+        ST_OFF => MODE_OFF,
+        ST_SNIFF => MODE_SNIFF,
+        _ => MODE_SINK,
+    };
+    let src = match mode {
+        MODE_SNIFF => p.cc != 0,
+        _ => p.state >= ST_LISTEN && p.state != ST_RD_CYCLE,
+    };
+    Link {
+        mode,
+        src,
+        snk: if mode == MODE_SNIFF { p.sink } else { src },
+        cc: if src { p.cc } else { 0 },
+        cc_mv: if p.cc == 2 { p.vcc2_mv } else { p.vcc1_mv },
+    }
+}
+
+/// Engine off (`pdctl 0` / never armed).
+pub fn is_off() -> bool {
+    pd().state == ST_OFF
 }
 
 /// `pdcap`: copy the stored source PDOs; returns count.
@@ -781,6 +822,7 @@ fn sniff_poll(p: &mut Pd) -> Result<(), u8> {
         if p.sink {
             cap_conn(0x22);
         }
+        crate::pdinfo::source_gone();
         p.cc = 0;
         p.sink = false;
         return Ok(());
@@ -930,6 +972,7 @@ fn active_poll(p: &mut Pd, now: u32) -> Result<(), u8> {
         p.req_obj = 0;
         p.state = ST_LISTEN;
         p.cap_ask_tick = now;
+        crate::pdinfo::on_event(CAP_HARD_RESET);
         return Ok(());
     }
     if inta & IA_RETRYFAIL != 0 && p.state == ST_WAIT_ACCEPT {
@@ -949,6 +992,7 @@ fn active_poll(p: &mut Pd, now: u32) -> Result<(), u8> {
             p.state = ST_WAIT_ATTACH;
             wr(R_SWITCHES1, sw1_rev(REV20))?;
             cap_conn(0x22); /* KM003C PD capture: disconnect */
+            crate::pdinfo::source_gone();
             return Ok(());
         }
     } else {

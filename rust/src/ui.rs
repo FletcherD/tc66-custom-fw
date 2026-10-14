@@ -4,6 +4,7 @@
 //!   1  mAh / mWh / hh:mm:ss (energy since power-on or the last K2 reset)
 //!   2  temperature / D+ / D−
 //!   3  scrolling V/I plot   (plot.rs — full screen, no cells)
+//!   4  USB-PD info          (pdscr.rs — paged small-font text; `triggers`)
 //!
 //! The first ~2 s after boot show a splash instead: "TC66" and the version
 //! (= build id, white).
@@ -23,6 +24,8 @@
 
 use crate::font;
 use crate::ina;
+#[cfg(feature = "triggers")]
+use crate::pdscr;
 use crate::plot;
 use crate::tft;
 
@@ -32,14 +35,20 @@ const Y0: u16 = 1;
 const Y_STEP: u16 = font::CELL_H + 3;
 
 const BG: u16 = 0x0000;
+#[cfg(feature = "triggers")]
+pub const SCREENS: u8 = 5;
+#[cfg(not(feature = "triggers"))]
 pub const SCREENS: u8 = 4;
 pub const PLOT: u8 = 3;
+pub const PD: u8 = 4;
 /* per-screen line colors (RGB565) */
 const COLORS: [[u16; 3]; SCREENS as usize] = [
     [0x07E0, 0xFFE0, 0x07FF], /* V green, I yellow, P cyan (V/I as on the plot) */
     [0xFD20, 0xF81F, 0xFFFF], /* mAh orange, mWh magenta, time white */
     [0xFBEA, 0xFFFF, 0xAFFF], /* temp salmon, D+ white, D- light blue */
     [0; 3],                   /* plot: no cells */
+    #[cfg(feature = "triggers")]
+    [0; 3], /* PD info: own grid */
 ];
 
 struct Racy<T>(core::cell::UnsafeCell<T>);
@@ -70,6 +79,12 @@ pub fn set_screen(n: u8) {
         plot::enter();
     } else {
         plot::leave();
+    }
+    #[cfg(feature = "triggers")]
+    if n == PD {
+        pdscr::enter();
+    } else {
+        pdscr::leave();
     }
     unsafe {
         *SCREEN.0.get() = n;
@@ -137,6 +152,12 @@ pub fn draw(run_secs: u32) {
     let splash = unsafe { &mut *SPLASH.0.get() };
     if screen() == PLOT {
         *splash = 0;
+        return;
+    }
+    #[cfg(feature = "triggers")]
+    if screen() == PD {
+        *splash = 0;
+        pdscr::draw();
         return;
     }
     let mut lines = [[b' '; COLS]; 3];
@@ -222,7 +243,11 @@ pub fn service() -> Result<bool, u8> {
     if !tft::service()? || !plot::service()? {
         return Ok(false);
     }
-    if screen() == PLOT {
+    #[cfg(feature = "triggers")]
+    if !pdscr::service()? {
+        return Ok(false);
+    }
+    if screen() == PLOT || screen() == PD {
         return Ok(true);
     }
     let dirty = unsafe { &mut *DIRTY.0.get() };
@@ -233,6 +258,7 @@ pub fn service() -> Result<bool, u8> {
     let (row, col) = (n / COLS, n % COLS);
     let ch = unsafe { (*LAST.0.get())[row][col] };
     tft::start_char(
+        &font::FONT,
         X0 + col as u16 * font::ADV,
         Y0 + row as u16 * Y_STEP,
         ch,

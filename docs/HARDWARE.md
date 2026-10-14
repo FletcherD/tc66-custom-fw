@@ -172,6 +172,7 @@ Verbs:
 | `pdctl` | `OK` / `ER`+stage | our trigger verb: PD sink engine off (0) / arm (1) / hard-reset (2 — while sniffing: makes the pair renegotiate) / listen-only sniffer (3) (pd.rs, tools/pd.py) |
 | `pdsta` | `OK`+20 B | our trigger verb: PD engine state (layout: `pd::status`; while sniffing — state 7 — byte 3 = a sink is attached) |
 | `pdcap` | `OK`+n+n×4 B | our trigger verb: received source PDOs (LE u32 each) |
+| `pdinf` | `OK`+page+pages+n+n×22 B | our trigger verb: the PD screen's text (pdinfo.rs) — every line, 22 ASCII bytes each, space-padded; page = the one the screen shows (0-based). `pdinf\x01` first advances the page (as K2 on the PD screen) (tools/pd.py info) |
 | `pdreq` | `OK` / `ER` | our trigger verb: `pdreq <n> [mv u16][ma u16]` — request source PDO n (1-based; fixed, or PPS APDO with a setpoint) — **raises OUT voltage** |
 | `qctrg` | `OK` / `ER`+code | our trigger verb: `qctrg <mode>` QC2.0 D+/D− trigger, mode 0/1/2/3 = 5/9/12/20 V; the first call runs the detecting QC handshake (~1.5 s) and fails with ER 0x20 (no D+/D− short) / 0x21 (DCP without QC), pins released — **raises OUT voltage** (qc.rs, tools/qc.py) |
 | `qcdet` | `OK`+8 B | our trigger verb: QC handshake probe, never sets a voltage (~1.5 s): class u8 (0 = no D+/D− short, 1 = DCP without QC, 2 = QC) + D+, D− at 0.1 s, D− at 1.5 s (u16 LE mV); pins released after (tools/detect.py) |
@@ -185,7 +186,7 @@ Keeping `getva` byte-compatible (same reply) lets existing host tools work
 unchanged. Verbs are grouped by cargo feature (docs/DEVELOPMENT.md "Feature
 sets"): the product verbs above (`getva query rotat gtrec cfgrd cfgwr updat
 versn eeprd rawva`) are always served; the trigger verbs (`pdctl pdsta pdcap
-pdreq qctrg qc3ct qcdet afctr qcoff`) need `triggers` (in release builds);
+pdinf pdreq qctrg qc3ct qcdet afctr qcoff`) need `triggers` (in release builds);
 the dev verbs need their group — `dev-board` (`i2crd adcrd gpird clkrd
 keyrd rstrd wdtst idlrd`), `dev-tft` (`uiscr tftfl tftbl tftui`), `dev-bt`
 (`btini btcmd btget btrun btsta btspy`), `fcp` (the untested
@@ -441,7 +442,9 @@ PD capture ring behind the powerz `ATT_PD` attribute. **The FUSB302 sits on
 the pass-through CC line** (meter PD switch ON): its power-on default
 presents Rd on both CC, so with the engine off a source on IN sees the meter
 as a sink (in parallel with any device on OUT); `pdctl 3` (sniff) drops it —
-with nothing on OUT an Apple charger then turns VBUS off (bench-verified). Verbs +
+with nothing on OUT an Apple charger then turns VBUS off (bench-verified).
+Switching to the PD info screen starts the sniffer the same way when the
+engine is off. Verbs +
 host tool in the command table above / tools/pd.py; engine internals in
 FIRMWARE.md "USB-PD sink". **INT_N = PA15** (open-drain, active-low; needs
 the GPIO's internal pull-up, as stock configures it) — bench-verified: an
@@ -483,7 +486,9 @@ trigger holds them; `qcoff` releases all four pins.
 - **K1 = PF0, K2 = PF1** (GPIOF), **active-low** (read 1 with the internal
   pull-up when released — verified with `keyrd`); polled at 250 Hz with 20 ms
   debounce (keys.rs), no EXTI. K1 = next screen, K2 held 1 s = reset the active
-  energy group + run clock; any press wakes an idle-off screen.
+  energy group + run clock, K2 short press (released before 1 s) on the PD
+  screen = next page (or start the sniffer if PD is off); any press wakes an
+  idle-off screen.
 
 ### Bluetooth
 - A **DX-BT24-M** BLE module on **USART1**: **TX = PA2 (AF1), RX = PB0 (AF4)**

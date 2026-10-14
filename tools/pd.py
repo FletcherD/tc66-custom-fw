@@ -17,6 +17,9 @@
   pd.py req <n> [volts [amps]]   request source PDO n (pdreq); volts (+ amps,
                        default the APDO max) required for a PPS APDO
   pd.py watch [secs]   poll status at 2 Hz (default 20 s)
+  pd.py info [next]    the meter's PD screen text (pdinf): parsed source caps,
+                       contract, cable, counters; `next` first advances the
+                       screen's page as K2 does
 
 DANGER: a granted request RAISES THE OUT-PORT VOLTAGE (9/12/15/20 V).
 Nothing should be attached downstream of the meter when triggering. `req`
@@ -168,6 +171,25 @@ def show_status(s):
     return st
 
 
+COLS = 22  # pdinfo::COLS
+
+
+def show_info(s, advance=False):
+    s.reset_input_buffer()
+    s.write(b"pdinf" + (b"\x01" if advance else b""))
+    h = s.read(5)
+    if h[:2] != b"OK" or len(h) < 5:
+        sys.exit("garbled pdinf reply: %r" % h)
+    page, pages, n = h[2], h[3], h[4]
+    body = s.read(n * COLS)
+    if len(body) != n * COLS:
+        sys.exit("short pdinf reply: %d of %d bytes" % (len(body), n * COLS))
+    print("screen page %d/%d (6 lines each)" % (page + 1, pages))
+    for i in range(n):
+        mark = "*" if i // 6 == page else " "
+        print("%s %2d | %s" % (mark, i, body[i * COLS:(i + 1) * COLS].decode("ascii", "replace")))
+
+
 def main():
     guard, argv = trigger_guard.parse(__doc__)
     cmd = argv[0]
@@ -201,6 +223,8 @@ def main():
         if ok_er(xfer(s, pkt, 3), what):
             time.sleep(0.7)
             show_status(s)
+    elif cmd == "info":
+        show_info(s, len(argv) > 1 and argv[1] == "next")
     elif cmd == "watch":
         secs = float(argv[1]) if len(argv) > 1 else 20
         end = time.time() + secs

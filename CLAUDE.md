@@ -6,10 +6,13 @@ M1 (real calibrated measurement), M2 persistence (eeprom.rs/cfg.rs/
 persist.rs: stock-compatible EEPROM layout — settings via `cfgrd`/`cfgwr`
 + tools/cfg.py, energy ring, datalog + `gtrec`, run count/serial in
 getva; docs/HARDWARE.md "EEPROM layout", docs/FIRMWARE.md "Persistence"), the M3 basics (ST7735S driver in
-tft.rs + four screens in ui.rs — V/I/P, energy + run clock, temp/D±, and
-plot.rs's full-screen V/I plot on the panel's hardware rolling scroll —
+tft.rs + five screens in ui.rs — V/I/P, energy + run clock, temp/D±,
+plot.rs's full-screen V/I plot on the panel's hardware rolling scroll, and
+pdscr.rs's paged PD info screen (pdinfo.rs parser fed at pd.rs's capture
+points, 7×13 font_small.rs, scroll bar; entering it starts the sniffer if
+PD is off — never at boot; `pdinf` verb + `pd.py info`) —
 with no-change screen-off after `idle_off_s` (default 15 s); keys.rs polls K1/K2 — K1 next screen, K2
-held 1 s resets energy, any press wakes; `keyrd`/`uiscr` dev verbs), the
+held 1 s resets energy, K2 short press = next PD page, any press wakes; `keyrd`/`uiscr` dev verbs), the
 FWDGT watchdog (wdg.rs, ~13 s, fed per loop pass + inside the flasher —
 bench-verified with tools/wdgtest.py; `rstrd` reads the reset cause), the
 BLE link (bt.rs: DX-BT24-M on USART1 at 9600 — its power-on default, it
@@ -41,7 +44,7 @@ compatibility**. The sampler runs from the TIMER5 interrupt (250 Hz,
 interleaved INA226 reads — ina.rs), immune to main-loop blocking. The hot
 path is pinned below the GD32's 32 KB zero-wait flash boundary
 (`rust/fast.x` + `make fast-gate` — docs/FIRMWARE.md "Fast-flash placement";
-query 0.24 / rawva 0.55 / getva 2.2 ms — tools/verbtime.py; the TFT pixel engine too — full
+query 0.37 / rawva 0.76 / getva 2.5 ms — tools/verbtime.py, up from 0.24/0.55/2.2 by a pure layout shift, see FIRMWARE.md; the TFT pixel engine too — full
 redraw ~30 ms, tools/uitime.py). Slow-region cost is per cold fetch and
 layout-sensitive: anything with a polling loop belongs in fast flash
 (`#[link_section = ".fasttext.<name>"]` on our fns, fast.x patterns for

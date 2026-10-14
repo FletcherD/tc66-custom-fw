@@ -3,8 +3,9 @@ name = "host_check"
 edition = "2021"
 publish = false
 
-# Host-side checks of the firmware's pure-math modules (rust/src/ntc.rs,
-# rust/src/aes256.rs) against reference implementations.
+# Host-side checks of the firmware's pure modules (rust/src/ntc.rs,
+# rust/src/aes256.rs against reference implementations; rust/src/pdinfo.rs
+# against a replayed PD negotiation).
 # Run: cargo run --release --manifest-path tools/host_check/Cargo.toml
 [dependencies]
 libm = "=0.2.16"

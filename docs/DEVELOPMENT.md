@@ -40,11 +40,13 @@ features.
   the stock seq, both groups + run clocks + the group setting restore
   across reboots, BLE settings verbs work. Not yet exercised: a real power
   cut mid-session (torn-slot fallback) and the K2-hold reset.
-- **M3 — display: done.** ST7735S driver + four always-on screens
+- **M3 — display: done.** ST7735S driver + five always-on screens
   (V/I/P; mAh/mWh + run clock; temperature + D+/D−; a full-screen
   scrolling V/I plot using the panel's hardware scroll — `plot.rs`; period
-  and V/I full scale are settings), K1 steps screens, K2
-  held 1 s resets energy, idle screen-off (settings: delay + V/I thresholds) (burn-in protection; any
+  and V/I full scale are settings; a paged USB-PD info screen — `pdscr.rs`
+  over the `pdinfo.rs` parser, 7×13 small font, scroll bar, entering it
+  starts the sniffer), K1 steps screens, K2
+  held 1 s resets energy, K2 short press pages the PD screen, idle screen-off (settings: delay + V/I thresholds) (burn-in protection; any
   key press wakes it — `rust/src/keys.rs`). Pixel streaming is
   DMA-driven and non-blocking (SPI0 TX on DMA ch2, pumped from the main
   loop — bench-verified via the MK_DSP markers); the first frame draws
@@ -125,8 +127,17 @@ features.
   - The QUIRKS.md open questions (the unexplained mechanisms behind §1
     NAK/APB stalls and §2 event loss — both absorbed in firmware) and the
     optional stock-firmware Tier 2 comparison.
-  - On-device settings menu / group switch on the buttons, a PD/CC status
-    screen.
+  - PD info screen (build 148): parser verified by the host replay
+    (tools/host_check) and live on the bench only in its idle states —
+    auto-sniff on entry, boot-restore without sniffing, sink/source/Rp
+    detection, page wrap via `pdinf`. Still to do: compare against
+    `pdcap.py` across live renegotiations (on this bench `pd.py hardreset`
+    stopped re-triggering the charger ↔ Pixel pair — HARDSENT fires, VBUS
+    and the contract stay; also on the unmodified build 146), a visual check
+    of the screen and the scroll bar, and the K2 short press on the real
+    button. Also open: the CDC verb latency shift that came with the layout
+    change (FIRMWARE.md "Fast-flash placement").
+  - On-device settings menu / group switch on the buttons.
 
 ## Layout
 

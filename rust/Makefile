@@ -70,9 +70,10 @@ gates: host-check
 	$(MAKE) RELEASE=1 tc66fw.bin
 	cargo check --release --features "dev-verbs pcprf grace"
 
-# Host-side proofs of the pure-math modules: src/ntc.rs bit-identical to the
+# Host-side proofs of the pure modules: src/ntc.rs bit-identical to the
 # stock f32 temperature model over all inputs, src/aes256.rs vs FIPS-197 and
-# the RustCrypto aes crate (own dir: rust/.cargo's thumb target must not apply)
+# the RustCrypto aes crate, src/pdinfo.rs replaying a PD negotiation (own
+# dir: rust/.cargo's thumb target must not apply)
 host-check:
 	cd ../tools/host_check && cargo run -q --release
 

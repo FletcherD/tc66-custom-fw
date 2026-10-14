@@ -2,8 +2,18 @@
 //!   mkfont.py inb.otf 30 '0123456789 .-VAWhm:TCD+vb'
 //! 25 glyphs, cell 18x24, 1800 bytes.
 
+use crate::tft::Font;
+
 pub const CELL_H: u16 = 24;
 pub const ADV: u16 = 18;
+
+pub static FONT: Font = Font {
+    adv: ADV,
+    cell_h: CELL_H,
+    first: 0x00,
+    glyphs: GLYPHS,
+    data: DATA,
+};
 
 pub const GLYPHS: &[(u8, u16)] = &[
     (b' ', 0),
