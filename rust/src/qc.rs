@@ -355,25 +355,168 @@ pub fn afc(cmd: u8, reps: u8) -> Result<(), u8> {
 
 /* ---- Huawei FCP / SCP (charge_protocol_handshake modes 2 / 3) ----
  *
- * Same HiSilicon ACCP physical layer as AFC (D− serial, closed-loop
- * proto_send_word), same entry (release-all → drive D+ 0.6 V, D− released,
- * 2050 ms). Differences: 3 leading `01` sync pings 900 µs apart, then multi-byte
- * register packets, each ending in a CRC-8 (poly 0x39, init 0, MSB-first, over
- * all preceding bytes — `crc8_huawei @0x08003a2c`, verified bit-exact). Grammar:
- *   0c = read8   <0c><reg><crc>
- *   0b = write8  <0b><reg><val><crc>
+ * UNTESTED on hardware. Same HiSilicon ACCP physical layer and entry as AFC
+ * (release-all → D+ 0.6 V, D− released, 2050 ms), then 3 `01` sync pings
+ * 900 µs apart and register packets 10 ms apart, each ending in a CRC-8 (poly
+ * 0x39, init 0, MSB-first — `crc8_huawei @0x08003a2c`). Grammar:
+ *   0c = read8   <0c><reg><crc>            reply <08><val><crc>
+ *   0b = write8  <0b><reg><val><crc>       reply <08><crc>
  *   1b = write16 <1b><reg><len><d0><d1><crc>
- * Packets recovered from the stock scatter-decompressed .data (all CRC-verified).
- *
- * OPEN QUESTIONS (asked the user to RE — currently ASSUMPTIONS, marked below):
- *   (a) per-packet `flag` (does each read/write set flag=1 = measure the
- *       charger response, or flag=0)? Pings are flag=0; assumed data = flag=1.
- *   (b) parity per-byte vs running across the packet (see afc_byte_bits).
- *   (c) inter-packet gap after the 3× 900 µs pings; assumed 10 ms (AFC's gap).
- *   (d) whether a trigger needs the full read+write sequence or just the writes.
- * FCP is fixed-voltage (6 packets: read 04/21/31, write 2c=90→9V, read 2c,
- * write 2b=01 commit). SCP reg 0xca = voltage code (raw scale, unknown volts;
- * the stock scan probes 0xc8=200 and 0xdc=220). */
+ * ACK = low nibble 8 (0x08/0x88), NACK = 0x03. Framing, timing and replies
+ * are taken from the stock 100 kS/s captures (fcp.csv/scp.csv, a real FCP
+ * charger attached) — docs/AFC_DECODE_NOTES.md "Frame format". AFC keeps its
+ * own bench-verified framing (afc_start/afc_byte_bits/proto_send_word).
+ * Transaction: Mping → Sping → frame → Mping → Sping → [charger frame →
+ * charger end ping (~2.5 ms high) → 1.7 ms] → Mping → Sping. */
+
+/// SYNC quarter-pulse width (UI/4; the captures show ~40 µs).
+const SYNC_US: u32 = 40;
+/// Charger bit cell used to decode replies (the captures show 150-160 µs).
+const RX_UI_US: u32 = 155;
+
+/// Spin `n` µs on SysTick (fast-flash copy of `us` for the framer).
+#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
+#[link_section = ".fasttext.qc_spin_us"]
+#[inline(never)]
+fn spin_us(n: u32) {
+    let cyc = n * 48;
+    let start = cortex_m::peripheral::SYST::get_current();
+    while start.wrapping_sub(cortex_m::peripheral::SYST::get_current()) & 0x00FF_FFFF < cyc {}
+}
+
+/// D− level while driven: mark (PB4 high, PB5 low) or 0 V (both low).
+#[inline(always)]
+fn dm_level(high: bool) {
+    let gpiob = unsafe { &*pac::Gpiob::ptr() };
+    gpiob
+        .bop()
+        .write(|w| unsafe { w.bits(if high { 1 << 4 | 1 << 21 } else { 1 << 20 | 1 << 21 }) });
+}
+
+/// SYNC before a byte (or the end ping): opposite of the previous level `p`,
+/// back to `p`, and one more opposite quarter if the next bit equals `p` — so
+/// every byte starts on an edge. Matches every frame in the stock captures.
+#[link_section = ".fasttext.qc_accp_sync"]
+#[inline(never)]
+fn accp_sync(p: bool, next: bool) {
+    dm_level(!p);
+    spin_us(SYNC_US);
+    dm_level(p);
+    spin_us(SYNC_US);
+    if next == p {
+        dm_level(!p);
+        spin_us(SYNC_US);
+    }
+}
+
+/// One master frame: per byte a SYNC, 8 data bits MSB-first and an odd-parity
+/// bit (per byte), then a closing SYNC toward the (high) Mping that follows.
+/// Interrupts masked: a stretched cell corrupts the frame. Leaves D− driven.
+#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
+#[link_section = ".fasttext.qc_accp_frame"]
+#[inline(never)]
+fn accp_frame(buf: &[u8]) {
+    dm_drive(true);
+    cortex_m::interrupt::free(|_| {
+        let mut p = false; /* line idles low after the Sping */
+        for &b in buf {
+            accp_sync(p, b & 0x80 != 0);
+            for i in (0..8).rev() {
+                dm_level((b >> i) & 1 != 0);
+                spin_us(BIT_US);
+            }
+            p = b.count_ones() % 2 == 0;
+            dm_level(p);
+            spin_us(BIT_US);
+        }
+        accp_sync(p, true);
+    });
+}
+
+/// Record the charger's reply frame as alternating run lengths in µs, the
+/// first one high. Waits ≤ 3 ms for the first edge; stops at the charger's end
+/// ping (a high ≥ 1.8 ms — a byte's longest high run is 9 bits ≈ 1.4 ms), a
+/// 4 ms low, 15 ms total, or a full buffer. D− must be released. Returns the
+/// run count (0 = nothing came).
+#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
+#[link_section = ".fasttext.qc_accp_capture"]
+#[inline(never)]
+fn accp_capture(runs: &mut [u16]) -> usize {
+    let gpiob = unsafe { &*pac::Gpiob::ptr() };
+    let now = cortex_m::peripheral::SYST::get_current;
+    let since = |t: u32| t.wrapping_sub(now()) & 0x00FF_FFFF;
+    let pb4 = || (gpiob.istat().read().bits() >> 4) & 1 != 0;
+    cortex_m::interrupt::free(|_| {
+        let t0 = now();
+        while !pb4() {
+            if since(t0) >= 3000 * 48 {
+                return 0;
+            }
+        }
+        let start = now();
+        let mut t = start;
+        let mut level = true;
+        let mut n = 0;
+        loop {
+            let el = since(t);
+            if pb4() != level {
+                match runs.get_mut(n) {
+                    Some(r) => *r = (el / 48) as u16,
+                    None => break,
+                }
+                n += 1;
+                level = !level;
+                t = now();
+            } else if (level && el >= 1800 * 48) || el >= 4000 * 48 || since(start) >= 15_000 * 48 {
+                break;
+            }
+        }
+        n
+    })
+}
+
+/// Decode `runs` (alternating, first high) into bytes: a run < 90 µs is a SYNC
+/// quarter (byte boundary), anything longer is round(run / RX_UI_US) bits.
+/// Each byte must be 9 bits with odd parity; the last byte must be the CRC-8
+/// of the others. Returns the byte count without the CRC; Err(()) if garbled.
+#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
+fn accp_decode(runs: &[u16], out: &mut [u8]) -> Result<usize, ()> {
+    let mut level = true;
+    let mut bits: u16 = 0;
+    let mut nb = 0u32;
+    let mut n = 0usize;
+    for &r in runs {
+        let r = r as u32;
+        if r < 90 {
+            if nb > 0 {
+                if nb != 9 || bits.count_ones() % 2 != 1 {
+                    return Err(());
+                }
+                *out.get_mut(n).ok_or(())? = (bits >> 1) as u8;
+                n += 1;
+                bits = 0;
+                nb = 0;
+            }
+        } else {
+            for _ in 0..(r + RX_UI_US / 2) / RX_UI_US {
+                bits = bits << 1 | level as u16;
+                nb += 1;
+                if nb > 9 {
+                    return Err(());
+                }
+            }
+        }
+        level = !level;
+    }
+    if nb != 0 || n < 2 {
+        return Err(());
+    }
+    let (body, crc) = out.get(..n).ok_or(())?.split_at(n - 1);
+    if crc.first() != Some(&crc8(body)) {
+        return Err(());
+    }
+    Ok(n - 1)
+}
 
 /// CRC-8, poly 0x39, init 0x00, MSB-first, over `data` (`crc8_huawei`).
 #[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
@@ -408,34 +551,81 @@ fn accp_entry() {
     unsafe { *IN_QC3.0.get() = false };
 }
 
-/// Send the 3 leading `01` sync pings (900 µs apart), then each command packet.
-/// A packet is `[opcode, reg, (val…)]`; `crc8` is appended here. ASSUMPTION:
-/// data packets use flag=true, gap = 10 ms (see the module note).
+/// Mping → Sping → `frame` → Mping → Sping.
 #[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
-fn accp_exchange(packets: &[&[u8]]) {
+#[inline(never)]
+fn accp_send(frame: &[u8]) {
+    proto_line_idle();
+    proto_wait_sping();
+    us(250);
+    accp_frame(frame);
+    proto_line_idle();
+    proto_wait_sping();
+}
+
+/// The 3 leading `01` sync pings (no CRC, no reply), 900 µs apart, then the
+/// 10 ms gap before the first packet.
+#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
+fn accp_pings() {
     for k in 0..3 {
-        proto_send_word(&[0x01], false); /* sync ping, flag=0 */
+        accp_send(&[0x01]);
         if k < 2 {
             us(900);
         }
     }
     us(10_000);
+}
+
+/// Error byte for packet `i`: 0x40|i = no / garbled reply, 0x50|i = NACK.
+const E_NOREPLY: u8 = 0x40;
+const E_NACK: u8 = 0x50;
+
+/// One register transaction: send `pkt` + CRC, read the charger's reply into
+/// `reply` (ACK first). Returns the reply length (ACK + data, no CRC); `i`
+/// tags the error byte.
+#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
+fn accp_xfer(pkt: &[u8], reply: &mut [u8], i: u8) -> Result<usize, u8> {
     let mut frame = [0u8; 8];
+    let n = pkt.len().min(7);
+    frame[..n].copy_from_slice(&pkt[..n]);
+    frame[n] = crc8(&frame[..n]);
+    accp_send(&frame[..n + 1]);
+    let mut runs = [0u16; 96];
+    let nr = accp_capture(&mut runs);
+    wait_pb4(false, 4000); /* charger end ping falls */
+    us(1700);
+    proto_line_idle();
+    proto_wait_sping();
+    let len = accp_decode(runs.get(..nr).unwrap_or(&[]), reply).map_err(|_| E_NOREPLY | i)?;
+    if reply[0] & 0x0F != 0x08 {
+        return Err(E_NACK | i);
+    }
+    Ok(len)
+}
+
+/// Run `packets` as one exchange (pings first), 10 ms apart; stops at the
+/// first failed packet.
+#[cfg_attr(not(feature = "dev-verbs"), allow(dead_code))]
+fn accp_exchange(packets: &[&[u8]]) -> Result<(), u8> {
+    accp_pings();
+    let mut reply = [0u8; 8];
     for (i, pkt) in packets.iter().enumerate() {
-        let n = pkt.len();
-        frame[..n].copy_from_slice(pkt);
-        frame[n] = crc8(pkt);
-        proto_send_word(&frame[..n + 1], true);
-        if i + 1 < packets.len() {
+        if i > 0 {
             us(10_000);
+        }
+        let r = accp_xfer(pkt, &mut reply, i as u8);
+        if r.is_err() {
+            dm_drive(false);
+            return r.map(|_| ());
         }
     }
     dm_drive(false); /* leave D− released; charger holds the voltage */
+    Ok(())
 }
 
-/// `fcptr`: Huawei FCP 9 V request. Entry, 3 pings, then the stock mode-2
-/// 6-packet exchange: read regs 04/21/31, write VOUT_CONFIG 0x2c = 90 (→ 9 V,
-/// 100 mV units), read it back, write OUTPUT_CONTROL 0x2b = 1 (commit).
+/// `fcptr`: Huawei FCP 9 V request — the stock mode-2 exchange: read regs
+/// 04/21/31, write VOUT 0x2c = 90 (9 V, 100 mV units), read it back, write
+/// OUTPUT_CONTROL 0x2b = 1 (apply). Err = 0x40|i / 0x50|i for packet i.
 #[cfg(feature = "dev-verbs")] /* untested — not in release builds */
 pub fn fcp() -> Result<(), u8> {
     config_pins();
@@ -447,14 +637,42 @@ pub fn fcp() -> Result<(), u8> {
         &[0x0b, 0x2c, 0x5a],
         &[0x0c, 0x2c],
         &[0x0b, 0x2b, 0x01],
-    ]);
-    Ok(())
+    ])
 }
 
-/// `scptr`: Huawei SCP request. Entry, 3 pings, then the stock mode-3 6-packet
-/// exchange: enable (CTRL_BYTE0 0xa0 = 0xc0), 0xa1 = 0x06, write16 regs
-/// 0xb0/0xb2, set voltage code 0xca = 0xc8 (raw scale — volts unknown), 0xcb =
-/// 0x64. `scp_set_voltage` (not ported) patches 0xca + CRC for other voltages.
+/// `fcprd <reg> [n]`: read `out.len()` consecutive FCP/SCP registers from
+/// `reg` with single reads — no write, so the voltage never changes
+/// (capability readout: 0x21 = number of raised voltages N, 0x30+k = voltage
+/// k in 100 mV, 0x22 = max power in 0.5 W). Err as `fcp` (i = register index).
+#[cfg(feature = "dev-verbs")] /* untested — not in release builds */
+pub fn fcp_read(reg: u8, out: &mut [u8]) -> Result<(), u8> {
+    config_pins();
+    accp_entry();
+    accp_pings();
+    let mut reply = [0u8; 8];
+    let mut r = Ok(());
+    for (k, o) in out.iter_mut().enumerate() {
+        if k > 0 {
+            us(10_000);
+        }
+        let i = k as u8;
+        match accp_xfer(&[0x0c, reg.wrapping_add(i)], &mut reply, i) {
+            Ok(2) => *o = reply[1],
+            Ok(_) => r = Err(E_NOREPLY | i),
+            Err(e) => r = Err(e),
+        }
+        if r.is_err() {
+            break;
+        }
+    }
+    dm_drive(false);
+    r
+}
+
+/// `scptr`: Huawei SCP — the stock mode-3 block: enable (0xa0 = 0xc0), 3 s
+/// watchdog (0xa1 = 0x06), VSET/ISET boundaries 0xb0 = 5500 mV / 0xb2 =
+/// 5000 mA, VSSET 0xca = 0xc8 (5.00 V), ISSET 0xcb = 0x64 (5 A) — the 5 V
+/// low-voltage direct-charge mode; it does not raise the voltage. Err as `fcp`.
 #[cfg(feature = "dev-verbs")] /* untested — not in release builds */
 pub fn scp() -> Result<(), u8> {
     config_pins();
@@ -466,8 +684,7 @@ pub fn scp() -> Result<(), u8> {
         &[0x1b, 0xb2, 0x02, 0x13, 0x88],
         &[0x0b, 0xca, 0xc8],
         &[0x0b, 0xcb, 0x64],
-    ]);
-    Ok(())
+    ])
 }
 
 /// `qcoff`: release D+/D− (pins back to floating input) and forget entry.

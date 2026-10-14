@@ -216,7 +216,7 @@ fn ensure_init() -> Result<(), u8> {
         .modify(|_, w| w.ctl3().output().ctl4().output().ctl5().alternate().ctl7().alternate());
 
     /* SPI0: master, mode 0, 8-bit, MSB-first, SW-NSS held high, PSC /2
-     * (APB2 = 48 MHz -> SCLK 24 MHz; stock ran /2 off 72 MHz) */
+     * (APB2 = 48 MHz -> SCLK 24 MHz) */
     spi.ctl0().write(|w| {
         w.mstmod()
             .master()
@@ -608,7 +608,7 @@ pub fn test_pattern() -> Result<(), u8> {
 }
 
 /// TIMER1 CH1 PWM on PB3 (AF2) for the backlight LED driver. 48 MHz / 48 /
-/// 1000 = 1 kHz (stock: 1.5 kHz off 72 MHz — the rate is uncritical).
+/// 1000 = 1 kHz (the rate is uncritical).
 #[inline(never)]
 fn backlight_init() {
     let rcu = unsafe { &*pac::Rcu::ptr() };

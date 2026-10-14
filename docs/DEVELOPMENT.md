@@ -50,7 +50,7 @@ features.
   loop — bench-verified via the MK_DSP markers); the first frame draws
   pre-enumeration, so the screen is live from power-on.
 - **BLE: done.** The TC66C's DX-BT24-M module (USART1, 9600) is served
-  always-on: the stock `bgetva`/`bnextp`/`blastp` verbs plus our
+  always-on: the stock `bgetva`/`bnextp`/`blastp`/`brotat` verbs plus our
   `bquery`/`brawva`, RX by circular DMA, TX by DMA so a 200 ms reply never
   stalls the loop. Bench-verified end to end with `tools/ble.py`
   (`getva` decrypts a live packet over the air).
@@ -60,7 +60,8 @@ features.
 - **Fast-flash placement: done.** Hot path pinned below the GD32's 32 KB
   zero-wait flash boundary (`rust/fast.x` + `make fast-gate`): query 0.2 ms,
   rawva 0.6 ms, getva 2.3 ms round-trip (were 4.5/9/49); powerz sustains
-  >5000 reads/s. Profile-guided via the on-device 250 Hz PC sampler
+  >5000 reads/s. The TFT pixel engine is fast too (full redraw ~30 ms,
+  `tools/uitime.py`). Profile-guided via the on-device 250 Hz PC sampler
   (`pcprf` verb + `tools/pcprofile.py` — the chip's DWT is a stub).
 - **USB architecture: interrupt-serviced, bench-verified.** The device
   leads with its **POWER-Z KM003C emulation — the priority protocol**: the
@@ -72,8 +73,9 @@ features.
   served regardless of main-loop work. An optional **pseudo-bootloader
   grace window** (`--features grace`: the first ~10 s serve only
   `query`/`updat`) lets a fault in later code be recovered by power-cycle +
-  `make flash` inside the window — no button press. The chip fought back in strange ways; QUIRKS.md
-  is the measured catalog (all entries now closed).
+  `make flash` inside the window — no button press. QUIRKS.md is the
+  measured catalog of chip misbehavior (every entry absorbed or resolved
+  in firmware).
 - **M4 — USB-PD voltage trigger: working.** A host-armed FUSB302 PD 2.0/3.0
   sink engine (`rust/src/pd.rs`, verbs `pdctl`/`pdsta`/`pdcap`/`pdreq`,
   host tool `tools/pd.py`): attach/orientation, source-capability
@@ -86,7 +88,11 @@ features.
   Charge 2.0/3.0** is a separate D+/D− trigger engine (`rust/src/qc.rs`,
   verbs `qctrg`/`qc3ct`/`qcoff`, host tool `tools/qc.py`) — bench-verified
   QC2.0 discrete 5/9/12 V and QC3.0 continuous ±200 mV fine-stepping
-  (bidirectional) against real chargers. Captured PD traffic is exposed over
+  (bidirectional) against real chargers. **Samsung AFC** (`afctr`, same
+  module, closed-loop D− serial reading the charger's Sping on PB4) is
+  bench-verified 5↔9 V. **Huawei FCP/SCP** (`fcptr`/`fcprd`/`scptr`,
+  `dev-verbs` builds only) have framing and reply decoding matched to the
+  stock captures but are untested — see the next steps. Captured PD traffic is exposed over
   the powerz vendor endpoint as the **KM003C PdPacket attribute (0x0010)**
   (`tools/pdcap.py`; the transport is verified, event capture awaits a PD
   source on the bench). Nothing runs at boot; a granted request **raises the
@@ -94,16 +100,15 @@ features.
 - **Next steps** (see also the open items in QUIRKS.md):
   - Bench-test a power cut mid-session (torn-slot fallback), the K2-hold
     reset, and D± readings against a known device/charger.
-  - **M4 extensions:** FCP/SCP on the existing D+/D− engine
-    (`charge_protocol_handshake` modes 2/3, sharing AFC's closed-loop
-    `proto_send_word`; CRC-8 poly still to be solved from captures);
-    a QC3.0 min-voltage clamp; a KM003C PD-capture attribute.
-    (Samsung AFC — mode 4 — is **done**: `afctr`, closed-loop, bench-verified
-    5↔9 V.)
-  - The remaining QUIRKS.md open items (§1 NAK/APB stalls, §2 residual
-    event-loss mechanism) and stock-firmware Tier 2 comparison. (Both
-    refactor branches are merged; the TFT loops are deliberately not in
-    fast flash — DMA made them non-blocking instead.)
+  - **M4 extensions:** bench-test FCP/SCP against a Huawei charger
+    (`fcprd` reg 0x21, n 3 first — read-only — then `fcptr`; scope D− and compare
+    with `tools/accp_decode.py`); an SCP voltage raise (VSET 0xb8/b9 + a
+    fed watchdog — the stock SCP block only sets 5.00 V / 5 A); a
+    protocol-detection scan (docs/AFC_DECODE_NOTES.md). Also: a QC3.0 min-voltage clamp, and
+    bench-verifying PD event capture through the KM003C PdPacket attribute.
+  - The QUIRKS.md open questions (the unexplained mechanisms behind §1
+    NAK/APB stalls and §2 event loss — both absorbed in firmware) and the
+    optional stock-firmware Tier 2 comparison.
   - On-device settings menu / group switch on the buttons, a PD/CC status
     screen.
 
@@ -139,9 +144,6 @@ tools/              tc66flash.py (user flasher: release images, back to
 openocd.cfg         non-halting SRAM reads via a Pico debugprobe (CMSIS-DAP)
 ```
 
-The original C implementation of M0 (the porting reference) lived in
-`reference-c/` and is retired; it remains in git history.
-
 ## Feature sets
 
 Cargo features pick what the image serves (rust/Cargo.toml):
@@ -153,15 +155,16 @@ Cargo features pick what the image serves (rust/Cargo.toml):
 | either + `FEATURES=grace` | + boot grace window | risky always-on bring-up |
 
 The product protocol (powerz, `query getva rawva updat cfgrd cfgwr gtrec
-eeprd versn`, BLE verbs) is never gated. `triggers` = the PD/QC/AFC verbs;
-`dev-verbs` = the bring-up/debug verbs (HARDWARE.md "CDC verb protocol").
+eeprd versn rotat`, BLE verbs) is never gated. `triggers` = the PD/QC/AFC verbs;
+`dev-verbs` = the bring-up/debug verbs (HARDWARE.md "CDC verb protocol")
+plus the untested FCP/SCP verbs `fcptr`/`fcprd`/`scptr`.
 Disabled verbs match and silently do nothing.
 
 ## Versioning
 
 `rust/Cargo.toml` `version` is the semver; `BUILD_ID` in `rust/src/main.rs`
 is bumped on every flashed build. Both are shown on the boot splash
-(`v0.1.0` / `b128`) and returned by the `versn` verb (`OK0.1.0+128`).
+(`v0.1.0` / `b130`) and returned by the `versn` verb (`OK0.1.0+130`).
 Releasing: bump the Cargo version, commit, push a tag `v<version>` — the
 release workflow refuses a tag that does not match.
 

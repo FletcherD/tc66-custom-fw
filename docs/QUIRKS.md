@@ -64,8 +64,8 @@ full usbd-serial buffer holding RX_ST — is deliberately left for the
 re-fire, and the ring-full park is unchanged). Bench: MK_USB_REDRAIN
 counted 157 extra same-entry passes over one ~5 kHz powerz run with
 MK_USB_RDMAX = 0; callback delivery went from lossy to >2 dispatches per
-consumed reply; latency unchanged. The unconditional `arm()` and
-write_all sweeps stay as belt-and-braces.
+consumed reply; latency unchanged. The unconditional `arm()` stays as
+belt-and-braces (the `write_all` sweep was removed — §3).
 
 **Original findings:** the USBD's CTR flags should be level-triggered: a
 pending endpoint event should refire USBD_LP until serviced. Measured
@@ -99,10 +99,9 @@ by pure EP1-IN reads against the powerz dbg counters:
 
 **Firmware absorption:** the EPxCS-conditioned drain loop above (the
 vendor's own answer, from the stock firmware's `while (ISTR & CTR)` ISR —
-Tier 1 below); plus belt-and-braces: `powerz::arm()` writes
-unconditionally (never trusts a software armed-latch), `write_all` runs a
-thread-mode `dev.poll` sweep every 64 spins, the grace window sweeps
-every pass.
+Tier 1 below); plus belt-and-braces: the ISR calls `powerz::arm()` every
+pass (never trusts a software armed-latch), and the optional grace window
+(`--features grace`) sweeps `dev.poll` every pass.
 
 ## 3. Two poll consumers interfere destructively — CLOSED STRUCTURALLY
 
@@ -138,9 +137,10 @@ zero-wait only from the first 32 KB of flash (0x0800_0000–0x0800_7FFF);
 above that the datasheet/UM promise "a long delay" per fetch (UM §1.3.3 /
 §2.2, datasheet §3.2 — the GD32 serial-flash architecture; FMC_WS is
 irrelevant, it configures the fast region). The linker had put the entire
-AES implementation above the boundary. **Fix: `rust/fast.x`** pins the hot
-path (ISRs, USB stack, AES/getva, main loop) below 0x0800_8000, enforced
-by `make fast-gate`. Measured effect (build 53 vs 52, same code): getva
+AES implementation above the boundary. **Fix:** the hot path (ISRs, USB
+stack, AES/getva, main loop, TFT pixel engine) is pinned below 0x0800_8000
+— `.fasttext.*` link sections on our fns plus `rust/fast.x` patterns for
+other crates — enforced by `make fast-gate`. Measured effect (build 53 vs 52, same code): getva
 48.6 → 3.4 ms, rawva 9.2 → 1.3 ms, query 4.5 → 0.7 ms; the ~10x slow-fetch
 factor also explains most of §1's "AES slowed by NAK storms" confound and
 all of §3's ~8 ms staircase.
@@ -152,8 +152,6 @@ all of §3's ~8 ms staircase.
 - Writing a data endpoint before the first bus reset creates a phantom
   endpoint-0 (EPnR address field still 0) and wedges enumeration — arguably
   correct-per-IP-model, but brutal (FIRMWARE.md).
-- NTC divider on ADC ch1 on this unit where stock reads ch3 (board rev
-  variation — HARDWARE.md).
 
 ## Settling "silicon vs our stack": the stock-firmware comparison
 
@@ -178,9 +176,9 @@ stock-firmware RE notes.
   `SystemInit @0x08004f70` touches **RCU only** (PLL ×12 from HSI/2 → 48 MHz); it
   never references FMC (0x40022000). The only FMC users are the flash prog/erase
   helpers, none of which write FMC_WS. **Stock inherits the bootloader's FMC config
-  exactly like we do** → FMC is *not* a stock-vs-us difference; §4 stays open (read
-  the bootloader or `*0x40022000` live). NB: SystemInit computes **48 MHz**, not the
-  72 MHz in FINDINGS — this changes the "expected AES time" baseline.
+  exactly like we do** → FMC is *not* a stock-vs-us difference (§4 turned out to be
+  the documented slow-region fetch, not wait states). NB: SystemInit computes
+  **48 MHz** (not 72 MHz) — the baseline for expected AES time.
 - **USB service-loop shape.** HYBRID: ISR fills a **software** RX buffer
   (`@0x20000370`) + ready flag (`@0x20000001`); the main superloop calls
   `usb_command_dispatcher @0x080054b8` once/pass and reads only that buffer — it
@@ -189,10 +187,11 @@ stock-firmware RE notes.
   sidesteps §1's register-access stall in steady state. (getva reply = 3×64 B with a
   fixed `delay_ms(10)` between blocks — the source of the observed cadence.)
 
-**Tier 2 — dynamic (costs one K1 cycle to return!):** flash stock, measure
-getva RTT distribution at several poll rates through the same hub/host. If
-stock also shows the ~8 ms quanta → host/hub-side, not us. If stock is
-~1 ms like our polled builds → consistent with polled-masks-everything.
+**Tier 2 — dynamic (costs one K1 cycle to return!), not done:** flash stock,
+measure getva RTT distribution at several poll rates through the same
+hub/host. The ~8 ms quanta it was designed to attribute turned out to be
+slow-flash fetch (§3/§4), so it is only worth running if a NAK-stall or
+event-loss symptom (§1/§2) reappears.
 NOTE: stock has no `updat`; returning to custom firmware needs the
 bootloader (K1 held on power-up + `make recover`). Do Tier 1 first.
 

@@ -7,7 +7,7 @@ power meter. Everything here is what the firmware needs to drive the board.
 
 - **GigaDevice GD32F150G8** — ARM Cortex-M3, QFN28.
 - **64 KB flash**, **8 KB SRAM**.
-- Core clock as configured by the stock boot: **48 MHz** (PLL ×12 from HSI/2; HSI = 8 MHz). Part max is 72 MHz. USB full-speed needs a 48 MHz USB clock.
+- Core clock **48 MHz** (PLL ×12 from IRC8M/2; IRC8M = 8 MHz), as stock's SystemInit also sets it; ours re-does it in `board::clock_init` with the USB clock = PLL/1. Part max is 72 MHz. USB full-speed needs a 48 MHz USB clock.
 - Debug access via **SWD** (see "Debug" below). The chip is readout-protected.
 
 ## Memory map
@@ -40,7 +40,7 @@ the bootloader is untouched, so recovery is always possible (see Flashing).
 
 - **K1 = PF0** — held at power-on → bootloader enters USB firmware-update mode. Released → normal boot (jump to app).
 - **K2 = PF1** — held at power-on → factory reset.
-- Both are also readable by the app (EXTI on GPIOF).
+- Both are also readable by the app (see "Buttons" below).
 
 ## Flashing an image
 
@@ -49,13 +49,13 @@ Two paths:
 ### 1. Bootloader path (needs K1)
 1. Hold **K1** while plugging in USB → the board enumerates as a CDC serial device in bootloader mode.
 2. Encrypt the raw app: `tools/encrypt.py app.bin app.enc.bin` (AES-256-ECB, image key baked in; pads to 51840 B).
-3. `tools/flash_image.py app.enc.bin` — sends `query`→`boot`, `update`→`uprdy`, then 810 × 64-byte chunks (the bootloader decrypts + writes each), then the board restarts.
+3. `tools/flash_image.py app.enc.bin` (or the user-facing `tools/tc66flash.py flash`) — sends `query`→`boot`, `update`→`uprdy`, then 810 × 64-byte chunks (the bootloader decrypts + writes each), then the board restarts.
 
 This is the **recovery path** and the way to flash the very first app. Always works.
 
 ### 2. App self-update path (`updat`, no K1)
-Once our app implements the `updat` command, later builds flash over USB with no
-button press:
+While our app is running, later builds flash over USB with no button press
+(`make flash` does this):
 1. `tools/app_update.py app.bin` — sends `updat`; the app copies a small flasher into SRAM and streams **plaintext** 64-byte chunks to it; the flasher programs them and resets into the new app.
 
 The self-flasher runs from SRAM (because it erases the whole app region) and reuses
@@ -84,7 +84,7 @@ touch the bootloader or the config page.
 - **Therefore: debug with SRAM progress markers.** Have the firmware write a
   progress code to a fixed SRAM address at each stage, and read it with:
   `openocd -f openocd.cfg -c "mdw 0x20001000 8" -c shutdown` (no halt).
-  This is the primary debug loop — see README.
+  This is the primary debug loop — see FIRMWARE.md "Build / flash / debug workflow".
 
 ## Host protocols
 
@@ -122,14 +122,17 @@ Bench: >5000 reads/s sustained with zero timeouts.
 The vendor protocol also serves **`GetData(ATT_PD=0x0010)`** — the KM003C
 `PdPacket` attribute carrying captured PD traffic (12-B measurement preamble +
 event records); built from the `pd.rs` capture ring, read by `tools/pdcap.py`.
-It queues behind the pre-armed ADC packet, so the ADC fast-path is untouched
+Needs the `triggers` feature (in release builds; otherwise Rejected). It queues behind the pre-armed ADC packet, so the ADC fast-path is untouched
 (the host reads the armed ADC first, then the PD reply, filtering by attribute).
 See FIRMWARE.md "PD capture".
 
 ### CDC verb protocol (interfaces 1+2 — compatibility + dev)
 
 Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the first
-5 bytes of each USB packet against a command table. Standard verbs:
+5 bytes of each USB packet against a command table. Arguments follow the verb in
+the same packet as **raw binary bytes** (e.g. `b"pdctl\x01"`) unless the row says
+ASCII. Error replies are `ER` + one code byte (0x0F = bad args everywhere).
+Verbs:
 
 | Command | Reply | Purpose |
 |---|---|---|
@@ -141,24 +144,25 @@ Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the firs
 | `cfgrd` | `OK`+total+start+n+n×14 B+CRC16 | ours: `cfgrd [start]` (ASCII decimal, default 0) — one page of ≤13 settings from index start: id u8, value/min/max u32 LE, flags u8 (bit0 read-only); CRC16/MODBUS over all preceding bytes; page until start + n == total (tools/cfg.py). BLE: `bcfgrd [start]` |
 | `cfgwr` | `OK` / `ER`+code | ours: `cfgwr <id> <value>` ASCII decimal; ER 0x0F bad args, 0x10 unknown id, 0x11 out of range, 0x12 read-only; applies at once, EEPROM write ~2 s after the last change |
 | `updat` | `uprdy`, then per-chunk `OK` | our app self-update |
-| `versn` | `OK`+ASCII `<semver>+<build>` | ours: firmware version, e.g. `OK0.1.0+128` (Cargo version + BUILD_ID) |
+| `versn` | `OK`+ASCII `<semver>+<build>` | ours: firmware version, e.g. `OK0.1.0+130` (Cargo version + BUILD_ID) |
 | `eeprd` | `OK`+data / `ER`+code | ours: `eeprd <addr u16 LE> <len 1..=32>` read-only EEPROM read (ER 0x0F bad args, 0x21 out of range, 0x22 bus) — tools/tc66flash.py `backup-eeprom`, tools/eedump.py |
-| `rawva` | 46 B plaintext | our dev verb: getva fields + window seq, no AES — use for streaming (tools/rawva.py) |
+| `rawva` | 46 B plaintext | ours: getva fields + window seq, no AES — use for streaming (tools/rawva.py) |
 | `pcprf` | 516 B plaintext | our dev verb: PC-profiler ring dump (u32 counter + 128 u32 PCs; FIRMWARE.md "PC profiler", tools/pcprofile.py) |
-| `i2crd` | `OK`+data / `ER`+diag | our dev verb: raw I²C read (tools/i2cread.py) |
-| `adcrd` | `OK`+u32 / `ER`+stage | our dev verb: ADC sum-of-16 (tools/adcread.py) |
+| `i2crd` | `OK`+data / `ER`+diag | our dev verb: `i2crd <addr7> <wlen 0..=2> <w0> <w1> <rlen 0..=32>` raw I²C write-then-read; ER + stage + 3 status bytes (tools/i2cread.py) |
+| `adcrd` | `OK`+u32 / `ER`+stage | our dev verb: `adcrd <ch>` ADC sum-of-16 (tools/adcread.py) |
 | `clkrd` | `OK`+RCU_CTL+RCU_CFG0 (u32 LE ×2) | our dev verb: clock-tree peek (verified: AHB/APB1/APB2 all /1 = 48 MHz) |
 | `keyrd` | `OK`+raw+held (2 bytes, bit0 = K1, bit1 = K2) | our dev verb: raw PF0/PF1 levels (1 = released) + debounced pressed mask (keys.rs) |
 | `rstrd` | `OK`+u32 LE | our dev verb: RCU_RSTSCK captured at boot (bit 29 = watchdog reset, 28 = software) (wdg.rs, tools/wdgtest.py) |
-| `wdtst` | `OK`, then the meter reboots in ~14 s | our dev verb: hang the main loop to prove the watchdog bites |
+| `wdtst` | `OK`, then the meter reboots in ~13 s | our dev verb: hang the main loop to prove the watchdog bites |
 | `idlrd` | `OK`+4×u32 LE | our dev verb: screen-idle state — idle_secs, flags (bit0 tft alive, bit1 screen off), key-wake count, last screen_off result (1 = ok) |
 | `uiscr` | `OK`+screen / `ER`+stage | our dev verb: `uiscr <n>` select screen n (no arg = next, like K1) and redraw to completion |
-| `btini` | `OK` | our dev verb: restart the BLE UART in raw mode for module probing (`btini f` = 115200 instead of 9600); `btrun` returns it to dispatch |
-| `btcmd` | `OK` / `ER`+stage | our dev verb: `btcmd <bytes>` send raw bytes to the module (DMA TX; ER 4 = previous transfer still going) |
+| `btini` | `OK` | our dev verb: restart the BLE UART in raw mode for module probing (ASCII `btini f` = 115200 instead of 9600) |
+| `btrun` | `OK` / `ER` 3 | our dev verb: return the BLE link to b-verb dispatch (ER 3 = link never initialized) |
+| `btcmd` | `OK` / `ER`+stage | our dev verb: `btcmd <bytes>` (space, then the bytes) send raw bytes to the module (DMA TX; ER 4 = previous transfer still going) |
 | `btget` | `OK`+bytes | our dev verb: drain up to 32 raw bytes received from the module (raw mode) |
 | `btsta` | `OK`+7×u32 LE | our dev verb: USART1 STAT/CTL0/BAUD, DMA CH4CTL/CNT (RX ring), CH3CTL/CNT (TX) |
 | `btspy` | `OK`+3×u32 LE | our dev verb: `btspy <port 0=A,1=B> <pin>` sample a pin for 1 s → transitions, low samples, total samples |
-| `tftfl` | `OK` / `ER`+stage | our dev verb: TFT test pattern (no args) or solid fill (RGB565 LE u16) (tools/tft.py) |
+| `tftfl` | `OK` / `ER`+stage | our dev verb: TFT test pattern (no args) or solid fill (RGB565 LE u16); ER stages in tft.rs (tools/tft.py) |
 | `tftbl` | `OK` / `ER`+stage | our dev verb: backlight PWM compare, LE u16 0..=999 (tools/tft.py) |
 | `tftui` | `OK` / `ER`+stage | our dev verb: force a main-screen refresh (tools/tft.py) |
 | `pdctl` | `OK` / `ER`+stage | our trigger verb: PD sink engine off (0) / arm (1) / hard-reset (2) (pd.rs, tools/pd.py) |
@@ -168,6 +172,8 @@ Commands are **bare 5-byte ASCII, no terminator**. The firmware matches the firs
 | `qctrg` | `OK` / `ER` | our trigger verb: `qctrg <mode>` QC2.0 D+/D− trigger, mode 0/1/2/3 = 5/9/12/20 V (blocks ~1.5 s on first call) — **raises OUT voltage** (qc.rs, tools/qc.py) |
 | `qc3ct` | `OK` / `ER` | our trigger verb: `qc3ct <dir> <count>` QC3.0 continuous, dir 0/1 = up/down, count 200 mV steps — **raises OUT voltage** |
 | `afctr` | `OK` / `ER` | our trigger verb: `afctr <byte> [reps]` Samsung AFC serial trigger on D−, byte = voltage/current nibbles (0x46 = 9 V, 0x08 = 5 V); closed-loop (reads the charger Sping on PB4); first call blocks ~2.3 s on entry — **raises OUT voltage** (qc.rs) |
+| `fcptr` / `scptr` | `OK` / `ER`+code | our dev verbs, **untested on a real charger**: Huawei FCP 9 V / SCP stock 5 V/5 A block on D− (qc.rs, docs/AFC_DECODE_NOTES.md); ER 0x40\|i = no/garbled reply to packet i, 0x50\|i = NACK; first call blocks ~2.3 s — `fcptr` **raises OUT voltage** |
+| `fcprd` | `OK`+n B / `ER`+code | our dev verb, **untested on a real charger**: `fcprd <reg> [n]` (raw bytes, n clamped 1..=8) reads n consecutive FCP/SCP registers with single reads — no write, voltage unchanged (0x21 = # raised voltages, 0x30+k = voltage k ×100 mV, 0x22 = max power ×0.5 W); ER as `fcptr` |
 | `qcoff` | `OK` / `ER` | our trigger verb: release the QC/AFC D+/D− pins (charger reverts to 5 V; restores D± ADC + SWD) |
 
 Keeping `getva` byte-compatible (same reply) lets existing host tools work
@@ -176,7 +182,7 @@ sets"): the product verbs above (`getva query rotat gtrec cfgrd cfgwr updat
 versn eeprd rawva`) are always served; the trigger verbs (`pdctl pdsta pdcap
 pdreq qctrg qc3ct afctr qcoff`) need `triggers` (in release builds); the dev
 verbs (`i2crd adcrd clkrd keyrd rstrd wdtst idlrd uiscr tftfl tftbl
-tftui btini btcmd btget btrun btsta btspy`, the untested `fcptr`/`scptr`) need
+tftui btini btcmd btget btrun btsta btspy`, the untested `fcptr`/`fcprd`/`scptr`) need
 `dev-verbs`, and `pcprf` its own `pcprf` feature — both only in dev builds.
 Disabled verbs match and silently do nothing.
 
@@ -203,28 +209,32 @@ Decrypt, then read little-endian `uint32` fields:
 | 128 | `"pac3"` marker | — |
 | 132 | window sequence (**our firmware only**; stock sends 0) | uint32, +1 per sampler window (~96 ms) |
 
-Last 4 bytes of each 64-byte block are a checksum.
+Last 4 bytes of each 64-byte block are its checksum: CRC16/MODBUS of the block's
+bytes 0..60, stored LE in 60..64 (upper two bytes 0).
 
 To stream samples losslessly: poll at ≥2× the window rate (25 Hz is plenty),
 keep a reply only when the sequence advances, and treat a sequence jump as a
 missed window. **Prefer `rawva` for this** — same live fields, plaintext, no
-AES: ~1 ms per reply vs ~25 ms for `getva` (soft AES-256 is that expensive on
-this core even optimized). Reply layout in `rust/src/getva.rs` (46 B: `"raw1"`,
+AES: ~0.6 ms round-trip vs ~2.3 ms for `getva` (soft AES-256 is the
+difference). Reply layout in `rust/src/getva.rs` (46 B: `"raw1"`,
 ten LE u32 fields, CRC16/MODBUS tail); client + deduping stream generator in
 `tools/rawva.py`. Verified on the bench: 700 polls/s costs the sampler nothing
 (the sampler runs from a timer interrupt; see FIRMWARE.md), zero missed windows.
 
 ## Peripherals & pins
 
-### USB (device, CDC-ACM)
+### USB (device)
 - GD32 USB device peripheral, registers base **`0x40005c00`**.
 - Stock firmware's endpoint map: **EP1 IN** = CDC data in (`EP1R = 0x40005c04`,
   TX packet-memory `0x40006180`), **EP3 OUT** = CDC data out (`EP3R =
-  0x40005c0c`, RX packet-memory `0x40006200`). (The custom firmware lets its
-  USB stack allocate — currently EP1 = interrupt IN, EP2 = bulk OUT+IN — and
-  discovers the layout at runtime where it matters; see FIRMWARE.md.)
+  0x40005c0c`, RX packet-memory `0x40006200`). Ours: EP1 = the powerz bulk
+  pair 0x01/0x81 (fixed — the kernel driver hard-codes it); the CDC endpoints
+  (interrupt IN, bulk OUT+IN) are allocated by the USB stack after it, and
+  `updat` finds the CDC bulk endpoint at runtime (`find_bulk_ep`; see FIRMWARE.md).
 - Packet memory (PMA) at **`0x40006000`, doubled-addressed** — each 16-bit PMA slot occupies 4 CPU-address bytes.
-- USB vid:pid `28e9:018a`. Needs the 48 MHz USB clock enabled.
+- USB vid:pid: stock firmware and the bootloader `28e9:018a`; ours enumerates as
+  `5fc9:0063` ("ChargerLAB POWER-Z KM003C") so the `powerz` driver binds. Needs
+  the 48 MHz USB clock enabled.
 - This is the STM32F0/F1-style USB device IP (BTABLE + EPnR + PMA model).
 - **D+ soft-connect on PA9** — this USBD has **no internal D+ pull-up**; PA9 drives
   D+ through a resistor. Since the bootloader hands off with the bus still
@@ -254,14 +264,14 @@ ten LE u32 fields, CRC16/MODBUS tail); client + deduping stream generator in
   **VBUSCT=4.156 ms** (bus/voltage), **MODE=111** (shunt+bus, continuous). So the
   part is used as a **raw dual ΔΣ ADC**: the firmware reads shunt (reg 1) + bus
   (reg 2) and does all averaging + calibration in software.
-- **Recommended for M1: do the same — raw ADC + software cal, NOT the INA226
-  current/power engine.** The per-unit factory calibration in EEPROM (below) is
+- **Our firmware does the same — raw ADC + software cal, NOT the INA226
+  current/power engine** (ina.rs). The per-unit factory calibration in EEPROM (below) is
   expressed for this software path (specific sum depths, a per-unit zero-current
   offset `ref`, separate forward/reverse gains). The INA226 engine's single `CAL`
   register can't reproduce the per-unit offset/gains, so using it would **discard
-  the factory calibration** and force a re-cal against lab references. Keep config
-  `0x41A7`, read raw, and **pace the reads on a hardware timer** — that gives the
-  poll-rate-independent sampling without needing the chip's hardware averaging.
+  the factory calibration** and force a re-cal against lab references. We keep
+  config `0x41A7`, read raw, and pace the reads on the TIMER5 250 Hz tick —
+  poll-rate-independent sampling without the chip's hardware averaging.
 - Bench note: powering the meter via its PC-comms port does NOT power the
   measurement path — bus voltage/shunt read 0 until the IN port is fed.
 
@@ -331,9 +341,7 @@ integers directly. Constants are per-unit — read them, don't hard-code.
 
 The gains bake in those exact sum depths (**8** for V, **16** for I) — change how many
 samples you sum, or enable INA226 hardware averaging, and the constants no longer apply
-without rescaling. Drive the sampler from a **hardware timer** so the measurement rate
-is independent of host polling (this is the whole point of M1). Power = V·I computed in
-software for the `getva` reply (offset 56).
+without rescaling. Power = V·I computed in software for the `getva` reply (offset 56).
 
 ### Temperature (NTC) & D±
 Both come from the **GD32 on-chip 12-bit ADC** (DMA'd, 16-sample sums).
@@ -355,15 +363,14 @@ Constants (flash literals): R_series `0x2cec` = 11500, R0 `0x461c4000` = 10000.0
 273.15, and 1.8 / 32 for °F. The getva `temp` field carries the magnitude; the
 separate `temp sign` field (offset 88) marks sub-zero.
 
-The getva temperature is a single `ln()` per second — trivial, but if you want to
-avoid pulling in `libm` you can use a small NTC lookup table instead. (Units with
+Ours evaluates this per window with `libm::logf` (ina.rs). (Stock: units with
 a config-page serial ≤ 0x144 use a linear map of the internal die sensor, ch16,
 instead; this unit's serial is 55050.)
 
 #### On-chip ADC (verified on hardware)
 - **The ADC clock is IRC14M** (CFG2.ADCSEL reset default), a dedicated 14 MHz RC
   that is OFF at reset — enable `RCU_CTL1.IRC14MEN` first or calibration
-  (RSTCLB/CLB) hangs forever. This cost a debug cycle.
+  (RSTCLB/CLB) hangs forever.
 - Channel map — **the stock firmware's, recovered from its ADC init**
   (one board design, no revisions):
   **ch0 = PA0 = NTC divider**, **ch1 = PA1 = D+**, **ch9 = PB1 = D−**,
@@ -376,6 +383,13 @@ instead; this unit's serial is 55050.)
   ~1.5–2.3 V with nothing on the data lines (analog inputs, no pulls) —
   verify against a real device/charger. (The internal die sensor is a poor
   cross-check — the MCU self-heats to ambient +~15 °C within minutes.)
+- Full `tools/adcread.py --scan` (2026-10-13, dev build, IN fed): ch0 NTC
+  1.48 V (≈27 °C); D+ 0.04 V / D− 0.03 V; ch2–ch8 are the digital pins'
+  levels, all accounted for (PA2 BLE TX, PA3 TFT RST, PA4 DC, PA6 = stock's
+  BLE provisioning toggle and PB0 BLE RX all ≈3.3 V; PA5 SCK 0 V; PA7 MOSI
+  3.3 V); ch10–15 (PC0–PC5) are not bonded out in this package and read
+  floating junk; ch17 Vrefint 1472/4095 → VDD ≈ 3.34 V. No unused analog input
+  remains to discover.
 
 ### USB Power Delivery (FUSB302, I²C 0x22)
 The device at I²C **0x22** (write `0x44` / read `0x45`) is a **FUSB302** USB Type-C /
@@ -411,18 +425,32 @@ Status regs 0x3E/0x3F/0x42. It's a well-documented part (open driver references:
 Chromium EC `fusb302`, various USB-PD stacks; `FUSB302B Datasheet.pdf` in the
 repo root — this unit reads Device ID **0x81** = FUSB302, silicon rev B).
 
-**Our firmware's sink engine (rust/src/pd.rs, M4) is live and bench-verified**:
-attach/orientation, Source_Capabilities collection, and fixed-PDO voltage
-trigger (5/9/15/20 V Accept+PS_RDY against an Apple 96 W charger). Verbs +
+**Our firmware's sink engine (rust/src/pd.rs, M4) is live and bench-verified**
+(host-armed with `pdctl 1`, nothing at boot; needs `triggers`):
+attach/orientation, Source_Capabilities collection, PD 2.0/3.0 fixed-PDO
+requests (5–20 V), PPS APDO setpoints (bench 3.3–11 V), hard reset, and the
+PD capture ring behind the powerz `ATT_PD` attribute. Verbs +
 host tool in the command table above / tools/pd.py; engine internals in
 FIRMWARE.md "USB-PD sink". The INT_N pin is not needed (registers are polled).
 The chip shares the INA226/EEPROM I²C bus — all access inside `ina::pause`.
+
+### D+/D− trigger network (QC / AFC / FCP / SCP)
+QC-style triggers present voltages on the pass-through D+/D− lines through a
+resistor network on four GPIOs (recovered from stock; rust/src/qc.rs):
+**D+: PA13 = 0.6 V enable, PA14 = boost to 3.3 V; D−: PB5 = 0.6 V enable,
+PB4 = boost to 3.3 V** (push-pull, high = on). QC2.0 modes 5/9/12/20 V =
+(PA13,PA14,PB4,PB5) 1000 / 1101 / 1001 / 1111 after a >1.25 s mode-0 entry.
+For the serial protocols (AFC, FCP/SCP) D− is released to hi-Z between
+frames and **PB4's input reads the charger's Sping** (closed loop) and, for
+FCP/SCP, its reply frames. FCP/SCP packets end in a CRC-8 (poly 0x39, init
+0, MSB-first — `qc::crc8`, matches stock bit-exact). **PA13/PA14 are SWDIO/SWCLK** — SWD is dead while a
+trigger holds them; `qcoff` releases all four pins.
 
 ### Display (SPI TFT)
 - **ST7735S** controller, **160×80 RGB565**, memory offset **(col +1, row +26)**, inversion on.
 - **SPI0** (base `0x40013000`), master, mode 0, 8-bit, MSB-first, ~half-PCLK.
 - Pins: **SCK=PA5, MOSI=PA7** (no MISO), **DC=PA4** (0=cmd/1=data), **RST=PA3** (active low), CS tied low.
-- **Backlight: PA9 = enable** (high = on), **PB3 = PWM brightness** (TIMER1 channel, ~1.5 kHz).
+- **Backlight: PA9 = enable** (high = on), **PB3 = PWM brightness** (TIMER1 CH1, AF2; ours 1 kHz, compare 0..=999 of a 1000 period).
 - Bring-up: hardware RST pulse → SLPOUT(0x11)+100 ms → INVON(0x21) → frame/power/VCOM config (0xB1–0xC7) → MADCTL(0x36) → COLMOD(0x3A)=0x55 → 32 bytes gamma → +100 ms → DISPON(0x29). Draw with CASET(0x2A)/RASET(0x2B) (apply the +1/+26 offset) → RAMWR(0x2C) → pixel stream. No RAM framebuffer (8 KB can't hold a frame) — draw straight to GRAM.
 - **Rolling scroll** (datasheet V1.1 §9.11, cmds 33h/37h, exit 13h NORON): it runs along the 162 GRAM *lines* = the panel's 160-px axis, i.e. **horizontal** in our landscape (MV=1 only affects writes). Lines 0/161 are off-panel, so full-width scroll is TFA=1, VSA=160, BFA=1 (must sum to 162); SSA=1+k shows GRAM line 1+(p+k) mod 160 on panel line 1+p. Datasheet: https://www.waveshare.com/w/upload/e/e2/ST7735S_V1.1_20111121.pdf
 - **MADCTL on this unit: `0xA8`** (stock's "180°" variant) is right-side up; `0x68` renders upside-down (webcam-verified). Colors are correct with the BGR bit as stock sets it.
@@ -430,7 +458,9 @@ The chip shares the INA226/EEPROM I²C bus — all access inside `ina::pause`.
 
 ### Buttons
 - **K1 = PF0, K2 = PF1** (GPIOF), **active-low** (read 1 with the internal
-  pull-up when released — verified with `keyrd`); polled, no EXTI.
+  pull-up when released — verified with `keyrd`); polled at 250 Hz with 20 ms
+  debounce (keys.rs), no EXTI. K1 = next screen, K2 held 1 s = reset the active
+  energy group + run clock; any press wakes an idle-off screen.
 
 ### Bluetooth
 - A **DX-BT24-M** BLE module on **USART1**: **TX = PA2 (AF1), RX = PB0 (AF4)**
@@ -450,16 +480,17 @@ The chip shares the INA226/EEPROM I²C bus — all access inside `ina::pause`.
   baud section states that name + baud rate may be changed **at most 30
   times in total** (a one-time-programmable store on the DA14531), and a
   module that refuses exactly those writes has spent that budget (or was
-  supplied with none). No unlock exists in the guide; the stock firmware
-  never touches this module: its provisioning routine (`TTM:BPS-115200`/
-  `TTM:REN-TC66C`, toggling PA6 around them) belongs to an older module
-  family and is skipped when the EEPROM config word compared against
-  0x4259 says this is a newer unit (stock's normal path also runs 9600; its provisioning routine additionally toggles **PA6**, presumably
-  a module control line — unverified, unused by us). Advertises whenever the
+  supplied with none). No unlock exists in the guide. Stock's provisioning
+  routine (`TTM:BPS-115200`/`TTM:REN-TC66C`, toggling **PA6** around them —
+  presumably a module control line, unverified, unused by us) targets an older
+  module family; this module ignores it, and stock's normal path also runs
+  9600. Advertises whenever the
   meter is powered; one connection at a time. The BLE command set mirrors the
   USB verbs with a `b` prefix + CRLF (`bgetva` = the same 192-B packet, arrives
-  as one notification; also `brotat`, and our `bquery`/`brawva` and
-  `bcfgrd`/`bcfgwr <id> <value>` — same replies as the USB verbs). RF is weak on this board — hardware, not firmware.
+  as one notification; also `brotat`, `bnextp`/`blastp` (switch screen), and
+  our `bquery`/`brawva` and `bcfgrd [start]`/`bcfgwr <id> <value>` — same
+  replies as the USB verbs; with the BLE-disable setting on, only
+  `bcfgrd`/`bcfgwr` answer). Always served, no feature gate. RF is weak on this board — hardware, not firmware.
   Host tool: `tools/ble.py` (uv script: scan / send / getva / rxtest / spy / sta).
 
 ### Energy integration

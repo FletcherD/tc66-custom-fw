@@ -1,11 +1,12 @@
-# Samsung AFC — SOLVED (build 97). Notes for FCP/SCP.
+# Samsung AFC (working) and Huawei FCP/SCP (untested)
 
 `afctr 0x46` drives a Samsung AFC charger from 5 V → 9 V, bench-verified
 (8.92 V), reliable across power-cycles; `afctr 0x08` returns it to 5 V. Lives in
-`qc.rs`; host tool sends `afctr <byte> [reps]`. The stock `charge_protocol_
+`qc.rs` (`qc::afc`); the verb is `afctr <byte> [reps]` (reps default 3; no
+host wrapper — send it raw). The stock `charge_protocol_
 handshake` mode 4 is replicated register-for-register (per our unpublished stock-firmware RE notes).
 
-## What made it work (the four things, in order of discovery)
+## What makes it work
 
 1. **NRZ, not pulse-width.** Each byte is `proto_send_byte`: start pattern
    (D− high 24 µs / low 32 µs / high 32 µs), 8 data bits MSB-first at ~152 µs
@@ -15,8 +16,8 @@ handshake` mode 4 is replicated register-for-register (per our unpublished stock
    I2C reads) firing mid-byte stretches a bit cell and corrupts the frame. The
    byte runs inside `cortex_m::interrupt::free`; the 2.5 ms marks and the reads
    tolerate jitter.
-3. **The real entry** (register-exact, from a fresh 200 kS/s stock capture — the
-   findings-doc's "D+3.3/D−3.3 hold" was wrong): release all four pins (hi-Z)
+3. **The entry** (`accp_entry`, register-exact from a 200 kS/s stock capture —
+   NOT a D+3.3/D−3.3 hold): release all four pins (hi-Z)
    200 ms, then drive **only D+** to its 0.6 V state (PA13=1, PA14=0) with **D−
    left RELEASED** for the whole 2050 ms hold — the D− ≈ 0.6 V→0 a scope sees is
    charger-sourced. Then the request byte ×3, 10 ms apart. AFC has **no sync
@@ -27,42 +28,117 @@ handshake` mode 4 is replicated register-for-register (per our unpublished stock
    byte → Mping → wait Sping → `proto_measure_response` (read the byte-echo) →
    Mping → wait Sping. An open-loop replay engages the charger (it Spings) but
    never completes — the FSM needs the master to read/wait.
-   - **Sync subtlety that cost a build:** `proto_wait_sping` must FIRST wait for
+   - **Sync pitfall:** `proto_wait_sping` must FIRST wait for
      the released mark to fall low, THEN detect the charger's Sping rising/
      falling. Waiting only "high then low" mistakes the residual mark-high for
      the Sping, so the byte is sent *during* the charger's Sping → contention →
-     garbled byte → no switch. Fixed by the leading `wait_pb4(false,…)`.
+     garbled byte → no switch. Hence the leading `wait_pb4(false,…)`.
 
 **Bench procedure:** the charger's state matters — power-cycle it (mains off ~5 s, cold) before a clean test. Our D+/D−
 drive HW is proven independently (QC2.0 `qctrg` switches this charger to 9/12 V).
 
-## FCP / SCP — SCAFFOLDED (qc.rs `fcp()`/`scp()`, verbs `fcptr`/`scptr`), UNTESTED
+## FCP / SCP — IMPLEMENTED FROM THE STOCK CAPTURES, UNTESTED ON A CHARGER
 
-Share AFC's machinery: `accp_entry` (same release→D+0.6/D−released→2050 ms),
-`proto_send_word(buf, flag)` (now multi-byte), the closed-loop reads. Then 3×
-`proto_send_word(0x01, flag=0)` pings 900 µs apart, then the stock command
-packets (from the scatter-decompressed .data, all CRC-verified):
-- **FCP (mode 2), fixed 9 V:** `0c 04` `0c 21` `0c 31` `0b 2c 5a` (set 0x2c=90 →
-  9 V, 100 mV units) `0c 2c` `0b 2b 01` (commit).
-- **SCP (mode 3):** `0b a0 c0` (enable) `0b a1 06` `1b b0 02 15 7c` `1b b2 02 13
-  88` `0b ca c8` (voltage code 0xc8 — raw scale, volts unknown) `0b cb 64`.
-- **CRC-8 CONFIRMED:** poly 0x39, init 0, MSB-first, over all preceding bytes
-  (`crc8_huawei @0x08003a2c`). `qc::crc8` verified against all 16 RE example
-  packets. Appended in `accp_exchange`.
+qc.rs `fcp()`/`fcp_read()`/`scp()`, verbs `fcptr`/`fcprd`/`scptr`, compiled
+only with `dev-verbs` (`make flash`), not into release images. Shared with
+AFC: `accp_entry` (release → D+ 0.6 V / D− released → 2050 ms) and the
+Mping/Sping helpers (`proto_line_idle`/`proto_wait_sping`). FCP/SCP have their
+own framer (`accp_frame`) and reply reader (`accp_capture` + `accp_decode`);
+AFC keeps its bench-verified `afc_start`/`afc_byte_bits`/`proto_send_word`.
 
-**Three ASSUMPTIONS in the code that need RE (can't bench-test — no FCP/SCP
-charger). Each is marked in qc.rs:**
-1. **Parity (most critical).** `afc_byte_bits` uses PER-BYTE odd parity. The RE
-   calls `proto_send_byte`'s 9th bit a "running-parity" with scratch at
-   0x2000029d — for a multi-byte packet it may be a parity RUNNING across the
-   whole `proto_send_bytes` call. If wrong, every multi-byte packet's parity is
-   wrong → charger rejects all. (AFC unaffected: len 1.)
-2. **Per-packet `flag`.** Assumed data packets = flag=1 (measure the charger
-   response, like AFC's byte), pings = flag=0. The real flags for the mode-2/3
-   read (0c) vs write (0b/1b) packets are unconfirmed.
-3. **Inter-packet gap.** Assumed 10 ms between command packets (AFC's repeat
-   gap); the pings are the confirmed 900 µs.
+**Ground truth: `fcp.csv` / `scp.csv`** (repo root, gitignored): the stock
+firmware running modes 2/3 with an FCP charger attached, 100 kS/s (10 µs per
+sample), ch1 = D−, ch2 = D+. Decode with `uv run tools/accp_decode.py fcp.csv`
+(prints each frame with parity / CRC / SYNC-rule checks). That charger
+answered vendor `0x04 = a2`, `0x21 = 02` (two raised voltages), `0x31 = 5a`
+(9.0 V), ACKed the 9 V write, and NACKed (`03`) every SCP packet.
 
-Also: SCP `0xca` voltage-code↔volts scale is raw/unknown (stock scan probes
-0xc8=200, 0xdc=220); `scp_set_voltage @0x08004aac` (not ported) patches 0xca +
-CRC for other voltages. Modes: 2 = FCP (0x0800417c), 3 = SCP (0x08004c60).
+### Frame format (every clean frame in both captures matches)
+- Byte = 8 data bits MSB-first + **per-byte odd parity**, ~152-160 µs cells
+  (D− mark = 1). Master and charger frames use the same format.
+- **SYNC** quarters (~40 µs) before every byte: opposite of the previous line
+  level P, back to P, and one more opposite quarter if the byte's MSB equals P
+  (so each byte starts on an edge). P = low before the first byte, else the
+  previous parity bit. After the last byte the same rule runs toward the
+  high Mping (next bit = 1). `accp_sync`/`accp_frame`.
+- Packets: `<cmd><reg>[<len>]<data…><crc8>`; the 3 leading `01` pings carry
+  no CRC and get no reply.
+
+### Transaction (timings from the capture)
+Mping (2.5 ms) → charger Sping (~380 µs later, 2.5 ms) → 250 µs → master
+frame → Mping → Sping → ~590 µs → **charger frame** `[ACK, data…, CRC]` →
+charger end ping (high ~2.5 ms) → 1.7 ms → Mping → Sping. Pings 900 µs
+apart, 10 ms before the first packet and between packets. `accp_capture`
+records the reply as run lengths (interrupts masked, ≤ 15 ms, stops at a
+high ≥ 1.8 ms — a byte's longest high run is ~1.4 ms); `accp_decode` splits
+on runs < 90 µs (SYNC), rounds the rest to 155 µs cells, checks parity and
+CRC. A Python port of the decoder reads every FCP frame in the capture with
+±15 µs of injected jitter.
+
+### Sequences and replies
+- **FCP (mode 2), 9 V:** `0c 04` `0c 21` `0c 31` `0b 2c 5a` (VOUT 90 × 100 mV)
+  `0c 2c` `0b 2b 01` (apply). Only the two writes are needed to switch; the
+  reads identify the charger and verify the write.
+- **`fcprd <reg> [n]`:** single reads only — capability readout at 5 V
+  (0x21 → N, 0x30+k voltages, 0x50+k currents, 0x22 max power).
+- **SCP (mode 3):** `0b a0 c0` `0b a1 06` `1b b0 02 15 7c` `1b b2 02 13 88`
+  `0b ca c8` `0b cb 64` = output enable, 3 s watchdog, boundaries 5.5 V / 5 A,
+  VSSET 5.00 V, ISSET 5 A — the low-voltage direct-charge mode; it does **not**
+  raise the voltage. A raise would write VSET `0xb8/b9` and keep the
+  watchdog fed — not implemented.
+- Reply ACK = low nibble 8 (`08`/`88`), NACK = `03`. Errors: `ER 0x40|i`
+  = no / garbled reply to packet i, `ER 0x50|i` = NACK.
+
+### Open
+- Never run against a real FCP/SCP charger (the bench has none).
+- The `0x01` pings' purpose is unknown (copied from stock).
+- In scp.csv the stock `1c b0 02` burst read decodes with a wrong CRC every
+  time (`1c b2 02` is fine) — unexplained, irrelevant to the writes.
+
+## Protocol reference (public sources)
+
+**Physical layer:** UI 160 µs typ (144–176), Mping/Sping 16 UI (2.3–2.8 ms;
+the charger copies the Mping length ±1 %, so it takes its UI from ours). Byte
+= MSB-first 8 data + odd parity. Transaction: Mping → Sping → master packet →
+Mping → Sping → slave reply → Mping → Sping. Sinks accept a Sping of 10–20 UI.
+
+**Commands:** `0x0c` single read `0c reg`, `0x0b` single write `0b reg val`,
+`0x1c` burst read `1c reg num`, `0x1b` burst write `1b reg len d…`; CRC-8
+(above) on both FCP and SCP (FCP `0x03` SSTAT has CRC/parity error bits).
+
+**FCP registers:** `0x00` DVCTYPE, `0x01` SPEC_VER, `0x03` SSTAT, `0x04`
+vendor ID; `0x21` = number of voltages above 5 V (1 → 5/9, 2 → 5/9/12);
+`0x22` max power (0.5 W); `0x28` adapter status (UVP/OVP/OCP/OTP); `0x2b`
+output control (bit 0 = apply); `0x2c` VOUT (100 mV); `0x2d` IOUT (100 mA);
+`0x30+n` voltage n (100 mV), `0x50+n` current n (100 mA). **Capability readout
+with no voltage change:** read `0x21` → N, then `0x30+N` and `0x22`.
+Back to 5 V: `0x2c=50`, `0x2b=1` (or release D+).
+
+**SCP registers:** `0x7e/0x80/0x81` adapter type; `0x82–0x8b` IDs; `0x8d`
+power class; `0x90` max power; `0x92/0x93` min/max VOUT, `0x94/0x95` min/max
+IOUT (value = 10^(bits 7:6) × bits 5:0, mV/mA); `0xa0` ctrl (bit 7 output
+enable, bit 6 mode, bit 5 reset); `0xa1` (bits 2:0 watchdog × 0.5 s); `0xa8–0xab`
+measured V/I; `0xb0/b1` VSET boundary, `0xb2/b3` ISET boundary (mV/mA);
+`0xb8/b9` VSET (mV, the high-voltage set); `0xca` VSSET = (mV − 3000)/10, only
+≤ 5.5 V; `0xcb` ISSET (50 mA). **The stock "SCP" block (and so `scptr`) is the
+5.00 V / 5 A low-voltage direct-charge mode** (`0xca=0xc8` = 5.00 V,
+boundaries 5.5 V / 5 A, 3 s watchdog) — it never raises the voltage; a real
+SCP raise writes VSET `0xb8/b9`.
+
+**Detection:** after DCP, D+ 0.6 V for ~1 s, require D− < 0.325 V; then pings
+(sc8546: 15 tries ~10 ms apart, 82 ms pause every 5). No answer → plain DCP.
+
+**Sources:**
+- Huawei hwpower kernel code — `adapter_protocol_{fcp,scp}.h`, `sc8546_scp.{c,h}`,
+  `stm32g031_scp.h`: github.com/wutaijieing/android_kernel_LIO_kirin990_103;
+  older `hw_scp.c` in LineageOS/android_kernel_huawei_kirin970.
+- Samsung bit-banged AFC (shared physical layer): LineageOS/android_kernel_samsung_sm6115
+  `drivers/power/supply/afc/gpio_afc.c`, `include/linux/afc/afc.h`.
+- Patent US10135263B2 FIG. 5–7 (framing, parity, SYNC): https://patents.google.com/patent/US10135263B2/en
+- Southchip SC2021A datasheet (timing table):
+  https://uploadcdn.oneyac.com/upload/document/1675152919627_4112.pdf;
+  Hynetek HUSB601 datasheet.
+- NXP FTF2016 "Smart USB Fast Charging" slides 22–24 (layer overview).
+
+Stock addresses: `scp_set_voltage @0x08004aac` (patches 0xca + CRC, not
+ported); modes 2 = FCP (0x0800417c), 3 = SCP (0x08004c60).

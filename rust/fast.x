@@ -95,7 +95,7 @@ SECTIONS
     *(.text.__aeabi_uldivmod .text.__udivmoddi4);
     *(.text.__aeabi_uidiv* .text.__udivsi3 .text.__umodsi3);
 
-    /* getva/rawva reply path: the aes crate's inner loops (the ~20 ms AES
+    /* getva/rawva reply path: the aes crate's inner loops (QUIRKS §4
      * fix) + our getva module (getva::build is demoted in .slowtext) */
     *(.text.*14aes256_encrypt*);
     *(.text.*9sub_bytes*);

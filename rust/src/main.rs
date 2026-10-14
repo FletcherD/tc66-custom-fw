@@ -19,7 +19,7 @@
 //!
 //! USB is serviced from the USBD_LP ISR (IRQ 37): dev.poll, the powerz
 //! command/arm path, and moving CDC packets into CMD_RING all run there, so
-//! blocking main-loop work (TFT draws, getva's ~20 ms AES) can never starve
+//! blocking main-loop work (TFT draws, getva's AES) can never starve
 //! the bus. The main loop consumes CMD_RING, builds replies in thread mode,
 //! and pushes them into usbd-serial under short critical sections
 //! (with_usb). The sampler runs from the TIMER5 interrupt (250 Hz, one
@@ -81,7 +81,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 129;
+const BUILD_ID: u32 = 130;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -601,8 +601,11 @@ fn on_packet(buf: &[u8]) {
         reply_ok_er(qc::fcp());
     } else if match5(buf, b"scptr") {
         #[cfg(feature = "dev-verbs")]
-        /* scptr: Huawei SCP request (stock mode-3 6-packet block). Blocks ~2.3 s. */
+        /* scptr: Huawei SCP stock 5 V / 5 A block. Blocks ~2.3 s. */
         reply_ok_er(qc::scp());
+    } else if match5(buf, b"fcprd") {
+        #[cfg(feature = "dev-verbs")]
+        do_fcprd(buf);
     } else if match5(buf, b"qcoff") {
         #[cfg(feature = "triggers")]
         reply_ok_er(qc::off());
@@ -834,8 +837,8 @@ fn do_rawva() {
 }
 
 /// BLE line dispatcher (bt::service callback): the stock `b`-prefix verbs
-/// plus our own additions. Unknown lines — bnextp/blastp/brotat and module
-/// status chatter — are silently ignored, like the stock firmware.
+/// plus our own additions. Unknown lines (module status chatter) are
+/// silently ignored, like the stock firmware.
 #[inline(never)]
 fn on_ble_line(line: &[u8]) {
     if line.starts_with(b"bcfgwr") {
@@ -1038,7 +1041,23 @@ fn do_clkrd() {
     write_all(&reply);
 }
 
-/// dev verb: pdsta -> "OK" + 20-byte PD engine state (layout: pd::status)
+/// dev verb: fcprd <reg> [n] -> "OK" + n register bytes (n clamped to 1..=8,
+/// default 1), or ER + a qc::fcp_read code. Untested.
+#[cfg(feature = "dev-verbs")]
+#[inline(never)]
+fn do_fcprd(buf: &[u8]) {
+    let reg = *buf.get(5).unwrap_or(&0);
+    let n = (*buf.get(6).unwrap_or(&1)).clamp(1, 8) as usize;
+    let mut reply = [0u8; 10];
+    reply[..2].copy_from_slice(b"OK");
+    let r = qc::fcp_read(reg, &mut reply[2..2 + n]);
+    match r {
+        Ok(()) => write_all(&reply[..2 + n]),
+        Err(e) => write_all(&[b'E', b'R', e]),
+    }
+}
+
+/// trigger verb: pdsta -> "OK" + 20-byte PD engine state (layout: pd::status)
 #[cfg(feature = "triggers")]
 #[inline(never)]
 fn do_pdsta() {
@@ -1050,7 +1069,7 @@ fn do_pdsta() {
     write_all(&reply);
 }
 
-/// dev verb: pdcap -> "OK" + count + count x 4-byte LE source PDOs
+/// trigger verb: pdcap -> "OK" + count + count x 4-byte LE source PDOs
 #[cfg(feature = "triggers")]
 #[inline(never)]
 fn do_pdcap() {
@@ -1147,7 +1166,7 @@ fn with_usb<R>(f: impl FnOnce(&mut Dev, &mut Pz, &mut Serial) -> R) -> Option<R>
  *  - a slot is written only while head-tail < SLOTS and read only while
  *    tail < head, so producer and consumer never touch the same slot.
  * When the ring is full the producer simply stops reading usbd-serial: bytes
- * back up in its 128-B buffer and then NAK the endpoint — backpressure, not
+ * back up in its 64-B read buffer and then NAK the endpoint — backpressure, not
  * loss. Main re-runs drain_serial after freeing a slot (no IRQ will fire for
  * already-buffered bytes). */
 const CMD_SLOTS: usize = 2;

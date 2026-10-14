@@ -39,9 +39,9 @@ else, including the stock firmware.
   Quick Charge 2.0/3.0, and Samsung AFC. All of them are driven from the
   host: PD with `tools/pd.py`, QC with `tools/qc.py`, and AFC with the
   `afctr` command. **A granted request raises
-  the voltage on the OUT port, up to 20 V on whatever is plugged in.** The
-  tools refuse anything above 9 V unless you pass `--max-v`, and they ask
-  for confirmation every time.
+  the voltage on the OUT port, up to 20 V on whatever is plugged in.**
+  `pd.py` and `qc.py` refuse anything above 9 V unless you pass `--max-v`,
+  and ask for confirmation unless you pass `--yes`.
 - **Firmware updates without the button.** Once this firmware is installed,
   it can reflash itself over USB.
 - **Watchdog.** If the firmware hangs, the meter reboots.
@@ -53,7 +53,8 @@ else, including the stock firmware.
 - The stock "quick charge protocol detection" screen and the on-device
   PD trigger menu are missing. Triggers are host-driven only.
 - RuiDeng's own PC and phone apps are only partly supported: live
-  readings work, and screen-page control works over BLE only.
+  readings and screen rotation work, but page switching (next/previous
+  screen) works over BLE only.
 
 ## Supported hardware
 

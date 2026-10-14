@@ -13,7 +13,7 @@ edition = "2021"
 #   capture attribute. A granted request RAISES THE OUT VOLTAGE.
 # - dev-verbs: the bring-up/debug verbs (i2crd adcrd clkrd keyrd rstrd
 #   wdtst idlrd uiscr tftfl tftbl tftui btini btcmd btget btrun btsta btspy)
-#   and the untested Huawei fcptr/scptr triggers.
+#   and the untested Huawei fcptr/fcprd/scptr verbs.
 # - pcprf: the TIMER5-veneer PC profiler (ina.rs) + its `pcprf` dump verb
 #   (without it TIMER5_DAC branches straight to the tick body).
 # - grace: the 10 s boot grace window (pseudo-bootloader escape hatch:
