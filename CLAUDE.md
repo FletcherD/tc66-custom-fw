@@ -32,8 +32,10 @@ charge triggers (pd.rs: FUSB302 PD 2.0/3.0 sink — `pdctl`/`pdsta`/`pdcap`/
 charger and device negotiating through the meter, either orientation, incl.
 SOP'/SOP'' cable e-marker traffic, attach/detach, bad-CRC and hard-reset
 events; `pdctl 2` while sniffing re-triggers the negotiation; read with
-tools/pdcap.py under sudo — decodes PDOs/Requests/VDMs/cable identity via
-tools/pd_decode.py; tools/pdlog_check.py scores a capture; bench-verified
+tools/pdcap.py under sudo — decodes all PD message types incl. identities,
+extended caps/status, chunk reassembly via tools/pd_decode.py (layouts from
+the USB PD R3.2 spec; regression vectors in tools/pd_decode_test.py;
+`--save`/`--replay` for offline re-decoding); tools/pdlog_check.py scores a capture; bench-verified
 with an Apple charger + Pixel/Moto; this unit's OUT-port CC2 contact is
 near-open, so sink attach / hard reset only work with the line on CC1 —
 a board fault, not firmware: both CC nodes are unloaded at DC and no GPIO

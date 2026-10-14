@@ -351,15 +351,16 @@ pub fn pdo(w: &mut W, p: u32) {
             w.amps((p & 0x3FF) * 10);
         }
         1 => {
-            w.t(VAR);
-            range(w, v_lo, v_hi);
-            w.amps((p & 0x3FF) * 10);
-        }
-        2 => {
+            /* PD Table 6.6: 01b battery (250 mW units), 10b variable */
             w.t(BAT);
             range(w, v_lo, v_hi);
             w.uint((p & 0x3FF) / 4, 0);
             w.ch(b'W');
+        }
+        2 => {
+            w.t(VAR);
+            range(w, v_lo, v_hi);
+            w.amps((p & 0x3FF) * 10);
         }
         _ => match p >> 28 & 3 {
             0 => {
@@ -403,13 +404,13 @@ fn contract(w: &mut W, mark: u8, rdo: u32, p: u32) {
             w.amps(op10 * 10);
         }
         1 => {
-            w.t(VAR);
-            w.amps(op10 * 10);
-        }
-        2 => {
             w.t(BAT);
             w.uint(op10 / 4, 0);
             w.ch(b'W');
+        }
+        2 => {
+            w.t(VAR);
+            w.amps(op10 * 10);
         }
         _ => {
             let avs = p >> 28 & 3 == 2;

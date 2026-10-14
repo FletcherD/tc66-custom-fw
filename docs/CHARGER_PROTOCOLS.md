@@ -125,17 +125,23 @@ device on the other port).
   Request → Accept → PS_RDY (+ GoodCRCs). Then vendor messages (VDMs), e.g.
   Discover Identity. Hard Reset is an ordered set (no message id) that
   makes both ends start over (the source cycles VBUS).
-- **Information available** (decoded by `tools/pd_decode.py`, checked
-  against Linux `include/linux/usb/pd.h` / `pd_vdo.h`):
+- **Information available** (decoded by `tools/pd_decode.py`; layouts from
+  the USB PD R3.2 V1.2 spec, PD 2.0 V1.3 for the older VDOs):
 
   | Message | Fields |
   |---|---|
-  | Source/Sink_Capabilities | fixed PDOs (V, max I, flags), variable/battery, PPS (V range, I), SPR/EPR AVS |
-  | Request (RDO) | object position, operating/max current or power, PPS/AVS output voltage, capability mismatch |
-  | Accept / Reject / Wait / PS_RDY | the contract outcome |
-  | header | power/data role, spec revision (PD 2.0/3.0), message id |
-  | Discover Identity (SOP) | the device's ID header (product type, VID), cert XID, product ID; phones often NAK |
-  | Discover Identity (SOP′) | the cable's e-marker — see below |
+  | header | power role (SRC/SNK), data role (DFP/UFP), spec revision (2.0/3.x), message id; SOP′: cable vs port |
+  | Source/Sink_Capabilities | fixed PDOs (V, max I, peak current), battery/variable, PPS (V range, I, power limited), SPR/EPR AVS; the 5 V PDO's flags (unconstrained power, USB comms, dual-role power/data, USB suspend, unchunked extended, EPR capable; sink: higher capability, FRS current) |
+  | Request / EPR_Request (RDO) | object position, operating/max current or power, PPS/AVS output voltage, capability mismatch, USB comms, no USB suspend, unchunked, EPR capable |
+  | Accept / Reject / Wait / PS_RDY / Soft_Reset / swaps / Get_* | names of all control messages |
+  | Discover Identity ACK (SOP) | ID header (UFP product type, DFP product type — e.g. "power brick", connector, USB host/device, modal), cert XID, VID/PID/bcdDevice, UFP / DFP / AMA VDO |
+  | Discover Identity ACK (SOP′) | the cable's e-marker (passive/active cable VDOs, VPD) — see below |
+  | Discover SVIDs / Modes, Enter/Exit Mode, Attention | the SVID list (DisplayPort, vendor), raw mode VDOs |
+  | PD 3.x data messages | Alert, Battery_Status, Source_Info (port PDP), Revision, EPR_Mode, Enter_USB, Get_Country_Info, BIST |
+  | Source_Capabilities_Extended | VID/PID/XID, FW/HW version, holdup time, load step, compliance (LPS/PS1/PS2), touch current/temp, peak currents, inputs, PDP |
+  | Sink_Capabilities_Extended | VID/PID/XID, FW/HW version, sink modes (PPS/AVS, battery), min/operational/max PDP |
+  | Status / PPS_Status | temperature, input (AC/DC/battery), OCP/OTP/OVP, CV/CL mode, power-limit reasons; PPS output V/I; cable-plug temperature |
+  | Manufacturer_Info, Battery_Capabilities, Country_Codes/Info, Extended_Control, EPR_Source/Sink_Capabilities | as named (chunked messages are reassembled) |
 
 - **Meter as sink** (`pdctl 1`, `pd.py arm`): collects the source's caps
   and takes PDO 1 (5 V) immediately; `pdreq` renegotiates (fixed + PPS,
@@ -221,7 +227,8 @@ Doesn't show a cable e-marker (the sink doesn't receive SOP′).
 | Negotiated contract | Request + PS_RDY | sniff: yes | `pdinf`, PD screen, `pdcap.py` |
 | PD revision, roles | message headers | yes | `pdcap.py`, `pdinf` |
 | Cable rating / vendor / speed | SOP′ Discover Identity | sniff: yes (charger asks) | `pdcap.py`, PD screen |
-| Device identity | SOP Discover Identity | sniff: yes when answered | `pdcap.py` |
+| Device (sink) identity | SOP Discover Identity ACK from the device — the charger, as DFP, asks; Sink_Capabilities_Extended | sniff: yes when answered (phones often NAK) | `pdcap.py` |
+| Charger identity | Source_Capabilities_Extended, Manufacturer_Info, or the charger's Discover Identity ACK — only when the device asks (PD 3.x) | sniff: yes when the device asks; never with a PD 2.0 charger (no extended messages) | `pdcap.py` |
 | QC2 requested level (by a device) | D± levels | yes, not implemented | — |
 | AFC/FCP traffic (device ↔ charger) | D− serial | needs timer capture, not implemented | — |
 | VBUS / current under the contract | INA226 | yes | everywhere (current unsigned) |
@@ -233,10 +240,13 @@ Doesn't show a cable e-marker (the sink doesn't receive SOP′).
   `--device` runs the on-device detection instead and prints its lines.
 - `tools/pd.py` — `arm` / `off` / `sniff` / `hardreset` / `status` / `caps` /
   `req` / `info` (the PD screen's lines).
-- `tools/pdcap.py` (sudo) — live KM003C capture with decoding;
-  `tools/pd_decode.py` — the decoders (vendor names from the system
-  `usb.ids`); `tools/pdlog_check.py` — scores a capture per hard reset
-  (missed messages via GoodCRC pairing and message-id gaps).
+- `tools/pdcap.py` (sudo) — live KM003C capture with decoding; `--save
+  FILE` keeps the raw packets, `--replay FILE` re-decodes them offline (no
+  sudo). `tools/pd_decode.py` — the decoders (vendor names from the system
+  `usb.ids`); `tools/pd_decode_test.py` — its regression vectors (bench
+  frames + spec examples; run after changing the decoder);
+  `tools/pdlog_check.py` — scores a capture per hard reset (missed messages
+  via GoodCRC pairing and message-id gaps).
 - `tools/qc.py` — QC triggers; `tools/accp_decode.py` — AFC/FCP/SCP scope
   capture decoder; `tools/fusb_intn.py`, `tools/gpio_cc_sweep.py` — FUSB302
   INT_N and CC wiring checks.
@@ -253,6 +263,11 @@ Doesn't show a cable e-marker (the sink doesn't receive SOP′).
   cable). Board fault; continuity OUT B5 ↔ IN B5 not yet measured.
 - Dense-burst frame misses (above) and the 8-slot capture ring (the host
   must poll back-to-back during bursts — `pdcap.py` does).
+- Extended messages are captured one frame (≤ 26 data bytes) at a time:
+  chunked ones (the default) are reassembled by the decoder, but an
+  unchunked one longer than a frame — only used when both ends set the
+  unchunked bits in the 5 V PDO and the RDO — is cut off ("unchunked, n of
+  m bytes captured").
 - The current reading has no direction.
 
 ## References

@@ -4,12 +4,18 @@
 # dependencies = ["pyusb"]
 # ///
 """KM003C PD-capture reader: polls the vendor bulk endpoint for the PdPacket
-attribute (0x0010) and decodes captured USB-PD traffic.
+attribute (0x0010) and decodes captured USB-PD traffic (tools/pd_decode.py:
+every control/data/extended message type, PDOs + flags, RDOs, VDMs incl.
+identities, Source/Sink_Capabilities_Extended, Status, PPS_Status,
+Manufacturer_Info, ...; chunked extended messages are reassembled).
 
-  pdcap.py [seconds]   stream captured PD events for `seconds` (default 20).
-                       Start the engine first over CDC: `pd.py arm` (our own
-                       sink's traffic) or `pd.py sniff` (a source and a sink
-                       negotiating through the meter).
+  pdcap.py [seconds]           stream captured PD events for `seconds`. Start
+                               the engine first over CDC: `pd.py arm` (our own
+                               sink's traffic) or `pd.py sniff` (a source and a
+                               sink negotiating through the meter).
+  pdcap.py 60 --save cap.hex   also write every raw PdPacket payload (hex, one
+                               per line) for later re-decoding.
+  pdcap.py --replay cap.hex    decode a saved capture offline (no device, no root).
 
 Needs root for the USB device node; run the uv environment's Python under sudo:
   sudo $(uv run --script tools/pdcap.py --python-path) tools/pdcap.py 30
@@ -19,66 +25,26 @@ bulk 0x01 OUT / 0x81 IN), independent of the CDC verb channel. The firmware
 may answer a GetData(PD) with the pre-armed ADC packet first; this filters
 replies by the ext-header attribute and keeps only PdPacket (0x0010).
 """
+import argparse
+import os
 import sys
 import time
 
-import usb.core
-import usb.util
+from pd_decode import Decoder
 
-from pd_decode import pdo, rdo, vdm
-
-SRC_CAPS = []  # last Source_Cap PDOs (Request decoding needs them for PPS)
-
-CTL = {1: "GoodCRC", 3: "Accept", 4: "Reject", 5: "Ping", 6: "PS_RDY",
-       7: "Get_Source_Cap", 8: "Get_Sink_Cap", 12: "Wait", 13: "Soft_Reset",
-       16: "Not_Supported"}
-DAT = {1: "Source_Cap", 2: "Request", 3: "BIST", 4: "Sink_Cap", 15: "Vendor"}
+EVENTS = {0x21: "*** CONNECT ***", 0x22: "*** DISCONNECT ***",
+          0x30: "!!! RX FIFO full: frames may be lost !!!",
+          0x31: "!!! RX FIFO resync: queued frames flushed !!!",
+          0x32: "!!! bad-CRC packet (not captured) !!!",
+          0x33: "*** HARD RESET ***"}
 
 
-def decode_pd(wire, sop=0):
-    if len(wire) < 2:
-        return "runt"
-    hdr = wire[0] | (wire[1] << 8)
-    nobj = (hdr >> 12) & 7
-    typ = hdr & 0x1F
-    if sop:  # SOP'/SOP'': bit 8 is Cable Plug
-        role = "CABLE" if hdr & (1 << 8) else "PORT"
-    else:
-        role = "SRC" if hdr & (1 << 8) else "SNK"
-    rev = {0: "1.0", 1: "2.0", 2: "3.0"}.get((hdr >> 6) & 3, "?")
-    name = (DAT if nobj else CTL).get(typ & 0x0F if nobj else typ, "type%d" % typ)
-    objs = ["%08x" % (int.from_bytes(wire[2 + 4 * i:6 + 4 * i], "little")) for i in range(nobj)]
-    return "%-14s [%s r%s id%d]%s" % (name, role, rev, (hdr >> 9) & 7,
-                                      " " + " ".join(objs) if objs else "")
-
-
-def details(wire, sop):
-    """Decoded data objects of a data message, as indented lines."""
-    global SRC_CAPS
-    if len(wire) < 6:
-        return []
-    hdr = wire[0] | (wire[1] << 8)
-    nobj = (hdr >> 12) & 7
-    objs = [int.from_bytes(wire[2 + 4 * i:6 + 4 * i], "little") for i in range(nobj)]
-    if len(objs) != nobj or not objs or hdr & (1 << 15):  # runt / extended message
-        return []
-    typ = hdr & 0x1F
-    if sop == 0 and typ in (1, 4):  # Source_Cap / Sink_Cap
-        if typ == 1:
-            SRC_CAPS = objs
-        return ["PDO %d: %s" % (n, pdo(o)) for n, o in enumerate(objs, 1)]
-    if sop == 0 and typ == 2:
-        return [rdo(objs[0], SRC_CAPS)]
-    if typ == 15:
-        return vdm(objs, sop, (hdr >> 6) & 3 >= 2)
-    return []
-
-
-def parse_pdpacket(payload):
+def parse_pdpacket(payload, dec):
+    """Print the events/messages of one PdPacket payload; returns
+    (vbus, ibus, cc1, cc2) from its preamble, or None if too short."""
     if len(payload) < 12:
-        return
-    ts, vbus, ibus, cc1, cc2 = (
-        int.from_bytes(payload[0:4], "little"),
+        return None
+    vbus, ibus, cc1, cc2 = (
         int.from_bytes(payload[4:6], "little"),
         int.from_bytes(payload[6:8], "little", signed=True),
         int.from_bytes(payload[8:10], "little"),
@@ -92,11 +58,7 @@ def parse_pdpacket(payload):
                 break
             code = payload[i + 5]
             ets = payload[i + 1] | (payload[i + 2] << 8) | (payload[i + 3] << 16)
-            print("  [%8d ms] %s" % (ets, {0x21: "*** CONNECT ***", 0x22: "*** DISCONNECT ***",
-                                            0x30: "!!! RX FIFO full: frames may be lost !!!",
-                                            0x31: "!!! RX FIFO resync: queued frames flushed !!!",
-                                            0x32: "!!! bad-CRC packet (not captured) !!!",
-                                            0x33: "*** HARD RESET ***"}.get(code, "event %02x" % code)))
+            print("  [%8d ms] %s" % (ets, EVENTS.get(code, "event %02x" % code)))
             i += 6
         elif b0 & 0x80:  # wrapped PD message
             wire_len = (b0 & 0x3F) - 5
@@ -104,21 +66,29 @@ def parse_pdpacket(payload):
                 break
             ets = int.from_bytes(payload[i + 1:i + 5], "little")
             wire = payload[i + 6:i + 6 + wire_len]
-            sop = {0: "", 1: "SOP' ", 2: "SOP'' "}.get(payload[i + 5], "sop%d " % payload[i + 5])
-            print("  [%8d ms] %s%s" % (ets, sop, decode_pd(wire, payload[i + 5])))
-            for line in details(wire, payload[i + 5]):
-                print("               %s" % line)
+            sop = payload[i + 5]
+            line, details = dec.frame(wire, sop)
+            print("  [%8d ms] %s%s" % (ets, {0: "", 1: "SOP' ", 2: "SOP'' "}.get(sop, "sop%d " % sop), line))
+            for d in details:
+                print("               %s" % d)
             i += 6 + wire_len
         else:
             break
     return vbus, ibus, cc1, cc2
 
 
-def main():
-    if sys.argv[1:] == ["--python-path"]:
-        print(sys.executable)
-        return
-    secs = float(sys.argv[1]) if len(sys.argv) > 1 else 20
+def replay(path):
+    dec = Decoder()
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                parse_pdpacket(bytes.fromhex(line), dec)
+
+
+def capture(secs, save):
+    import usb.core
+
     dev = usb.core.find(idVendor=0x5FC9, idProduct=0x0063)
     if dev is None:
         sys.exit("KM003C (5FC9:0063) not found")
@@ -135,8 +105,8 @@ def main():
         dev.write(0x01, bytes([0x0C, tid[0], (attr << 1) & 0xFF, (attr << 1) >> 8]))
         return bytes(dev.read(0x81, 64, timeout=500))
 
-    # arm the sink over the vendor Connect (pd.rs arms via the CDC pdctl verb;
-    # here we just start polling — arm separately with tools/pd.py if needed)
+    out = open(save, "w") if save else None
+    dec = Decoder()
     print("Polling PdPacket (0x0010) for %.0f s (start the engine with pd.py arm / sniff)" % secs)
     end = time.time() + secs
     seen_vbus = None
@@ -153,13 +123,36 @@ def main():
         size = (ext >> 22) & 0x3FF
         if att != 0x0010:  # ADC reply arrived first — skip, poll again
             continue
-        info = parse_pdpacket(r[8:8 + size])
+        payload = r[8:8 + size]
+        if out and size > 12:
+            out.write(payload.hex() + "\n")
+        info = parse_pdpacket(payload, dec)
         if info:
             seen_vbus = info[0]
         if size <= 12:  # preamble only: ring empty, idle a little
             time.sleep(0.02)  # else poll straight away — the 8-slot ring overflows in a burst
+    if out:
+        out.close()
+        if os.environ.get("SUDO_UID"):  # hand the file back to the invoking user
+            os.chown(save, int(os.environ["SUDO_UID"]), int(os.environ["SUDO_GID"]))
     if seen_vbus is not None:
         print("last: VBUS=%d mV" % seen_vbus)
+
+
+def main():
+    if sys.argv[1:] == ["--python-path"]:
+        print(sys.executable)
+        return
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("seconds", nargs="?", type=float, default=20,
+                    help="capture duration (default: %(default)s)")
+    ap.add_argument("--save", metavar="FILE", help="write raw PdPacket payloads (hex) to FILE (default: none)")
+    ap.add_argument("--replay", metavar="FILE", help="decode a --save file instead of capturing (default: none)")
+    a = ap.parse_args()
+    if a.replay:
+        replay(a.replay)
+    else:
+        capture(a.seconds, a.save)
 
 
 if __name__ == "__main__":

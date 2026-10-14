@@ -1089,7 +1089,13 @@ fn rx_frame(p: &mut Pd, now: u32) -> Result<(), u8> {
         return Ok(());
     }
 
-    if mtype == DAT_SOURCE_CAP {
+    if hdr & 0x8000 != 0 {
+        /* extended message: its type numbers are a separate space (type 1
+         * is Source_Capabilities_Extended, not Source_Capabilities) */
+        if p.rev >= REV30 && !p.tx_pend {
+            send(p, CTL_NOT_SUPPORTED, &[])?;
+        }
+    } else if mtype == DAT_SOURCE_CAP {
         p.caps_n = nobj as u8;
         for i in 0..nobj {
             p.caps[i] = u32::from_le_bytes([

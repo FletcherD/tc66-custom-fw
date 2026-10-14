@@ -35,7 +35,7 @@ def main():
         bad = [t - t0 for t, d in es if "bad-CRC" in d]
         msgs, acks = [], []
         for t, d in sop:
-            m = re.match(r"(\S+)\s+\[(SRC|SNK) r\S+ id(\d)\]", d)
+            m = re.match(r"(\S+)\s+\[(SRC|SNK)(?: [DU]FP)? r\S+ id(\d)\]", d)
             if m:
                 (acks if m.group(1) == "GoodCRC" else msgs).append(
                     (t, m.group(2), int(m.group(3)), m.group(1)))

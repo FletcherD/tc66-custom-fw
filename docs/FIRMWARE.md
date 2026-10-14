@@ -718,16 +718,22 @@ PD traffic.
   armed ADC first, then the PD reply on its next IN; it filters by the
   ext-header attribute. One 64-B packet per poll (preamble + one/two events);
   the host polls to drain more.
-- Host tool: `tools/pdcap.py` (uv script, libusb; decodes PDOs, Requests
-  and structured VDMs incl. Discover Identity — cable e-marker vendor /
-  current / speed — via `tools/pd_decode.py`; vendor/product names from the
-  system `usb.ids` (PD shares the USB-IF vendor IDs; cable PD product IDs
-  are vendor-assigned and mostly unlisted; the Cert Stat XID is only
-  searchable on usb.org). Field layouts are checked against the Linux
-  kernel's `include/linux/usb/pd.h` + `pd_vdo.h` (bit-by-bit PD 2.0/3.x VDO
-  comments; Chromium EC's `include/usb_pd_vdo.h` agrees) — the reference to
-  use when extending the decoder; needs root for the
-  vendor interface — `sudo $(uv run -q --script tools/pdcap.py
+- Host tool: `tools/pdcap.py` (uv script, libusb; decodes every control /
+  data / extended message type — PDOs + 5 V PDO flags, RDOs, Discover
+  Identity incl. UFP/DFP/cable/VPD VDOs, SVIDs, Source/Sink_Capabilities_
+  Extended, Status, PPS_Status, Manufacturer_Info, EPR messages; chunked
+  extended messages reassembled — via `tools/pd_decode.py`'s stateful
+  `Decoder`; vendor/product names from the system `usb.ids` (PD shares the
+  USB-IF vendor IDs; PD product IDs are vendor-assigned and mostly
+  unlisted; the Cert Stat XID is only searchable on usb.org). Field layouts
+  come from the USB PD spec (R3.2 V1.2 + R2.0 V1.3 for the older
+  cable/AMA VDOs; free zip in usb.org's document library, "USB Power
+  Delivery"), cross-checked against Linux `include/linux/usb/pd*.h`,
+  Chromium EC `include/usb_pd.h` and ST's stm32-mw-usbpd-core `usbpd_def.h`
+  — use the spec when extending the decoder, and add a vector to
+  `tools/pd_decode_test.py`. `--save FILE` writes the raw PdPacket
+  payloads, `--replay FILE` re-decodes them without the meter. Needs root
+  for the vendor interface — `sudo $(uv run -q --script tools/pdcap.py
   --python-path) tools/pdcap.py 30`). It polls back-to-back while events
   flow: one 64-B packet carries only one or two events and the ring has 8
   slots.

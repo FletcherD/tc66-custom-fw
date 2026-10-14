@@ -113,12 +113,12 @@ def decode_pdo(i, pdo):
     if kind == 0:
         mv, ma = ((pdo >> 10) & 0x3FF) * 50, (pdo & 0x3FF) * 10
         return "PDO %d: fixed  %5.2f V  %.2f A" % (i, mv / 1000, ma / 1000)
-    if kind == 1:
-        lo, hi = ((pdo >> 10) & 0x3FF) * 50, ((pdo >> 20) & 0x3FF) * 50
-        return "PDO %d: variable %.2f-%.2f V %.2f A" % (i, lo / 1000, hi / 1000, (pdo & 0x3FF) / 100)
-    if kind == 2:
+    if kind == 1:  # PD Table 6.6: 01b battery, 10b variable
         lo, hi = ((pdo >> 10) & 0x3FF) * 50, ((pdo >> 20) & 0x3FF) * 50
         return "PDO %d: battery %.2f-%.2f V %d W" % (i, lo / 1000, hi / 1000, (pdo & 0x3FF) // 4)
+    if kind == 2:
+        lo, hi = ((pdo >> 10) & 0x3FF) * 50, ((pdo >> 20) & 0x3FF) * 50
+        return "PDO %d: variable %.2f-%.2f V %.2f A" % (i, lo / 1000, hi / 1000, (pdo & 0x3FF) / 100)
     lo, hi = ((pdo >> 8) & 0xFF) * 100, ((pdo >> 17) & 0xFF) * 100
     return "PDO %d: PPS    %5.2f-%.2f V %.2f A" % (i, lo / 1000, hi / 1000, (pdo & 0x7F) / 20)
 
