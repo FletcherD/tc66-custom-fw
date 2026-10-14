@@ -14,7 +14,8 @@ edition = "2021"
 #   and the powerz PD capture attribute. A granted request RAISES THE OUT
 #   VOLTAGE.
 # - fcp: the untested Huawei FCP/SCP verbs (fcptr fcprd scptr), ~2.1 KB.
-# - dev-board: board debug verbs (i2crd adcrd clkrd keyrd rstrd wdtst idlrd).
+# - dev-board: board debug verbs (i2crd adcrd gpird clkrd keyrd rstrd wdtst
+#   idlrd).
 # - dev-bt: BLE bring-up verbs (btini btcmd btget btrun btsta btspy).
 # - dev-tft: display bring-up verbs (tftfl tftbl tftui uiscr).
 # - dev-verbs: all four groups above.

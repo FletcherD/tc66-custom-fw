@@ -474,8 +474,8 @@ past the ~10 s keepalive deadline).
 
 - **Structure:** all thread-mode (main-loop `pd::service()` + verb handlers —
   one context, so the `PD` static needs no synchronization). Every FUSB302
-  I²C access runs inside `ina::pause` (shared bus). The INT_N pin is unwired/
-  unknown and unneeded: status+interrupt registers are polled every 2 ticks
+  I²C access runs inside `ina::pause` (shared bus). INT_N (PA15) is not used
+  yet: status+interrupt registers are polled every 2 ticks
   (8 ms) once attached (every 12 ticks before); the tight PD timing (GoodCRC in 195 µs) is the chip's
   AUTO_CRC hardware. Idle cost: zero. Active cost: one 7-byte status burst
   per 2 ticks ≈ 1 ms of sampler pause per 8 ms.

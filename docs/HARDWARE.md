@@ -150,6 +150,7 @@ Verbs:
 | `pcprf` | 516 B plaintext | our dev verb: PC-profiler ring dump (u32 counter + 128 u32 PCs; FIRMWARE.md "PC profiler", tools/pcprofile.py) |
 | `i2crd` | `OK`+data / `ER`+diag | our dev verb: `i2crd <addr7> <wlen 0..=2> <w0> <w1> <rlen 0..=32>` raw I²C write-then-read; ER + stage + 3 status bytes (tools/i2cread.py) |
 | `adcrd` | `OK`+u32 / `ER`+stage | our dev verb: `adcrd <ch>` ADC sum-of-16 (tools/adcread.py) |
+| `gpird` | `OK`+3×u16 LE | our dev verb: GPIOA/GPIOB/GPIOF input registers (configures PA15 as input + pull-up first — FUSB302 INT_N) |
 | `clkrd` | `OK`+RCU_CTL+RCU_CFG0 (u32 LE ×2) | our dev verb: clock-tree peek (verified: AHB/APB1/APB2 all /1 = 48 MHz) |
 | `keyrd` | `OK`+raw+held (2 bytes, bit0 = K1, bit1 = K2) | our dev verb: raw PF0/PF1 levels (1 = released) + debounced pressed mask (keys.rs) |
 | `rstrd` | `OK`+u32 LE | our dev verb: RCU_RSTSCK captured at boot (bit 29 = watchdog reset, 28 = software) (wdg.rs, tools/wdgtest.py) |
@@ -182,8 +183,8 @@ unchanged. Verbs are grouped by cargo feature (docs/DEVELOPMENT.md "Feature
 sets"): the product verbs above (`getva query rotat gtrec cfgrd cfgwr updat
 versn eeprd rawva`) are always served; the trigger verbs (`pdctl pdsta pdcap
 pdreq qctrg qc3ct qcdet afctr qcoff`) need `triggers` (in release builds);
-the dev verbs need their group — `dev-board` (`i2crd adcrd clkrd keyrd
-rstrd wdtst idlrd`), `dev-tft` (`uiscr tftfl tftbl tftui`), `dev-bt`
+the dev verbs need their group — `dev-board` (`i2crd adcrd gpird clkrd
+keyrd rstrd wdtst idlrd`), `dev-tft` (`uiscr tftfl tftbl tftui`), `dev-bt`
 (`btini btcmd btget btrun btsta btspy`), `fcp` (the untested
 `fcptr`/`fcprd`/`scptr`) — and `pcprf` its own feature; dev builds carry the
 Makefile's `DEV_FEATURES` subset.
@@ -438,7 +439,13 @@ presents Rd on both CC, so with the engine off a source on IN sees the meter
 as a sink (in parallel with any device on OUT); `pdctl 3` (sniff) drops it —
 with nothing on OUT an Apple charger then turns VBUS off (bench-verified). Verbs +
 host tool in the command table above / tools/pd.py; engine internals in
-FIRMWARE.md "USB-PD sink". The INT_N pin is not needed (registers are polled).
+FIRMWARE.md "USB-PD sink". **INT_N = PA15** (open-drain, active-low; needs
+the GPIO's internal pull-up, as stock configures it) — bench-verified: an
+unmasked I_COMP_CHNG pulls PA15 low, reading Interrupt or setting
+Control0.INT_MASK releases it, no other GPIOA/B/F pin moves. Our engine
+polls instead (not used yet). **The chip's VBUS pin is not wired to VBUS**:
+Status0.VBUSOK stays 0 with 5 V present, so MEAS_VBUS is useless — measure
+CC only.
 The chip shares the INA226/EEPROM I²C bus — all access inside `ina::pause`.
 
 ### D+/D− trigger network (QC / AFC / FCP / SCP)

@@ -15,9 +15,10 @@
 //! Everything runs in thread mode from the main loop (`service()`, ~every
 //! 8 ms while active) and the verb handlers — same context, so the `PD`
 //! static is thread-exclusive (no ISR ever touches it). All I²C goes
-//! through `ina::pause` per the bus rule. The INT_N pin wiring is unknown
-//! (and unneeded): the FUSB302 interrupt/status registers are polled; the
-//! tight timing (GoodCRC within 195 µs) is AUTO_CRC hardware.
+//! through `ina::pause` per the bus rule. INT_N is on PA15 (active-low,
+//! needs the internal pull-up — docs/HARDWARE.md) but unused: the FUSB302
+//! interrupt/status registers are polled; the tight timing (GoodCRC within
+//! 195 µs) is AUTO_CRC hardware.
 //!
 //! Poll cost while armed: one 7-byte status burst per 2 ticks ≈ 1 ms of
 //! sampler pause per 8 ms — the measurement window stretches slightly
@@ -348,7 +349,7 @@ fn arm_as(state: u8) -> Result<(), u8> {
     crate::board::delay_ms(2);
     wr(R_POWER, 0x0F)?;
     wr(R_CONTROL3, C3_RETRIES)?;
-    /* INT_N pin unused: mask everything, we poll */
+    /* INT_N (PA15) unused: mask everything, we poll */
     wr(R_MASK, 0xFF)?;
     wr(R_MASKA, 0xFF)?;
     wr(R_MASKB, 0x01)?;

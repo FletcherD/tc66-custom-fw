@@ -81,7 +81,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 132;
+const BUILD_ID: u32 = 133;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -484,6 +484,9 @@ fn on_packet(buf: &[u8]) {
     } else if match5(buf, b"adcrd") {
         #[cfg(feature = "dev-board")]
         do_adcrd(buf);
+    } else if match5(buf, b"gpird") {
+        #[cfg(feature = "dev-board")]
+        do_gpird();
     } else if match5(buf, b"clkrd") {
         #[cfg(feature = "dev-board")]
         do_clkrd();
@@ -1045,6 +1048,24 @@ fn do_adcrd(buf: &[u8]) {
 /// QUIRKS §1's loose end: the bootloader hands off the clock tree and we
 /// never touch the AHB/APB prescalers (CFG0[10:4]) — the UM requires APB1
 /// > 24 MHz for the USBD. Read-only register peek.
+/// dev verb: gpird -> "OK" + GPIOA/GPIOB/GPIOF input registers (u16 LE
+/// each). Configures PA15 as input with pull-up first (as stock does —
+/// candidate FUSB302 INT_N).
+#[cfg(feature = "dev-board")]
+#[inline(never)]
+fn do_gpird() {
+    let gpioa = unsafe { &*pac::Gpioa::ptr() };
+    let gpiob = unsafe { &*pac::Gpiob::ptr() };
+    let gpiof = unsafe { &*pac::Gpiof::ptr() };
+    gpioa.ctl().modify(|_, w| w.ctl15().input());
+    gpioa.pud().modify(|_, w| w.pud15().pull_up());
+    let mut r = *b"OK\0\0\0\0\0\0";
+    r[2..4].copy_from_slice(&(gpioa.istat().read().bits() as u16).to_le_bytes());
+    r[4..6].copy_from_slice(&(gpiob.istat().read().bits() as u16).to_le_bytes());
+    r[6..8].copy_from_slice(&(gpiof.istat().read().bits() as u16).to_le_bytes());
+    write_all(&r);
+}
+
 #[cfg(feature = "dev-board")]
 #[inline(never)]
 fn do_clkrd() {
