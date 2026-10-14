@@ -31,6 +31,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use crate::i2c;
 use gd32f1::gd32f150 as pac;
 use crate::ina;
+use crate::pdspec::*;
+use crate::pdsta::{self, *};
 
 const ADDR: u8 = 0x22;
 
@@ -52,17 +54,21 @@ const R_STATUS0: u8 = 0x40;
 const R_FIFOS: u8 = 0x43;
 
 /* Switches0 */
+const SW0_NONE: u8 = 0x00; /* no pulldowns, no CC measure */
 const SW0_PDWN: u8 = 0x03; /* Rd on both CC */
 const SW0_MEAS_CC1: u8 = 0x04;
 const SW0_MEAS_CC2: u8 = 0x08;
 /* Switches1: SPECREV in bits 6:5 (01 = PD 2.0, 10 = PD 3.0 — also sets the
  * hardware GoodCRC's rev field) + AUTO_CRC + TXCC1/2 */
 const SW1_AUTO_CRC: u8 = 0x04;
-/* header/Switches1 rev codes */
-const REV20: u8 = 1;
-const REV30: u8 = 2;
+const SW1_TXCC1: u8 = 0x01;
+const SW1_TXCC2: u8 = 0x02;
+const SW1_SPECREV_SHIFT: u8 = 5;
+/* header / Switches1 rev codes (Message Header Specification Revision) */
+const REV20: u8 = REV_2_0 as u8;
+const REV30: u8 = REV_3_X as u8;
 fn sw1_rev(rev: u8) -> u8 {
-    rev << 5
+    rev << SW1_SPECREV_SHIFT
 }
 /* Control0/1 */
 const C0_TX_FLUSH: u8 = 0x40; /* INT_MASK (0x20) clear: INT_N live */
@@ -80,8 +86,12 @@ const BACKUP_POLL: u32 = 12;
 const C1_RX_FLUSH: u8 = 0x04;
 /* also receive SOP' / SOP'' (cable traffic) and their _DEBUG variants */
 const C1_ENSOP12: u8 = 0x63;
-/* Control3: AUTO_RETRY + N_RETRIES=3 */
+/* Control3: AUTO_RETRY + N_RETRIES=3; SEND_HARD_RESET (self-clearing) */
 const C3_RETRIES: u8 = 0x07;
+const C3_SEND_HARD_RESET: u8 = 0x40;
+/* Power: PWR[3:0] all on — bandgap/wake, receiver + current refs,
+ * measure block, internal oscillator */
+const POWER_ALL: u8 = 0x0F;
 /* Reset */
 const RST_SW: u8 = 0x01;
 const RST_PD: u8 = 0x02;
@@ -90,48 +100,36 @@ const IA_RETRYFAIL: u8 = 0x10;
 const IA_HARDSENT: u8 = 0x08;
 const IA_TXSENT: u8 = 0x04;
 const IA_HARDRST: u8 = 0x01;
-/* Status0 / Status1 (VBUSOK is Status0 bit7, reported raw via pdsta) */
-const S0_ACTIVITY: u8 = 0x40;
-const S0_COMP: u8 = 0x20; /* CC above the MDAC threshold */
-const S0_CRC_CHK: u8 = 0x10; /* last received packet's CRC was good */
+/* Status0 bits: pdsta.rs (S0_*, reported raw via pdsta); Status1 */
 const IR_CRC_CHK: u8 = 0x10; /* Interrupt: a packet's CRC was checked */
-const S0_BC_LVL: u8 = 0x03;
 const S1_RX_EMPTY: u8 = 0x20;
 const S1_RX_FULL: u8 = 0x10;
 
-/* TX FIFO tokens */
+/* TX FIFO tokens (datasheet Table 41; SOP1/SOP2 there = Sync-1/Sync-2) */
 const TK_TXON: u8 = 0xA1;
-const TK_SOP1: u8 = 0x12;
-const TK_SOP2: u8 = 0x13;
+const TK_SYNC1: u8 = 0x12;
+const TK_SYNC2: u8 = 0x13;
 const TK_PACKSYM: u8 = 0x80;
 const TK_JAM_CRC: u8 = 0xFF;
 const TK_EOP: u8 = 0x14;
 const TK_TXOFF: u8 = 0xFE;
 
-/* PD message types (rev 2.0) */
-const CTL_GOODCRC: u8 = 1;
-const CTL_ACCEPT: u8 = 3;
-const CTL_REJECT: u8 = 4;
-const CTL_PS_RDY: u8 = 6;
-const CTL_GET_SRC_CAP: u8 = 7;
-const CTL_GET_SNK_CAP: u8 = 8;
-const CTL_WAIT: u8 = 12;
-const CTL_SOFT_RESET: u8 = 13;
-const CTL_NOT_SUPPORTED: u8 = 16; /* rev-3.0 only */
-const CTL_PING: u8 = 5;
-const DAT_SOURCE_CAP: u8 = 1;
-const DAT_REQUEST: u8 = 2;
-const DAT_SINK_CAP: u8 = 4;
+/* RX FIFO token class, bits 7:5 of a packet's first byte (Table 42) */
+const RX_TOKEN_CLASS_SHIFT: u8 = 5;
+const RX_TOKEN_SOP: u8 = 7;
+const RX_TOKEN_SOP1: u8 = 6;
+const RX_TOKEN_SOP2: u8 = 5;
+const RX_TOKEN_SOP1_DEBUG: u8 = 4;
+const RX_TOKEN_SOP2_DEBUG: u8 = 3;
 
-/* states (pdsta byte 0; tools/pd.py names them) */
-const ST_OFF: u8 = 0;
-const ST_WAIT_ATTACH: u8 = 1;
-const ST_LISTEN: u8 = 2; /* attached, BMC up; caps_n says if caps seen */
-const ST_WAIT_ACCEPT: u8 = 3;
-const ST_WAIT_PSRDY: u8 = 4;
-const ST_CONTRACT: u8 = 5;
-const ST_RD_CYCLE: u8 = 6; /* Rd dropped to force the source to re-attach */
-const ST_SNIFF: u8 = 7; /* listen-only: no Rd, no GoodCRC, no TX (pdctl 3) */
+/* INT_N on PA15 */
+const INT_N_PIN: u32 = 15;
+/* pdsnd type byte: message type, this bit set for an extended message */
+#[cfg(feature = "dev-pd")]
+const PDSND_EXTENDED: u8 = 0x80;
+/* the Sink_Capabilities we answer Get_Sink_Cap with: fixed 5 V, 100 mA */
+const SINK_PDO_MV: u32 = 5000;
+const SINK_PDO_MA: u32 = 100;
 
 /* err codes carried in Pd.err (i2c stages are 1..0x0F | 0x80) */
 const E_RETRYFAIL: u8 = 0xE1;
@@ -147,13 +145,10 @@ const SNIFF_OPEN_MDAC: u8 = 0x3F;
  * the charger's first VDM to the phone was lost 3/3 (never even CRC-
  * checked); SDAC 0x10-0x1C caught it 12/12; 0x08 and >= 0x28 lost others. */
 const SLICE: u8 = 0x58;
-/* capture event codes (ours, beside KM003C's 0x21/0x22): RX FIFO went full;
- * RX FIFO resync (a non-SOP token: the queued frames were flushed) */
-const CAP_RX_FULL: u8 = 0x30;
-const CAP_RX_RESYNC: u8 = 0x31;
-const CAP_BAD_CRC: u8 = 0x32; /* sniff: a packet arrived with a bad CRC */
-const CAP_HARD_RESET: u8 = 0x33; /* sniff: hard reset on the wire */
-/* verb arg errors: 0x0D bad/missing PPS setpoint, 0x0E unsupported PDO kind */
+/* verb errors (ER codes) */
+const E_BAD_PPS_SETPOINT: u8 = 0x0D; /* missing / outside the APDO's range */
+const E_PDO_KIND: u8 = 0x0E; /* unsupported PDO kind, or PPS at rev 2.0 */
+const E_BAD_ARGS: u8 = 0x0F; /* bad args / bad state (project-wide code) */
 
 pub struct Pd {
     state: u8,
@@ -305,19 +300,20 @@ fn cap_msg(hdr: u16, objs: &[u8], sop: u8) {
     crate::pdinfo::on_msg(hdr, objs, sop);
     let wire = 2 + objs.len();
     let mut e = [0u8; CAP_SLOT_LEN];
-    e[0] = 0x80 | (wire as u8 + 5); /* size_flag: low 6 bits = N+5 */
-    e[1..5].copy_from_slice(&now_ms().to_le_bytes());
-    e[5] = sop;
-    e[6..8].copy_from_slice(&hdr.to_le_bytes());
-    e[8..8 + objs.len()].copy_from_slice(objs);
-    cap_push(&e[..6 + wire]);
+    e[0] = EV_WRAPPED | (wire as u8 + EV_WRAPPED_SIZE_BIAS);
+    e[EV_WRAPPED_TS..EV_WRAPPED_TS + 4].copy_from_slice(&now_ms().to_le_bytes());
+    e[EV_WRAPPED_SOP] = sop;
+    e[EV_WRAPPED_WIRE..EV_WRAPPED_WIRE + 2].copy_from_slice(&hdr.to_le_bytes());
+    e[EV_WRAPPED_WIRE + 2..EV_WRAPPED_WIRE + 2 + objs.len()].copy_from_slice(objs);
+    cap_push(&e[..EV_WRAPPED_WIRE + wire]);
 }
 
 /// Capture a connect (0x21) / disconnect (0x22) / CAP_RX_* event.
 fn cap_conn(code: u8) {
     crate::pdinfo::on_event(code);
     let ms = now_ms();
-    let e = [0x45, ms as u8, (ms >> 8) as u8, (ms >> 16) as u8, 0x00, code];
+    let t = ms.to_le_bytes(); /* LE24 timestamp */
+    let e: [u8; EV_CONNECTION_LEN] = [EV_CONNECTION, t[0], t[1], t[2], 0, code];
     cap_push(&e);
 }
 
@@ -325,15 +321,15 @@ fn cap_conn(code: u8) {
 /// 12-byte measurement preamble, then as many whole events as fit. Returns
 /// the payload length. Drains the events it emits.
 pub fn drain_pd_packet(out: &mut [u8]) -> usize {
-    if out.len() < 12 {
+    if out.len() < PRE_LEN {
         return 0;
     }
-    out[0..4].copy_from_slice(&PD_TS_MS.load(Ordering::Relaxed).to_le_bytes());
-    out[4..6].copy_from_slice(&(PD_VBUS_MV.load(Ordering::Relaxed) as u16).to_le_bytes());
-    out[6..8].copy_from_slice(&(PD_IBUS_MA.load(Ordering::Relaxed) as u16).to_le_bytes());
-    out[8..10].copy_from_slice(&(PD_CC1_MV.load(Ordering::Relaxed) as u16).to_le_bytes());
-    out[10..12].copy_from_slice(&(PD_CC2_MV.load(Ordering::Relaxed) as u16).to_le_bytes());
-    let mut len = 12;
+    out[PRE_TS..PRE_TS + 4].copy_from_slice(&PD_TS_MS.load(Ordering::Relaxed).to_le_bytes());
+    out[PRE_VBUS..PRE_VBUS + 2].copy_from_slice(&(PD_VBUS_MV.load(Ordering::Relaxed) as u16).to_le_bytes());
+    out[PRE_IBUS..PRE_IBUS + 2].copy_from_slice(&(PD_IBUS_MA.load(Ordering::Relaxed) as u16).to_le_bytes());
+    out[PRE_CC1..PRE_CC1 + 2].copy_from_slice(&(PD_CC1_MV.load(Ordering::Relaxed) as u16).to_le_bytes());
+    out[PRE_CC2..PRE_CC2 + 2].copy_from_slice(&(PD_CC2_MV.load(Ordering::Relaxed) as u16).to_le_bytes());
+    let mut len = PRE_LEN;
     loop {
         let t = CAP.tail.load(Ordering::Relaxed);
         let h = CAP.head.load(Ordering::Acquire);
@@ -399,7 +395,7 @@ fn arm_as(state: u8) -> Result<(), u8> {
     p.state = ST_OFF; /* stop service() touching the chip mid-config */
     wr(R_RESET, RST_SW)?;
     crate::board::delay_ms(2);
-    wr(R_POWER, 0x0F)?;
+    wr(R_POWER, POWER_ALL)?;
     wr(R_CONTROL3, C3_RETRIES)?;
     let sniff = state == ST_SNIFF;
     wr(R_MASK, if sniff { MASK_SNIFF } else { MASK_ACTIVITY_ONLY })?;
@@ -414,7 +410,7 @@ fn arm_as(state: u8) -> Result<(), u8> {
      * the chip's dead-Rd defaults and stopped listening for PD — only a
      * detach/re-attach makes it start over (bench-hit with an Apple 20 W).
      * The cycle costs nothing when no source is attached yet. */
-    wr(R_SWITCHES0, 0x00)?;
+    wr(R_SWITCHES0, SW0_NONE)?;
     wr(R_SWITCHES1, sw1_rev(REV20))?;
     crate::pdinfo::reset();
     *p = Pd {
@@ -461,26 +457,28 @@ pub fn off() -> Result<(), u8> {
 
 /// `pdsta` payload: 22 bytes of engine state.
 #[inline(never)]
-pub fn status(out: &mut [u8; 22]) {
+pub fn status(out: &mut [u8; pdsta::LEN]) {
     let p = pd();
-    out[0] = p.state;
-    out[1] = p.cc;
-    out[2] = p.caps_n;
-    out[3] = if p.state == ST_SNIFF { p.sink as u8 } else { p.contract };
-    out[4] = p.req_obj;
-    out[5] = p.err;
-    out[6] = p.events;
-    out[7] = p.status0;
-    out[8] = p.status1;
-    out[9] = p.msg_id;
-    out[10..12].copy_from_slice(&p.rx_msgs.to_le_bytes());
-    out[12] = p.detach;
-    out[13] = p.rev; /* negotiated header rev code (1 = PD 2.0, 2 = PD 3.0) */
-    for i in 0..3 {
-        out[14 + 2 * i..16 + 2 * i].copy_from_slice(&p.rx_hdr[i].to_le_bytes());
+    out[pdsta::STATE] = p.state;
+    out[pdsta::CC] = p.cc;
+    out[pdsta::CAPS] = p.caps_n;
+    out[pdsta::CONTRACT] = if p.state == ST_SNIFF { p.sink as u8 } else { p.contract };
+    out[pdsta::REQ_OBJ] = p.req_obj;
+    out[pdsta::ERR] = p.err;
+    out[pdsta::EVENTS] = p.events;
+    out[pdsta::STATUS0] = p.status0;
+    out[pdsta::STATUS1] = p.status1;
+    out[pdsta::MSG_ID] = p.msg_id;
+    out[pdsta::RX_COUNT..pdsta::RX_COUNT + 2].copy_from_slice(&p.rx_msgs.to_le_bytes());
+    out[pdsta::DETACH] = p.detach;
+    out[pdsta::REV] = p.rev;
+    for (i, h) in p.rx_hdr.iter().enumerate() {
+        out[pdsta::RX_HDRS + 2 * i..pdsta::RX_HDRS + 2 * i + 2].copy_from_slice(&h.to_le_bytes());
     }
-    out[20] = p.tx_pend as u8 | (p.sop1 as u8) << 1 | (p.asked as u8) << 2;
-    out[21] = p.err_reg;
+    out[pdsta::FLAGS] = if p.tx_pend { FLAG_TX_PEND } else { 0 }
+        | if p.sop1 { FLAG_CABLE_LISTEN } else { 0 }
+        | if p.asked { FLAG_ASKED } else { 0 };
+    out[pdsta::ERR_REG] = p.err_reg;
 }
 
 pub const MODE_OFF: u8 = 0;
@@ -538,35 +536,34 @@ pub fn caps(out: &mut [u8; 28]) -> u8 {
 pub fn request(idx: u8, mv: u16, ma: u16) -> Result<(), u8> {
     let p = pd();
     if p.state < ST_LISTEN || idx == 0 || idx > p.caps_n {
-        return Err(0x0F);
+        return Err(E_BAD_ARGS);
     }
     let pdo = p.caps[idx as usize - 1];
     p.err = 0;
-    match pdo >> 30 {
-        0 => {
-            /* fixed supply: operating = max = the PDO's current limit */
-            let ma10 = pdo & 0x3FF;
-            send_rdo(p, idx, (idx as u32) << 28 | 1 << 24 | ma10 << 10 | ma10)
-        }
-        3 if pdo >> 28 & 3 == 0 => {
-            /* PPS APDO (rev 3.0 only): 20 mV / 50 mA RDO units */
+    match PDO_TYPE.get(pdo) {
+        PDO_FIXED => send_rdo(p, idx, rdo_fixed(idx, pdo)),
+        PDO_APDO if APDO_TYPE.get(pdo) == APDO_PPS => {
+            /* PPS APDO (rev 3.0 only) */
             if p.rev < REV30 {
-                return Err(0x0E);
+                return Err(E_PDO_KIND);
             }
-            let min_mv = (pdo >> 8 & 0xFF) * 100;
-            let max_mv = (pdo >> 17 & 0xFF) * 100;
-            let max_ma = (pdo & 0x7F) * 50;
+            let min_mv = PPS_MIN_VOLTAGE.val(pdo);
+            let max_mv = PPS_MAX_VOLTAGE.val(pdo);
+            let max_ma = PPS_MAX_CURRENT.val(pdo);
             let ma = if ma == 0 { max_ma as u16 } else { ma };
             if (mv as u32) < min_mv || mv as u32 > max_mv || ma as u32 > max_ma {
-                return Err(0x0D);
+                return Err(E_BAD_PPS_SETPOINT);
             }
             send_rdo(
                 p,
                 idx,
-                (idx as u32) << 28 | 1 << 24 | (mv as u32 / 20) << 9 | (ma as u32 / 50),
+                RDO_OBJECT_POSITION.put(idx as u32)
+                    | RDO_NO_USB_SUSPEND.put(1)
+                    | RDO_PPS_VOLTAGE.put(mv as u32 / RDO_PPS_VOLTAGE.unit)
+                    | RDO_APDO_CURRENT.put(ma as u32 / RDO_APDO_CURRENT.unit),
             )
         }
-        _ => Err(0x0E), /* variable/battery APDO kinds: not supported */
+        _ => Err(E_PDO_KIND), /* variable / battery / AVS: not supported */
     }
 }
 
@@ -580,11 +577,11 @@ pub fn request(idx: u8, mv: u16, ma: u16) -> Result<(), u8> {
 pub fn send_raw(t: u8, objs: &[u8]) -> Result<(), u8> {
     let p = pd();
     if p.state != ST_CONTRACT || p.tx_pend || objs.len() % 4 != 0 || objs.len() > 28 {
-        return Err(0x0F);
+        return Err(E_BAD_ARGS);
     }
     p.asked = true;
     p.events = 0; /* pdsta then shows what this exchange raised */
-    send_frame(p, t, (objs.len() / 4) as u8, objs)
+    send_frame(p, HDR_MSG_TYPE.get(t as u32), t & PDSND_EXTENDED != 0, objs)
 }
 
 /// `pdctl 2`: send a PD Hard Reset (Control3 SEND_HARD_RESET); while
@@ -600,24 +597,23 @@ pub fn hard_reset() -> Result<(), u8> {
          * id): both ends reset, the source cycles VBUS and renegotiates with
          * the sink — a re-plug without unplugging. TX driver on the locked
          * CC only until I_HARDSENT (sniff_poll turns it off again). */
-        let txcc = match p.cc {
-            1 => 0x01,
-            2 => 0x02,
-            _ => return Err(0x0F),
-        };
+        if p.cc == 0 {
+            return Err(E_BAD_ARGS);
+        }
+        let txcc = txcc(p);
         wr(R_SWITCHES1, sw1_rev(REV20) | txcc)?;
         /* the transmitter only drives after a PD-logic reset with TXCC set
          * (bench: without it HARDSENT fires but nothing reaches the wire) */
         wr(R_RESET, RST_PD)?;
-        wr(R_CONTROL3, C3_RETRIES | 0x40)?; /* SEND_HARD_RESET, self-clearing */
+        wr(R_CONTROL3, C3_RETRIES | C3_SEND_HARD_RESET)?;
         p.tx_pend = true;
         p.req_tick = ina::ticks();
         return Ok(());
     }
     if p.state < ST_LISTEN {
-        return Err(0x0F);
+        return Err(E_BAD_ARGS);
     }
-    wr(R_CONTROL3, C3_RETRIES | 0x40)?; /* self-clearing */
+    wr(R_CONTROL3, C3_RETRIES | C3_SEND_HARD_RESET)?;
     p.contract = 0;
     p.req_obj = 0;
     p.state = ST_LISTEN;
@@ -699,7 +695,7 @@ fn int_n_init() {
 #[inline(always)]
 fn int_n_low() -> bool {
     let gpioa = unsafe { &*pac::Gpioa::ptr() };
-    gpioa.istat().read().bits() & (1 << 15) == 0
+    gpioa.istat().read().bits() & (1 << INT_N_PIN) == 0
 }
 
 /// The idle checks are inlined into the (fast-flash) main loop: a cold call
@@ -775,7 +771,7 @@ fn service_due() {
      * re-Requests within ~10 s — re-send the standing RDO every 8 s */
     if p.state == ST_CONTRACT
         && p.contract > 0
-        && p.caps[p.contract as usize - 1] >> 30 == 3
+        && PDO_TYPE.get(p.caps[p.contract as usize - 1]) == PDO_APDO
         && now.wrapping_sub(p.pps_tick) >= 2000
     {
         let (idx, rdo) = (p.req_obj, p.last_rdo);
@@ -821,7 +817,7 @@ fn attach_poll(p: &mut Pd) -> Result<(), u8> {
     p.detach = 0;
     p.state = ST_LISTEN;
     p.cap_ask_tick = ina::ticks();
-    cap_conn(0x21); /* KM003C PD capture: connect */
+    cap_conn(CAP_CONNECT);
     Ok(())
 }
 
@@ -852,7 +848,7 @@ fn sniff_poll(p: &mut Pd) -> Result<(), u8> {
     }
     if (if p.cc == 1 { p.vcc1_mv } else { p.vcc2_mv }) < 200 {
         if p.sink {
-            cap_conn(0x22);
+            cap_conn(CAP_DISCONNECT);
         }
         crate::pdinfo::source_gone();
         p.cc = 0;
@@ -887,7 +883,7 @@ fn sniff_poll(p: &mut Pd) -> Result<(), u8> {
             if p.detach >= 2 {
                 p.sink = loaded;
                 p.detach = 0;
-                cap_conn(if loaded { 0x21 } else { 0x22 });
+                cap_conn(if loaded { CAP_CONNECT } else { CAP_DISCONNECT });
             }
         } else {
             p.detach = 0;
@@ -950,9 +946,9 @@ fn rx_flush(p: &Pd) -> Result<(), u8> {
 
 fn txcc(p: &Pd) -> u8 {
     if p.cc == 1 {
-        0x01
+        SW1_TXCC1
     } else {
-        0x02
+        SW1_TXCC2
     }
 }
 
@@ -985,12 +981,12 @@ fn rx_capture(p: &mut Pd) -> Result<(u16, u8, [u8; 32]), u8> {
     let mut body = [0u8; 32]; /* 7·4 objects + 4 CRC max */
     rd(R_FIFOS, &mut head)?;
     /* token class (Table 42): 111 SOP, 110 SOP', 101 SOP'' */
-    let sop = match head[0] >> 5 {
-        7 => 0,
-        6 => 1,
-        5 => 2,
-        4 => 3, /* SOP'_DEBUG */
-        3 => 4, /* SOP''_DEBUG */
+    let sop = match head[0] >> RX_TOKEN_CLASS_SHIFT {
+        RX_TOKEN_SOP => SOP,
+        RX_TOKEN_SOP1 => SOP1,
+        RX_TOKEN_SOP2 => SOP2,
+        RX_TOKEN_SOP1_DEBUG => SOP1_DEBUG,
+        RX_TOKEN_SOP2_DEBUG => SOP2_DEBUG,
         _ => {
             rx_flush(p)?;
             cap_conn(CAP_RX_RESYNC);
@@ -998,8 +994,8 @@ fn rx_capture(p: &mut Pd) -> Result<(u16, u8, [u8; 32]), u8> {
         }
     };
     let hdr = u16::from_le_bytes([head[1], head[2]]);
-    let nobj = ((hdr >> 12) & 7) as usize;
-    rd(R_FIFOS, &mut body[..4 * nobj + 4])?;
+    let nobj = HDR_NUM_OBJECTS.get(hdr.into()) as usize;
+    rd(R_FIFOS, &mut body[..4 * nobj + 4])?; /* objects + CRC */
     p.rx_msgs = p.rx_msgs.wrapping_add(1);
     p.rx_hdr = [hdr, p.rx_hdr[0], p.rx_hdr[1]];
     cap_msg(hdr, &body[..4 * nobj], sop); /* KM003C PD capture */
@@ -1056,7 +1052,7 @@ fn active_poll(p: &mut Pd, now: u32) -> Result<(), u8> {
             p.req_obj = 0;
             p.state = ST_WAIT_ATTACH;
             wr(R_SWITCHES1, sw1_rev(REV20))?;
-            cap_conn(0x22); /* KM003C PD capture: disconnect */
+            cap_conn(CAP_DISCONNECT);
             crate::pdinfo::source_gone();
             return Ok(());
         }
@@ -1096,7 +1092,7 @@ fn active_poll(p: &mut Pd, now: u32) -> Result<(), u8> {
      * armed — ask every ~500 ms */
     if p.state == ST_LISTEN && p.caps_n == 0 && !p.sop1 && now.wrapping_sub(p.cap_ask_tick) > 125 {
         p.cap_ask_tick = now;
-        send(p, CTL_GET_SRC_CAP, &[])?;
+        send(p, CTRL_GET_SOURCE_CAP, &[])?;
     }
     Ok(())
 }
@@ -1106,82 +1102,87 @@ fn active_poll(p: &mut Pd, now: u32) -> Result<(), u8> {
 #[inline(never)]
 fn rx_frame(p: &mut Pd, now: u32) -> Result<(), u8> {
     let (hdr, sop, body) = rx_capture(p)?;
-    if hdr == 0 || sop != 0 {
+    if hdr == 0 || sop != SOP {
         return Ok(()); /* FIFO skew (flushed) or not for us */
     }
-    let nobj = ((hdr >> 12) & 7) as usize;
-    let mtype = (hdr & 0x1F) as u8; /* 5-bit in rev 3.0; bit 4 is 0 in 2.0 */
+    let h = u32::from(hdr);
+    let nobj = HDR_NUM_OBJECTS.get(h) as usize;
+    let mtype = HDR_MSG_TYPE.get(h); /* 5-bit in rev 3.0; bit 4 is 0 in 2.0 */
+    let extended = HDR_EXTENDED.get(h) != 0;
     if p.sop1 {
         /* listen-only: nothing was acknowledged; the first caps end it */
-        if hdr & 0x8000 == 0 && nobj > 0 && mtype == DAT_SOURCE_CAP {
+        if !extended && nobj > 0 && mtype == DATA_SOURCE_CAP {
             sop1_end(p)?;
         }
         return Ok(());
     }
     /* the first message after a pdsnd request is its answer */
-    let answer = p.asked && !(nobj == 0 && mtype == CTL_GOODCRC);
+    let answer = p.asked && !(nobj == 0 && mtype == CTRL_GOODCRC);
     if answer {
         p.asked = false;
     }
 
     if nobj == 0 {
         match mtype {
-            CTL_GOODCRC => {
-                if (hdr >> 9 & 7) as u8 == p.msg_id {
+            CTRL_GOODCRC => {
+                if HDR_MSG_ID.get(h) == p.msg_id as u32 {
                     tx_done(p);
                 }
             }
-            CTL_ACCEPT => {
+            CTRL_ACCEPT => {
                 if p.state == ST_WAIT_ACCEPT {
                     p.state = ST_WAIT_PSRDY;
                     p.req_tick = now;
                 }
             }
-            CTL_REJECT | CTL_WAIT => {
+            CTRL_REJECT | CTRL_WAIT => {
                 if p.state == ST_WAIT_ACCEPT {
                     p.err = E_REJECT;
                     p.state = ST_LISTEN;
                 }
             }
-            CTL_PS_RDY => {
+            CTRL_PS_RDY => {
                 if p.state == ST_WAIT_PSRDY {
                     p.contract = p.req_obj;
                     p.state = ST_CONTRACT;
                 }
             }
-            CTL_GET_SNK_CAP => {
+            CTRL_GET_SINK_CAP => {
                 /* one fixed sink PDO: 5 V, 100 mA */
                 if !p.tx_pend {
-                    send_data(p, DAT_SINK_CAP, (100u32 << 10) | 10)?;
+                    let pdo = PDO_TYPE.put(PDO_FIXED)
+                        | FIXED_VOLTAGE.put(SINK_PDO_MV / FIXED_VOLTAGE.unit)
+                        | FIXED_MAX_CURRENT.put(SINK_PDO_MA / FIXED_MAX_CURRENT.unit);
+                    send_data(p, DATA_SINK_CAP, pdo)?;
                 }
             }
-            CTL_SOFT_RESET => {
+            CTRL_SOFT_RESET => {
                 p.msg_id = 0;
-                send(p, CTL_ACCEPT, &[])?;
+                send(p, CTRL_ACCEPT, &[])?;
                 p.state = ST_LISTEN;
                 p.cap_ask_tick = now;
             }
-            CTL_PING | CTL_NOT_SUPPORTED => {}
+            CTRL_PING | CTRL_NOT_SUPPORTED => {}
             _ => {
                 /* swaps, rev-3.0 extensions: a PD 3.0 port must answer
                  * Not_Supported; 2.0 lets GoodCRC (hardware) stand alone.
                  * tx_pend gate: one reply at a time — a burst (Apple sends
                  * ~7 VDMs) must not duplicate msg ids / flush TX mid-flight */
                 if p.rev >= REV30 && !p.tx_pend && !answer {
-                    send(p, CTL_NOT_SUPPORTED, &[])?;
+                    send(p, CTRL_NOT_SUPPORTED, &[])?;
                 }
             }
         }
         return Ok(());
     }
 
-    if hdr & 0x8000 != 0 {
+    if extended {
         /* extended message: its type numbers are a separate space (type 1
          * is Source_Capabilities_Extended, not Source_Capabilities) */
         if p.rev >= REV30 && !p.tx_pend && !answer {
-            send(p, CTL_NOT_SUPPORTED, &[])?;
+            send(p, CTRL_NOT_SUPPORTED, &[])?;
         }
-    } else if mtype == DAT_SOURCE_CAP {
+    } else if mtype == DATA_SOURCE_CAP {
         p.caps_n = nobj as u8;
         for i in 0..nobj {
             p.caps[i] = u32::from_le_bytes([
@@ -1193,7 +1194,7 @@ fn rx_frame(p: &mut Pd, now: u32) -> Result<(), u8> {
         }
         /* negotiate the spec rev down from the source's caps header (this
          * also retargets the hardware GoodCRC rev field) */
-        let rev = (((hdr >> 6) & 3) as u8).clamp(REV20, REV30);
+        let rev = (HDR_SPEC_REV.get(h) as u8).clamp(REV20, REV30);
         if rev != p.rev {
             p.rev = rev;
             wr(R_SWITCHES1, sw1_rev(rev) | SW1_AUTO_CRC | txcc(p))?;
@@ -1201,11 +1202,10 @@ fn rx_frame(p: &mut Pd, now: u32) -> Result<(), u8> {
         /* a sink that GoodCRCs caps MUST Request within tSenderResponse or
          * the source hard-resets: immediately take PDO 1 (vSafe5V — no
          * output-voltage change). `pdreq` renegotiates from there. */
-        let ma10 = p.caps[0] & 0x3FF;
-        send_rdo(p, 1, 1 << 28 | 1 << 24 | ma10 << 10 | ma10)?;
+        send_rdo(p, 1, rdo_fixed(1, p.caps[0]))?;
     } else if p.rev >= REV30 && !p.tx_pend && !answer {
         /* VDMs, Alert, … — PD 3.0 requires Not_Supported (tx_pend-gated) */
-        send(p, CTL_NOT_SUPPORTED, &[])?;
+        send(p, CTRL_NOT_SUPPORTED, &[])?;
     }
     Ok(())
 }
@@ -1229,7 +1229,7 @@ fn tx_done(p: &mut Pd) {
 /// WAIT_ACCEPT. The RDO is remembered for the PPS keepalive.
 #[inline(never)]
 fn send_rdo(p: &mut Pd, idx: u8, rdo: u32) -> Result<(), u8> {
-    send_data(p, DAT_REQUEST, rdo)?;
+    send_data(p, DATA_REQUEST, rdo)?;
     p.req_obj = idx;
     p.last_rdo = rdo;
     p.req_tick = ina::ticks();
@@ -1238,29 +1238,38 @@ fn send_rdo(p: &mut Pd, idx: u8, rdo: u32) -> Result<(), u8> {
     Ok(())
 }
 
-fn send_data(p: &mut Pd, mtype: u8, obj: u32) -> Result<(), u8> {
-    let o = obj.to_le_bytes();
-    send_frame(p, mtype, 1, &o)
+/// Fixed-supply RDO for object position `idx`: operating = max current =
+/// the PDO's limit (both in the same 10 mA units), no USB suspend.
+fn rdo_fixed(idx: u8, pdo: u32) -> u32 {
+    let i = FIXED_MAX_CURRENT.get(pdo);
+    RDO_OBJECT_POSITION.put(idx as u32)
+        | RDO_NO_USB_SUSPEND.put(1)
+        | RDO_OPERATING_CURRENT.put(i)
+        | RDO_MAX_CURRENT.put(i)
 }
 
-fn send(p: &mut Pd, mtype: u8, objs: &[u8]) -> Result<(), u8> {
-    send_frame(p, mtype, 0, objs)
+fn send_data(p: &mut Pd, mtype: u32, obj: u32) -> Result<(), u8> {
+    let o = obj.to_le_bytes();
+    send_frame(p, mtype, false, &o)
+}
+
+fn send(p: &mut Pd, mtype: u32, objs: &[u8]) -> Result<(), u8> {
+    send_frame(p, mtype, false, objs)
 }
 
 /// Write one SOP message into the TX FIFO and fire it. Header: sink/UFP,
 /// the negotiated spec rev, our rolling message id (incremented on I_TXSENT).
 #[inline(never)]
-fn send_frame(p: &mut Pd, mtype: u8, nobj: u8, objs: &[u8]) -> Result<(), u8> {
-    wr(R_CONTROL0, C0_TX_FLUSH)?; /* flush any stale TX */
-    /* mtype bit 7 = Extended (header bit 15) */
-    let hdr = (mtype as u16 & 0x1F)
-        | ((mtype as u16 & 0x80) << 8)
-        | ((p.rev as u16) << 6)
-        | ((p.msg_id as u16) << 9)
-        | ((nobj as u16) << 12);
+fn send_frame(p: &mut Pd, mtype: u32, extended: bool, objs: &[u8]) -> Result<(), u8> {
+    wr(R_CONTROL0, C0_TX_FLUSH)?; /* flush any stale TX (power/data role 0: sink/UFP) */
+    let hdr = (HDR_MSG_TYPE.put(mtype)
+        | HDR_EXTENDED.put(extended as u32)
+        | HDR_SPEC_REV.put(p.rev as u32)
+        | HDR_MSG_ID.put(p.msg_id as u32)
+        | HDR_NUM_OBJECTS.put((objs.len() / 4) as u32)) as u16;
     let mut buf = [0u8; 40]; /* 6 tokens + header + 7 objects + 4 tail */
     buf[0] = R_FIFOS;
-    buf[1..5].copy_from_slice(&[TK_SOP1, TK_SOP1, TK_SOP1, TK_SOP2]);
+    buf[1..5].copy_from_slice(&[TK_SYNC1, TK_SYNC1, TK_SYNC1, TK_SYNC2]); /* SOP ordered set */
     let n = 2 + objs.len();
     buf[5] = TK_PACKSYM | n as u8;
     buf[6..8].copy_from_slice(&hdr.to_le_bytes());

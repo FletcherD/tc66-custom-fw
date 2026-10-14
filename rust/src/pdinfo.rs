@@ -22,6 +22,8 @@
 
 use crate::ina;
 use crate::pd;
+use crate::pdspec::*;
+use crate::pdsta::{CAP_BAD_CRC, CAP_DISCONNECT, CAP_HARD_RESET, SOP, SOP1};
 use crate::text::*;
 /// Fixed status lines ahead of the PDO list.
 const HEAD: usize = 6;
@@ -46,11 +48,16 @@ struct Info {
     pdo: u32,
     cable_vdo: u32, /* passive/active cable VDO from a SOP' Discover Identity ACK */
     cable_vid: u16,
-    cable: u8, /* 0 = none seen, 1 = PD 2.0 VDO layout, 2 = PD 3.x */
+    cable: u8, /* CABLE_NONE / CABLE_LAYOUT_PD2 / CABLE_LAYOUT_PD3 */
     msgs: u16,
     bad_crc: u16,
     hard_resets: u16,
 }
+
+/* Info.cable: which cable VDO layout was seen (PD 3.x adds max VBUS) */
+const CABLE_NONE: u8 = 0;
+const CABLE_LAYOUT_PD2: u8 = 1;
+const CABLE_LAYOUT_PD3: u8 = 2;
 
 struct Racy<T>(core::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for Racy<T> {}
@@ -113,17 +120,17 @@ fn drop_caps(s: &mut Info) {
 pub fn source_gone() {
     let s = st();
     drop_caps(s);
-    s.cable = 0;
+    s.cable = CABLE_NONE;
 }
 
-/// pd.rs capture event code (0x21 connect, 0x22 disconnect, 0x32 bad CRC,
-/// 0x33 hard reset; others ignored).
+/// pd.rs capture event code (pdsta.rs CAP_*: disconnect, bad CRC and hard
+/// reset count; others ignored).
 pub fn on_event(code: u8) {
     let s = st();
     match code {
-        0x22 => drop_contract(s),
-        0x32 => s.bad_crc = s.bad_crc.wrapping_add(1),
-        0x33 => {
+        CAP_DISCONNECT => drop_contract(s),
+        CAP_BAD_CRC => s.bad_crc = s.bad_crc.wrapping_add(1),
+        CAP_HARD_RESET => {
             s.hard_resets = s.hard_resets.wrapping_add(1);
             drop_caps(s);
         }
@@ -143,15 +150,16 @@ fn obj(objs: &[u8], i: usize) -> u32 {
 pub fn on_msg(hdr: u16, objs: &[u8], sop: u8) {
     let s = st();
     s.msgs = s.msgs.wrapping_add(1);
-    if hdr & 0x8000 != 0 {
+    let h = u32::from(hdr);
+    if HDR_EXTENDED.get(h) != 0 {
         return; /* extended message (chunked; EPR caps etc.) */
     }
-    let n = (hdr >> 12 & 7) as usize;
-    let mtype = hdr & 0x1F;
-    /* SOP: port power role (1 = source); SOP': cable plug (1 = from the cable) */
-    let from_src = hdr & 0x100 != 0;
+    let n = HDR_NUM_OBJECTS.get(h) as usize;
+    let mtype = HDR_MSG_TYPE.get(h);
+    let from_src = HDR_POWER_ROLE.get(h) != 0; /* SOP */
+    let from_cable = HDR_CABLE_PLUG.get(h) != 0; /* SOP'/SOP'' */
     match (sop, n, mtype) {
-        (0, 0, 6) if from_src => {
+        (SOP, 0, CTRL_PS_RDY) if from_src => {
             /* PS_RDY: the pending Request is now the contract */
             if s.req_rdo != 0 {
                 s.rdo = s.req_rdo;
@@ -159,19 +167,18 @@ pub fn on_msg(hdr: u16, objs: &[u8], sop: u8) {
                 s.req_rdo = 0;
             }
         }
-        (0, 0, 4) if from_src => s.req_rdo = 0, /* Reject */
-        (0, 1.., 1) if from_src => {
+        (SOP, 0, CTRL_REJECT) if from_src => s.req_rdo = 0,
+        (SOP, 1.., DATA_SOURCE_CAP) if from_src => {
             /* Source_Capabilities (retries just overwrite) */
             for (i, c) in s.caps.iter_mut().enumerate() {
                 *c = obj(objs, i);
             }
             s.caps_n = n as u8;
-            s.rev = (hdr >> 6 & 3) as u8;
+            s.rev = HDR_SPEC_REV.get(h) as u8;
         }
-        (0, 1, 2) if !from_src => {
-            /* Request */
+        (SOP, 1, DATA_REQUEST) if !from_src => {
             let r = obj(objs, 0);
-            let pos = (r >> 28) as usize;
+            let pos = RDO_OBJECT_POSITION.get(r) as usize;
             s.req_rdo = r;
             s.req_pdo = if (1..=s.caps_n as usize).contains(&pos) {
                 s.caps.get(pos - 1).copied().unwrap_or(0)
@@ -179,16 +186,20 @@ pub fn on_msg(hdr: u16, objs: &[u8], sop: u8) {
                 0
             };
         }
-        (1, 5.., 15) if from_src => {
-            /* the cable's Discover Identity ACK: structured VDM header,
-             * command 1, type ACK; ID Header product type passive (3) or
-             * active (4) cable; the cable VDO is object 4 */
-            let vdm = obj(objs, 0);
-            let idh = obj(objs, 1);
-            if vdm & 0x8000 != 0 && vdm & 0x1F == 1 && vdm >> 6 & 3 == 1 && matches!(idh >> 27 & 7, 3 | 4) {
-                s.cable_vid = idh as u16;
-                s.cable_vdo = obj(objs, 4);
-                s.cable = if hdr >> 6 & 3 >= 2 { 2 } else { 1 };
+        (SOP1, DISCID_CABLE_MIN_OBJECTS.., DATA_VENDOR_DEFINED) if from_cable => {
+            /* the cable's Discover Identity ACK (cable plug sender):
+             * structured VDM, ID Header product type passive or active
+             * cable, then its cable VDO */
+            let vdm = obj(objs, DISCID_VDM_HEADER);
+            let idh = obj(objs, DISCID_ID_HEADER);
+            if VDM_STRUCTURED.get(vdm) != 0
+                && VDM_COMMAND.get(vdm) == CMD_DISCOVER_IDENTITY
+                && VDM_COMMAND_TYPE.get(vdm) == VDM_ACK
+                && matches!(IDH_PRODUCT_TYPE.get(idh), CABLE_PASSIVE | CABLE_ACTIVE)
+            {
+                s.cable_vid = IDH_VID.get(idh) as u16;
+                s.cable_vdo = obj(objs, DISCID_PRODUCT_TYPE_VDO);
+                s.cable = if HDR_SPEC_REV.get(h) >= REV_3_X { CABLE_LAYOUT_PD3 } else { CABLE_LAYOUT_PD2 };
             }
         }
         _ => {}
@@ -277,23 +288,24 @@ pub fn line(i: usize, out: &mut [u8; COLS]) -> u16 {
             C_BLUE
         }
         4 => {
-            if s.cable == 0 {
+            if s.cable == CABLE_NONE {
                 w.t(NO_EMARKER);
                 C_GREY
             } else {
                 let v = s.cable_vdo;
                 w.t(CBL);
-                w.t(match v >> 5 & 3 {
-                    1 => CBL_3A,
-                    2 => CBL_5A,
+                w.t(match CABLE_VBUS_CURRENT.get(v) {
+                    CABLE_CURRENT_3A => CBL_3A,
+                    CABLE_CURRENT_5A => CBL_5A,
                     _ => CBL_NO_A,
                 });
-                if s.cable == 2 {
+                if s.cable == CABLE_LAYOUT_PD3 {
                     w.ch(b' ');
-                    w.uint(20 + 10 * (v >> 9 & 3), 0);
+                    w.uint(CABLE_MAX_VBUS_BASE_V + CABLE_MAX_VBUS_STEP_V * CABLE_MAX_VBUS.get(v), 0);
                     w.ch(b'V');
                 }
-                w.t(USB2 + (v & 7).min(5) as u8);
+                /* speed strings in field order, then SPEED_UNKNOWN */
+                w.t(USB2 + CABLE_USB_SPEED.get(v).min((SPEED_UNKNOWN - USB2) as u32) as u8);
                 w.ch(b' ');
                 w.hex16(s.cable_vid);
                 C_PINK
@@ -315,7 +327,7 @@ pub fn line(i: usize, out: &mut [u8; COLS]) -> u16 {
                 C_GREY
             } else if let Some(&p) = s.caps.get(k).filter(|_| k < s.caps_n as usize) {
                 let pos = k as u32 + 1;
-                let active = s.rdo != 0 && s.rdo >> 28 == pos && s.pdo == p;
+                let active = s.rdo != 0 && RDO_OBJECT_POSITION.get(s.rdo) == pos && s.pdo == p;
                 w.ch(if active { b'>' } else { b' ' });
                 w.uint(pos, 0);
                 w.ch(b' ');
@@ -336,42 +348,41 @@ pub fn line(i: usize, out: &mut [u8; COLS]) -> u16 {
 
 /// One source PDO.
 pub fn pdo(w: &mut W, p: u32) {
-    let v_lo = (p >> 10 & 0x3FF) * 50; /* fixed/variable/battery, mV */
-    let v_hi = (p >> 20 & 0x3FF) * 50;
+    let v_lo = RANGE_MIN_VOLTAGE.val(p); /* = FIXED_VOLTAGE for a fixed PDO */
+    let v_hi = RANGE_MAX_VOLTAGE.val(p);
     let range = |w: &mut W, lo_mv: u32, hi_mv: u32| {
         w.fixed(lo_mv / 100, 1, 0);
         w.ch(b'-');
         w.fixed(hi_mv / 100, 1, 0);
         w.t(V_SP);
     };
-    match p >> 30 {
-        0 => {
-            w.volts(v_lo, 5);
+    match PDO_TYPE.get(p) {
+        PDO_FIXED => {
+            w.volts(FIXED_VOLTAGE.val(p), 5);
             w.ch(b' ');
-            w.amps((p & 0x3FF) * 10);
+            w.amps(FIXED_MAX_CURRENT.val(p));
         }
-        1 => {
-            /* PD Table 6.6: 01b battery (250 mW units), 10b variable */
+        PDO_BATTERY => {
             w.t(BAT);
             range(w, v_lo, v_hi);
-            w.uint((p & 0x3FF) / 4, 0);
+            w.uint(BATTERY_MAX_POWER.val(p) / 1000, 0);
             w.ch(b'W');
         }
-        2 => {
+        PDO_VARIABLE => {
             w.t(VAR);
             range(w, v_lo, v_hi);
-            w.amps((p & 0x3FF) * 10);
+            w.amps(VARIABLE_MAX_CURRENT.val(p));
         }
-        _ => match p >> 28 & 3 {
-            0 => {
+        _ => match APDO_TYPE.get(p) {
+            APDO_PPS => {
                 w.t(PPS);
-                range(w, (p >> 8 & 0xFF) * 100, (p >> 17 & 0xFF) * 100);
-                w.amps((p & 0x7F) * 50);
+                range(w, PPS_MIN_VOLTAGE.val(p), PPS_MAX_VOLTAGE.val(p));
+                w.amps(PPS_MAX_CURRENT.val(p));
             }
-            2 => {
-                /* SPR AVS: 9-15 V current shown (bits 19:10), 15-20 V's in 9:0 */
+            APDO_SPR_AVS => {
+                /* SPR AVS: the 9-15 V current shown */
                 w.t(AVS_SPR);
-                w.amps((p >> 10 & 0x3FF) * 10);
+                w.amps(SPR_AVS_MAX_CURRENT_15V.val(p));
             }
             _ => {
                 w.t(APDO);
@@ -388,37 +399,35 @@ pub fn pdo(w: &mut W, p: u32) {
 fn contract(w: &mut W, mark: u8, rdo: u32, p: u32) {
     w.ch(mark);
     w.ch(b'#');
-    w.uint(rdo >> 28, 0);
+    w.uint(RDO_OBJECT_POSITION.get(rdo), 0);
     w.ch(b' ');
-    let op10 = rdo >> 10 & 0x3FF;
     if p == 0 {
         /* PDO not among the stored caps: fixed-supply RDO reading */
         w.t(UNKNOWN_PDO);
-        w.amps(op10 * 10);
+        w.amps(RDO_OPERATING_CURRENT.val(rdo));
         return;
     }
-    match p >> 30 {
-        0 => {
-            w.volts((p >> 10 & 0x3FF) * 50, 0);
+    match PDO_TYPE.get(p) {
+        PDO_FIXED => {
+            w.volts(FIXED_VOLTAGE.val(p), 0);
             w.ch(b' ');
-            w.amps(op10 * 10);
+            w.amps(RDO_OPERATING_CURRENT.val(rdo));
         }
-        1 => {
+        PDO_BATTERY => {
             w.t(BAT);
-            w.uint(op10 / 4, 0);
+            w.uint(RDO_OPERATING_POWER.val(rdo) / 1000, 0);
             w.ch(b'W');
         }
-        2 => {
+        PDO_VARIABLE => {
             w.t(VAR);
-            w.amps(op10 * 10);
+            w.amps(RDO_OPERATING_CURRENT.val(rdo));
         }
         _ => {
-            let avs = p >> 28 & 3 == 2;
+            let avs = APDO_TYPE.get(p) == APDO_SPR_AVS;
             w.t(if avs { AVS } else { PPS });
-            /* output voltage bits 20:9 — 20 mV (PPS) / 25 mV (AVS) units */
-            w.volts((rdo >> 9 & 0xFFF) * if avs { 25 } else { 20 }, 0);
+            w.volts(if avs { RDO_AVS_VOLTAGE } else { RDO_PPS_VOLTAGE }.val(rdo), 0);
             w.ch(b' ');
-            w.amps((rdo & 0x7F) * 50);
+            w.amps(RDO_APDO_CURRENT.val(rdo));
         }
     }
 }

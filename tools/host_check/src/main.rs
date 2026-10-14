@@ -20,6 +20,12 @@ mod aes256;
 mod text;
 #[path = "../../../rust/src/pdinfo.rs"]
 mod pdinfo;
+#[allow(dead_code)]
+#[path = "../../../rust/src/pdspec.rs"]
+mod pdspec;
+#[allow(dead_code)]
+#[path = "../../../rust/src/pdsta.rs"]
+mod pdsta;
 
 #[allow(dead_code)]
 #[path = "../../../rust/src/detect.rs"]

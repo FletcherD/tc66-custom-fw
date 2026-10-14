@@ -34,6 +34,7 @@
 use crate::ina;
 use crate::pd;
 use crate::pdinfo;
+use crate::pdsta::{self, S0_ACTIVITY, S0_BC_LVL, ST_CONTRACT, ST_LISTEN, ST_OFF, ST_WAIT_ATTACH};
 use crate::text::*;
 use crate::qc;
 
@@ -119,7 +120,7 @@ static DET: Racy<Det> = Racy(core::cell::UnsafeCell::new(Det {
     qc: [0; 4],
     fcp: [0; 2],
     fcp_err: 0,
-    pd_state: 0,
+    pd_state: ST_OFF,
     cc: 0,
     bc_lvl: 0,
     rev: 0,
@@ -263,7 +264,7 @@ fn step(s: &mut Det) {
         }
         S_PD_ARM => {
             s.caps_n = 0;
-            s.pd_state = 0;
+            s.pd_state = ST_OFF;
             s.bc_lvl = 0;
             match pd::arm() {
                 Ok(()) => next(s, S_PD_WAIT, T_PD_WAIT),
@@ -274,19 +275,20 @@ fn step(s: &mut Det) {
             }
         }
         S_PD_WAIT => {
-            let mut p = [0u8; 22];
+            let mut p = [0u8; pdsta::LEN];
             pd::status(&mut p);
+            let (state, s0) = (p[pdsta::STATE], p[pdsta::STATUS0]);
             /* Rp level: BC_LVL from a poll without CC activity while
              * attached — one taken during BMC traffic reads low (bench:
              * the Status0 read at the contract itself, Rp 3 A as 1.5 A) */
-            if (2..=5).contains(&p[0]) && p[7] & 0x40 == 0 {
-                s.bc_lvl = p[7] & 3;
+            if (ST_LISTEN..=ST_CONTRACT).contains(&state) && s0 & S0_ACTIVITY == 0 {
+                s.bc_lvl = s0 & S0_BC_LVL;
             }
             /* caps stored + contract on PDO 1, or the deadline */
-            if (p[0] == 5 && p[2] != 0) || ina::ticks().wrapping_sub(s.due) as i32 >= 0 {
-                s.pd_state = p[0];
-                s.cc = p[1];
-                s.rev = p[13];
+            if (state == ST_CONTRACT && p[pdsta::CAPS] != 0) || ina::ticks().wrapping_sub(s.due) as i32 >= 0 {
+                s.pd_state = state;
+                s.cc = p[pdsta::CC];
+                s.rev = p[pdsta::REV];
                 s.pd_err = 0;
                 s.caps_n = pd::caps(&mut s.caps);
                 pd_done(s);
@@ -527,7 +529,7 @@ pub fn line(i: usize, out: &mut [u8; COLS]) -> u16 {
                 w.t(PD_ERROR);
                 w.uint(s.pd_err as u32, 0);
                 pdinfo::C_ORANGE
-            } else if s.pd_state <= 1 {
+            } else if s.pd_state <= ST_WAIT_ATTACH {
                 w.t(NO_TYPEC);
                 pdinfo::C_GREY
             } else {

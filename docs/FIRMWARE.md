@@ -28,6 +28,8 @@ the ina.rs module doc.
 | `flasher.rs` | `updat` self-flasher (`.flasher` section, runs from SRAM) |
 | `i2c.rs` | polled I2C0 master (INA226 + EEPROM + FUSB302 bus), `i2crd` dev verb backend, bus-unstick recovery |
 | `pd.rs` | (`triggers` feature) FUSB302 USB-PD sink engine (M4): attach/orientation, source-caps collection, voltage trigger, KM003C PD capture ring; `pdctl`/`pdsta`/`pdcap`/`pdreq` verb backends |
+| `pdspec.rs` | (`triggers`) USB PD field layouts as named constants (`F { shift, width, unit }` + `const fn` get/val/put; header, PDO, RDO, VDM, ID header, cable VDO) — per spec table; host counterpart tools/pd_spec.py. Use these, not raw shifts |
+| `pdsta.rs` | (`triggers`) our PD reporting formats: the `pdsta` layout + engine states + the FUSB302 Status0 bits it carries, the KM003C capture event codes / layouts / SOP kinds — shared by pd.rs, pdinfo.rs, detect.rs and host_check (tools/pd.py, pdcap.py mirror them) |
 | `pdinfo.rs` | (`triggers`) PD state parser fed at pd.rs's capture points (caps, contract from Request + PS_RDY, cable e-marker, counters) + the PD screen's text lines; `pdinf` verb backend; host-checked by tools/host_check |
 | `pdscr.rs` | (`triggers`) screens 4 and 5: pdinfo's (PD) or detect's (detection) lines in the small font, 22×6 grid, paged (K2 short press), 3-px scroll bar; per-cell incremental draw like ui.rs |
 | `detect.rs` | (`triggers`) on-device charger protocol detection (screen 5, `detct` verb): main-loop-stepped state machine over qc.rs/pd.rs + its result text; host-checked by tools/host_check |
