@@ -32,8 +32,7 @@ Two phases are checked, both against the budget:
                    + exc_worst + MARGIN
 
 worst_run prunes PRE_IRQ_ROOTS — deep one-shot chains that provably run
-only before the unmask (today: getva::init's AES key schedule; see the
-comment at its call site in main.rs). The gate verifies each pruned root
+only before the unmask (today: none). The gate verifies each pruned root
 has exactly one caller (the main body) and is unreachable from any handler,
 but the *ordering* (called before NVIC::unmask) is a code invariant — keep
 the call before the unmask or delete it from PRE_IRQ_ROOTS.
@@ -53,7 +52,7 @@ DEFAULT_MARGIN = 192  # required headroom beyond the computed worst case
 # Deep one-shot chains that run only while the USBD IRQ is still masked
 # (before NVIC::unmask in main.rs) — pruned from the run-phase thread worst.
 # Substrings of the v0-mangled names (crate-hash independent).
-PRE_IRQ_ROOTS = ["5getva4init"]
+PRE_IRQ_ROOTS = []
 # ...and the only caller each is allowed to have (the main body): if the
 # call moves anywhere else, fail loudly instead of under-counting.
 PRE_IRQ_CALLER = "cortex_m_rt_main"

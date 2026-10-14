@@ -222,8 +222,7 @@ bytes 0..60, stored LE in 60..64 (upper two bytes 0).
 To stream samples losslessly: poll at ≥2× the window rate (25 Hz is plenty),
 keep a reply only when the sequence advances, and treat a sequence jump as a
 missed window. **Prefer `rawva` for this** — same live fields, plaintext, no
-AES: ~0.6 ms round-trip vs ~2.3 ms for `getva` (soft AES-256 is the
-difference). Reply layout in `rust/src/getva.rs` (46 B: `"raw1"`,
+AES: ~0.55 ms round-trip vs ~2.2 ms for `getva` (`tools/verbtime.py`). Reply layout in `rust/src/getva.rs` (46 B: `"raw1"`,
 ten LE u32 fields, CRC16/MODBUS tail); client + deduping stream generator in
 `tools/rawva.py`. Verified on the bench: 700 polls/s costs the sampler nothing
 (the sampler runs from a timer interrupt; see FIRMWARE.md), zero missed windows.
@@ -371,8 +370,8 @@ Constants (flash literals): R_series `0x2cec` = 11500, R0 `0x461c4000` = 10000.0
 separate `temp sign` field (offset 88) marks sub-zero.
 
 Ours evaluates it per window in fixed point (ntc.rs: Q24 log2, integer
-only), bit-identical to the f32 form over every sum16 — `make ntc-check`
-(tools/ntc_check) proves it exhaustively. (Stock: units with
+only), bit-identical to the f32 form over every sum16 — `make host-check`
+(tools/host_check) proves it exhaustively. (Stock: units with
 a config-page serial ≤ 0x144 use a linear map of the internal die sensor, ch16,
 instead; this unit's serial is 55050.)
 

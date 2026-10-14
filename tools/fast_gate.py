@@ -25,10 +25,9 @@ CRITICAL = [
     "7tc66_fw3i2c",
     "7tc66_fw3ina",
     "10usb_device6device",  # UsbDevice::poll (+ get_descriptor rides outside)
-    "14aes256_encrypt",
-    "9sub_bytes",
-    "11xor_columns",
-    "13mix_columns_",
+    "6aes25613encrypt_block",
+    "6aes2564SBOX",  # tables: a cold slow-flash read costs like a cold fetch
+    "5getva2RK",
     "5getva9build_raw",  # rawva streaming; getva5build is deliberately slow (fast.x)
     "11u64_div_rem",
     "3mem6memcpy",
@@ -36,7 +35,7 @@ CRITICAL = [
 # ...except these (matched by a CRITICAL substring but deliberately slow —
 # see fast.x's .slowtext):
 EXEMPT = ["get_descriptor", "control_out", "set_error", "handle_out",
-          "key_schedule", "try_cal"]
+          "try_cal"]
 
 
 def main():
@@ -46,7 +45,7 @@ def main():
     syms = []  # (addr, size, name) for defined text-ish symbols with size
     for line in nm.splitlines():
         parts = line.split()
-        if len(parts) == 4 and parts[2].lower() in ("t", "w"):
+        if len(parts) == 4 and parts[2].lower() in ("t", "w", "r", "d"):
             syms.append((int(parts[0], 16), int(parts[1], 16), parts[3]))
 
     efast = None

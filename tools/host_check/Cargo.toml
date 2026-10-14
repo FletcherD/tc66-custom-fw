@@ -1,0 +1,13 @@
+[package]
+name = "host_check"
+edition = "2021"
+publish = false
+
+# Host-side checks of the firmware's pure-math modules (rust/src/ntc.rs,
+# rust/src/aes256.rs) against reference implementations.
+# Run: cargo run --release --manifest-path tools/host_check/Cargo.toml
+[dependencies]
+libm = "=0.2.16"
+aes = "=0.8.4"
+
+[workspace]

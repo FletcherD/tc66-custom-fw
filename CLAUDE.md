@@ -41,7 +41,7 @@ compatibility**. The sampler runs from the TIMER5 interrupt (250 Hz,
 interleaved INA226 reads — ina.rs), immune to main-loop blocking. The hot
 path is pinned below the GD32's 32 KB zero-wait flash boundary
 (`rust/fast.x` + `make fast-gate` — docs/FIRMWARE.md "Fast-flash placement";
-query 0.2 / rawva 0.6 / getva 2.3 ms; the TFT pixel engine too — full
+query 0.24 / rawva 0.55 / getva 2.2 ms — tools/verbtime.py; the TFT pixel engine too — full
 redraw ~30 ms, tools/uitime.py). Slow-region cost is per cold fetch and
 layout-sensitive: anything with a polling loop belongs in fast flash
 (`#[link_section = ".fasttext.<name>"]` on our fns, fast.x patterns for

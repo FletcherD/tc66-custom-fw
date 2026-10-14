@@ -59,7 +59,7 @@ features.
   playing dead. Bench-verified (`tools/wdgtest.py`).
 - **Fast-flash placement: done.** Hot path pinned below the GD32's 32 KB
   zero-wait flash boundary (`rust/fast.x` + `make fast-gate`): query 0.2 ms,
-  rawva 0.6 ms, getva 2.3 ms round-trip (were 4.5/9/49); powerz sustains
+  rawva 0.55 ms, getva 2.2 ms round-trip (were 4.5/9/49; `tools/verbtime.py`); powerz sustains
   >5000 reads/s. The TFT pixel engine is fast too (full redraw ~30 ms,
   `tools/uitime.py`). Profile-guided via the on-device 250 Hz PC sampler
   (`pcprf` verb + `tools/pcprofile.py` — the chip's DWT is a stub).

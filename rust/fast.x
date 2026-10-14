@@ -47,7 +47,6 @@ SECTIONS
     *(.text.*11accept_with* .text.*6accept*);
     *(.text.*7Request5parse*);
     *(.text.*11set_stalled* .text.*10is_stalled* .text.*7unstall*);
-    *(.text.*19aes256_key_schedule*);   /* one-shot, boot (getva::init) */
     *(.text.*7try_cal*);                /* boot + 0.25 s retries until cal */
     *(.text.*8UsbError*);
     /* getva::build (encrypted compat packet, 1.2 KB): the first casualty of
@@ -96,13 +95,10 @@ SECTIONS
     *(.text.__aeabi_uldivmod .text.__udivmoddi4);
     *(.text.__aeabi_uidiv* .text.__udivsi3 .text.__umodsi3);
 
-    /* getva/rawva reply path: the aes crate's inner loops (QUIRKS §4
-     * fix) + our getva module (getva::build is demoted in .slowtext) */
-    *(.text.*14aes256_encrypt*);
-    *(.text.*9sub_bytes*);
-    *(.text.*13mix_columns_*);
-    *(.text.*11xor_columns*);
-    *(.text.*10memshift32*);
+    /* getva/rawva reply path: the AES rounds (QUIRKS §4 fix; S-box and
+     * round keys ride in .fasttext.* too) + our getva module (getva::build
+     * is demoted in .slowtext) */
+    *(.text.*7tc66_fw6aes256*);
     *(.text.*7tc66_fw5getva*);
 
     . = ALIGN(8); /* .text is 8-aligned; a 4-aligned end draws an lld warning */

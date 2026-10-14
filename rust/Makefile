@@ -65,15 +65,16 @@ release:
 
 # Every gate on both feature sets (CI runs this on each push), plus a
 # compile check of every dev group (all together may not fit the image)
-gates: ntc-check
+gates: host-check
 	$(MAKE) tc66fw.bin
 	$(MAKE) RELEASE=1 tc66fw.bin
 	cargo check --release --features "dev-verbs pcprf grace"
 
-# Host-side exhaustive proof that src/ntc.rs's fixed point matches the stock
-# f32 temperature model (own dir: rust/.cargo's thumb target must not apply)
-ntc-check:
-	cd ../tools/ntc_check && cargo run -q --release
+# Host-side proofs of the pure-math modules: src/ntc.rs bit-identical to the
+# stock f32 temperature model over all inputs, src/aes256.rs vs FIPS-197 and
+# the RustCrypto aes crate (own dir: rust/.cargo's thumb target must not apply)
+host-check:
+	cd ../tools/host_check && cargo run -q --release
 
 # Bootloader recovery path (AES image; hold K1 while plugging in first)
 tc66fw.enc.bin: tc66fw.bin
@@ -101,4 +102,4 @@ clean:
 	cargo clean
 	rm -f tc66fw.bin tc66fw.pad.bin tc66fw.enc.bin tc66fw-release.enc.bin
 
-.PHONY: ntc-check all release gates build flasher-gate init-gate stack-gate fast-gate flash recover markers clean
+.PHONY: host-check all release gates build flasher-gate init-gate stack-gate fast-gate flash recover markers clean

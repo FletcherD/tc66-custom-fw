@@ -9,7 +9,7 @@ eeprom-backup.bin
 *.pdf
 # Rust
 /rust/target/
-/tools/ntc_check/target/
+/tools/host_check/target/
 # Python
 __pycache__/
 *.pyc
