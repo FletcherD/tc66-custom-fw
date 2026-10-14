@@ -2,12 +2,45 @@
 PDOs (Source/Sink_Capabilities), Request RDOs, structured VDMs and the
 Discover Identity response (ID Header, Cert Stat, Product and cable VDOs).
 Layouts per the USB PD 3.1 spec, tables 6-x (PDO/RDO) and 6-2x (VDOs).
+Vendor/product names come from the system usb.ids (PD uses the USB-IF vendor
+IDs); a cable's PD product ID is vendor-assigned and usually not listed.
 """
+import os
 
-VENDORS = {0x05AC: "Apple", 0x18D1: "Google", 0x22B8: "Motorola", 0x04E8: "Samsung",
-           0x291A: "Anker", 0x8087: "Intel", 0x2109: "VIA", 0x0BDA: "Realtek",
-           0x1D5C: "Fresco", 0x17EF: "Lenovo", 0x413C: "Dell", 0x03F0: "HP",
-           0x2B89: "ChargerLAB"}
+USB_IDS = ("/usr/share/hwdata/usb.ids", "/usr/share/misc/usb.ids", "/var/lib/usbutils/usb.ids")
+_ids = None
+
+
+def _load_ids():
+    """usb.ids -> {vid: (vendor name, {pid: product name})}; {} if absent."""
+    global _ids
+    if _ids is not None:
+        return _ids
+    _ids = {}
+    path = next((p for p in USB_IDS if os.path.exists(p)), None)
+    if path is None:
+        return _ids
+    cur = None
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.startswith("C "):  # device classes follow the vendor list
+                break
+            if line[:1] not in "0123456789abcdef\t" or line.startswith("#"):
+                continue
+            if line[0] == "\t":
+                if cur is not None and line[1:2] != "\t":
+                    pid, _, name = line[1:].partition("  ")
+                    try:
+                        cur[1][int(pid, 16)] = name.strip()
+                    except ValueError:
+                        pass
+                continue
+            vid, _, name = line.partition("  ")
+            try:
+                cur = _ids.setdefault(int(vid, 16), (name.strip(), {}))
+            except ValueError:
+                cur = None
+    return _ids
 VDM_CMDS = {1: "Discover Identity", 2: "Discover SVIDs", 3: "Discover Modes",
             4: "Enter Mode", 5: "Exit Mode", 6: "Attention"}
 VDM_TYPES = {0: "REQ", 1: "ACK", 2: "NAK", 3: "BUSY"}
@@ -47,7 +80,14 @@ def rdo(r, caps):
 
 
 def vendor(vid):
-    return "0x%04X%s" % (vid, " (%s)" % VENDORS[vid] if vid in VENDORS else "")
+    v = _load_ids().get(vid)
+    return "0x%04X%s" % (vid, " (%s)" % v[0] if v else "")
+
+
+def product(vid, pid):
+    v = _load_ids().get(vid)
+    name = v[1].get(pid) if v else None
+    return "0x%04X%s" % (pid, " (%s)" % name if name else "")
 
 
 def cable_vdo(v, rev3):
@@ -77,8 +117,8 @@ def vdm(objs, sop, rev3):
         else:
             ptype = {1: "hub", 2: "peripheral", 3: "PSD", 5: "AMA"}.get((idh >> 27) & 7,
                                                                     "UFP type %d" % ((idh >> 27) & 7))
-        lines.append("identity: %s, vendor %s, product 0x%04X rev %04X, XID %d%s%s" % (
-            ptype, vendor(idh & 0xFFFF), prod >> 16, prod & 0xFFFF, cert,
+        lines.append("identity: %s, vendor %s, product %s rev %04X, XID %d%s%s" % (
+            ptype, vendor(idh & 0xFFFF), product(idh & 0xFFFF, prod >> 16), prod & 0xFFFF, cert,
             ", USB host" if idh & (1 << 31) else "", ", USB device" if idh & (1 << 30) else ""))
         if sop and (idh >> 27) & 7 in (3, 4) and len(objs) >= 5:
             lines.append(cable_vdo(objs[4], rev3))

@@ -599,7 +599,10 @@ PD traffic.
   the host polls to drain more.
 - Host tool: `tools/pdcap.py` (uv script, libusb; decodes PDOs, Requests
   and structured VDMs incl. Discover Identity — cable e-marker vendor /
-  current / speed — via `tools/pd_decode.py`; needs root for the
+  current / speed — via `tools/pd_decode.py`; vendor/product names from the
+  system `usb.ids` (PD shares the USB-IF vendor IDs; cable PD product IDs
+  are vendor-assigned and mostly unlisted; the Cert Stat XID is only
+  searchable on usb.org); needs root for the
   vendor interface — `sudo $(uv run -q --script tools/pdcap.py
   --python-path) tools/pdcap.py 30`). It polls back-to-back while events
   flow: one 64-B packet carries only one or two events and the ring has 8
