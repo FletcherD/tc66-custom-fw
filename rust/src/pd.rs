@@ -141,11 +141,11 @@ const E_RX_FULL: u8 = 0xE5; /* sniff: the RX FIFO filled between polls */
 /* sniff: MDAC threshold ~2.69 V on the locked CC. A source's Rp alone pulls
  * CC above it (open); a sink's Rd holds it at 0.4-2.04 V (Type-C vRd). */
 const SNIFF_OPEN_MDAC: u8 = 0x3F;
-/* sniff: BMC slicer threshold SDAC 0x18 (reset 0x20), 85 mV hysteresis.
+/* BMC slicer threshold SDAC 0x18 (reset 0x20), 85 mV hysteresis, both modes.
  * Bench (Apple charger -> meter -> Moto at 9 V / 2.8 A): at the reset value
  * the charger's first VDM to the phone was lost 3/3 (never even CRC-
  * checked); SDAC 0x10-0x1C caught it 12/12; 0x08 and >= 0x28 lost others. */
-const SNIFF_SLICE: u8 = 0x58;
+const SLICE: u8 = 0x58;
 /* capture event codes (ours, beside KM003C's 0x21/0x22): RX FIFO went full;
  * RX FIFO resync (a non-SOP token: the queued frames were flushed) */
 const CAP_RX_FULL: u8 = 0x30;
@@ -390,9 +390,7 @@ fn arm_as(state: u8) -> Result<(), u8> {
     wr(R_MASKA, if sniff { MASKA_SNIFF } else { MASKA_SINK })?;
     wr(R_MASKB, if sniff { MASKB_SNIFF } else { MASKB_SINK })?;
     wr(R_CONTROL0, C0_TX_FLUSH)?;
-    if sniff {
-        wr(R_SLICE, SNIFF_SLICE)?;
-    }
+    wr(R_SLICE, SLICE)?;
     int_n_init();
     wr(R_CONTROL1, C1_RX_FLUSH)?;
     /* Drop Rd first (service restores it after ~600 ms): a source plugged

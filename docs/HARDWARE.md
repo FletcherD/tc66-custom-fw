@@ -444,7 +444,7 @@ the GPIO's internal pull-up, as stock configures it) — bench-verified: an
 unmasked I_COMP_CHNG pulls PA15 low, reading Interrupt or setting
 Control0.INT_MASK releases it, no other GPIOA/B/F pin moves. pd.rs reads it
 as a GPIO to wake the PD engine. Slice (0x05) sets the BMC receiver's slicer threshold SDAC[5:0] +
-hysteresis (reset 0x60); sniff mode uses 0x58 (bench-swept, FIRMWARE.md
+hysteresis (reset 0x60); our engine uses 0x58 in both modes (bench-swept, FIRMWARE.md
 "Sniffer"). Unused options worth knowing: Control1 ENSOP1DB/ENSOP2DB receive SOP'/SOP''
 debug packets; Control2 TOGGLE runs autonomous DRP/SRC/SNK toggling.
 **The chip's VBUS pin is not wired to VBUS**:

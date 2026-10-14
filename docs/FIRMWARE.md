@@ -542,8 +542,8 @@ past the ~10 s keepalive deadline).
   renegotiates with the device on OUT (a re-plug without unplugging). The
   FUSB302 transmitter only drives after a PD-logic reset (RST_PD) with TXCC
   set — without it HARDSENT fires but nothing reaches the wire; TXCC is
-  dropped again (with RST_PD) on HARDSENT. **Slice**: sniffing sets the BMC
-  slicer to `SNIFF_SLICE` = 0x58 (SDAC 0x18, reset 0x20; 85 mV hysteresis)
+  dropped again (with RST_PD) on HARDSENT. **Slice**: arming (sink and sniff) sets the
+  BMC slicer to `SLICE` = 0x58 (SDAC 0x18, reset 0x20; 85 mV hysteresis)
   — bench-swept with `pd.py hardreset` re-triggers: at the reset value the
   Apple charger's first VDM to a Moto drawing 2.8 A at 9 V was lost every
   time (never even CRC-checked), SDAC 0x10-0x1C caught it 16/16, 0x08 and
@@ -553,7 +553,7 @@ past the ~10 s keepalive deadline).
   storms come through whole (76 of 82 messages with all 4 copies, vs 33 of
   41 at 100 kHz), no FIFO-full/resync events. Apple's first VDM to the Moto
   (id5) is never captured although the Moto GoodCRCs it at the slicer's reset
-  threshold — fixed by `SNIFF_SLICE` (below). `rx_capture` is shared with the sink's
+  threshold — fixed by `SLICE` (below). `rx_capture` is shared with the sink's
   `rx_frame`.
 - Host tool: `tools/pd.py` (`arm/off/hardreset/sniff/status/caps/req/watch`, decodes
   PDOs and the 20-B `pdsta` reply — field layout in `pd::status`).
