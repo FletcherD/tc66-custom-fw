@@ -550,6 +550,13 @@ past the ~10 s keepalive deadline).
   ≥ 0x28 lost other frames. `tools/pdlog_check.py` summarizes a capture per
   hard reset (missed messages / GoodCRCs via message-id pairing, plus
   per-sender id gaps for a message lost together with its GoodCRC).
+  Before each FIFO read the sniffer waits up to ~2 ms (`wait_cc_idle`) for
+  Status0.ACTIVITY to clear: reading mid-frame produced spurious bad-CRC
+  events (gone with the wait). Frames in the densest burst (Request →
+  GoodCRC → Accept → GoodCRC within ~1 ms) are still missed in about half
+  the negotiations with or without it — they never reach the FUSB302's
+  FIFO (no CRC check either), apparently a receiver limit on frames that
+  follow each other within µs; not reachable from firmware.
   **Orientation-independent**: with the charger on OUT and the phone on IN,
   detection, sniffing, attach events and hard-reset re-triggers all work
   (FUSB302 and D± sit on the pass-through lines); only the current is
@@ -590,7 +597,9 @@ PD traffic.
   armed ADC first, then the PD reply on its next IN; it filters by the
   ext-header attribute. One 64-B packet per poll (preamble + one/two events);
   the host polls to drain more.
-- Host tool: `tools/pdcap.py` (uv script, libusb; needs root for the
+- Host tool: `tools/pdcap.py` (uv script, libusb; decodes PDOs, Requests
+  and structured VDMs incl. Discover Identity — cable e-marker vendor /
+  current / speed — via `tools/pd_decode.py`; needs root for the
   vendor interface — `sudo $(uv run -q --script tools/pdcap.py
   --python-path) tools/pdcap.py 30`). It polls back-to-back while events
   flow: one 64-B packet carries only one or two events and the ring has 8

@@ -25,6 +25,10 @@ import time
 import usb.core
 import usb.util
 
+from pd_decode import pdo, rdo, vdm
+
+SRC_CAPS = []  # last Source_Cap PDOs (Request decoding needs them for PPS)
+
 CTL = {1: "GoodCRC", 3: "Accept", 4: "Reject", 5: "Ping", 6: "PS_RDY",
        7: "Get_Source_Cap", 8: "Get_Sink_Cap", 12: "Wait", 13: "Soft_Reset",
        16: "Not_Supported"}
@@ -46,6 +50,28 @@ def decode_pd(wire, sop=0):
     objs = ["%08x" % (int.from_bytes(wire[2 + 4 * i:6 + 4 * i], "little")) for i in range(nobj)]
     return "%-14s [%s r%s id%d]%s" % (name, role, rev, (hdr >> 9) & 7,
                                       " " + " ".join(objs) if objs else "")
+
+
+def details(wire, sop):
+    """Decoded data objects of a data message, as indented lines."""
+    global SRC_CAPS
+    if len(wire) < 6:
+        return []
+    hdr = wire[0] | (wire[1] << 8)
+    nobj = (hdr >> 12) & 7
+    objs = [int.from_bytes(wire[2 + 4 * i:6 + 4 * i], "little") for i in range(nobj)]
+    if len(objs) != nobj or not objs or hdr & (1 << 15):  # runt / extended message
+        return []
+    typ = hdr & 0x1F
+    if sop == 0 and typ in (1, 4):  # Source_Cap / Sink_Cap
+        if typ == 1:
+            SRC_CAPS = objs
+        return ["PDO %d: %s" % (n, pdo(o)) for n, o in enumerate(objs, 1)]
+    if sop == 0 and typ == 2:
+        return [rdo(objs[0], SRC_CAPS)]
+    if typ == 15:
+        return vdm(objs, sop, (hdr >> 6) & 3 >= 2)
+    return []
 
 
 def parse_pdpacket(payload):
@@ -80,6 +106,8 @@ def parse_pdpacket(payload):
             wire = payload[i + 6:i + 6 + wire_len]
             sop = {0: "", 1: "SOP' ", 2: "SOP'' "}.get(payload[i + 5], "sop%d " % payload[i + 5])
             print("  [%8d ms] %s%s" % (ets, sop, decode_pd(wire, payload[i + 5])))
+            for line in details(wire, payload[i + 5]):
+                print("               %s" % line)
             i += 6 + wire_len
         else:
             break

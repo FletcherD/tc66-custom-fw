@@ -834,10 +834,26 @@ fn sniff_poll(p: &mut Pd) -> Result<(), u8> {
         return Ok(());
     }
     for _ in 0..8 {
+        wait_cc_idle()?;
         if !rx_ready()? {
             break;
         }
         rx_capture(p)?;
+    }
+    Ok(())
+}
+
+/// Sniff: let the frame on the wire finish before touching the FIFO — up to
+/// ~2 ms of Status0 polls (≈ 100 µs each at 400 kHz) for ACTIVITY to clear,
+/// then go on regardless (a retry storm keeps the line busy; the FIFO must
+/// still drain).
+fn wait_cc_idle() -> Result<(), u8> {
+    for _ in 0..20 {
+        let mut s = [0u8; 1];
+        rd(R_STATUS0, &mut s)?;
+        if s[0] & S0_ACTIVITY == 0 {
+            break;
+        }
     }
     Ok(())
 }
