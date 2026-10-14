@@ -759,7 +759,9 @@ PD traffic.
   Identity incl. UFP/DFP/cable/VPD VDOs, SVIDs, Source/Sink_Capabilities_
   Extended, Status, PPS_Status, Manufacturer_Info, EPR messages; chunked
   extended messages reassembled — via `tools/pd_decode.py`'s stateful
-  `Decoder`; vendor/product names from the system `usb.ids` (PD shares the
+  `Decoder`, whose field layouts are the named constants of
+  `tools/pd_spec.py` (`F(shift, width, unit)` bit fields + `get`/`val`/
+  `pack`, byte offsets, enum values — no raw shifts in the host code); vendor/product names from the system `usb.ids` (PD shares the
   USB-IF vendor IDs; PD product IDs are vendor-assigned and mostly
   unlisted; the Cert Stat XID is only searchable on usb.org). Field layouts
   come from the USB PD spec (R3.2 V1.2 + R2.0 V1.3 for the older

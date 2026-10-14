@@ -40,7 +40,10 @@ import time
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 import serial  # noqa: E402
 from tc66lib import meter_candidates  # noqa: E402
-from pd import decode_pdo  # noqa: E402
+from pd import (decode_pdo, PDSTA_LEN, PDSTA_STATE, PDSTA_CC, PDSTA_CAPS, PDSTA_STATUS0,  # noqa: E402
+                PDSTA_REV, ST_WAIT_ATTACH, ST_LISTEN, ST_CONTRACT, STATUS0_ACTIVITY, STATUS0_BC_LVL,
+                ENGINE_REVS, PDCAP_LEN, parse_caps)
+from pd_spec import get  # noqa: E402
 from rawva import rawva  # noqa: E402
 
 QC_CLASS = {0: "no D+/D- short (not a dedicated charger)",
@@ -195,27 +198,26 @@ def main():
         bc = 0
         t_end = time.time() + a.pd_wait
         while time.time() < t_end:
-            r = cmd(s, b"pdsta", 24, 1.0)
-            if r[:2] == b"OK" and len(r) == 24:
+            r = cmd(s, b"pdsta", 2 + PDSTA_LEN, 1.0)
+            if r[:2] == b"OK" and len(r) == 2 + PDSTA_LEN:
                 st = r[2:]
                 # Rp: BC_LVL only from a poll without CC activity (one taken
                 # during BMC traffic reads low)
-                if 2 <= st[0] <= 5 and not st[7] & 0x40:
-                    bc = st[7] & 3
-                if st[2] and st[0] == 5:  # caps stored, contract (5 V PDO 1)
+                s0 = st[PDSTA_STATUS0]
+                if ST_LISTEN <= st[PDSTA_STATE] <= ST_CONTRACT and not get(s0, STATUS0_ACTIVITY):
+                    bc = get(s0, STATUS0_BC_LVL)
+                if st[PDSTA_CAPS] and st[PDSTA_STATE] == ST_CONTRACT:  # caps stored, 5 V PDO 1 contract
                     break
             time.sleep(0.25)
         if st is None:
             print("\n[PD] no pdsta reply")
         else:
-            r = cmd(s, b"pdcap", 31, 1.0)
-            if r[:2] == b"OK":
-                pd_caps = [int.from_bytes(r[3 + 4 * i:7 + 4 * i], "little") for i in range(r[2])]
-            if st[0] <= 1:  # off / wait-attach: no Rp seen on either CC
+            pd_caps = parse_caps(cmd(s, b"pdcap", PDCAP_LEN, 1.0)) or []
+            if st[PDSTA_STATE] <= ST_WAIT_ATTACH:  # off / wait-attach: no Rp seen on either CC
                 print("\n[Type-C] no Type-C source on CC (Type-A charger or A-to-C cable)")
             else:
-                print(f"\n[Type-C] CC{st[1]}, Rp advertises {BC_LVL[bc]}")
-                rev = {1: "PD 2.0", 2: "PD 3.0"}.get(st[13], "?")
+                print(f"\n[Type-C] CC{st[PDSTA_CC]}, Rp advertises {BC_LVL[bc]}")
+                rev = "PD " + ENGINE_REVS.get(st[PDSTA_REV], "?")
                 print(f"[PD] {rev}, {len(pd_caps)} PDO(s):" if pd_caps else "[PD] no Source_Capabilities")
                 for i, p in enumerate(pd_caps, 1):
                     print("  " + decode_pdo(i, p))

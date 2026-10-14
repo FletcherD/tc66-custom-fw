@@ -31,47 +31,68 @@ import sys
 import time
 
 from pd_decode import Decoder
+from pd_spec import F, get, pack, u16, u32
 
-EVENTS = {0x21: "*** CONNECT ***", 0x22: "*** DISCONNECT ***",
-          0x30: "!!! RX FIFO full: frames may be lost !!!",
-          0x31: "!!! RX FIFO resync: queued frames flushed !!!",
-          0x32: "!!! bad-CRC packet (not captured) !!!",
-          0x33: "*** HARD RESET ***"}
+# KM003C protocol (github.com/okhsunrog/km003c-protocol-research; firmware
+# side rust/src/powerz.rs + the capture ring format in rust/src/pd.rs)
+KM_VID, KM_PID = 0x5FC9, 0x0063
+KM_EP_OUT, KM_EP_IN = 0x01, 0x81
+KM_CMD_GET_DATA = 0x0C          # request: cmd, tid, attribute << 1 (LE16)
+KM_REQ_ATTRIBUTE = F(1, 15)
+KM_PUT_DATA = 0x41              # reply: 4-byte header, 4-byte extended header, payload
+KM_HDR_LEN = 8
+KM_EXT_HDR = 4
+KM_EXT_ATTRIBUTE = F(0, 15)
+KM_EXT_SIZE = F(22, 10)
+KM_ATT_PD = 0x0010              # PdPacket
+KM_REPLY_MAX = 64
+# PdPacket payload: measurement preamble, then events
+PRE_TS, PRE_VBUS_MV, PRE_IBUS_MA, PRE_CC1_MV, PRE_CC2_MV, PRE_LEN = 0, 4, 6, 8, 10, 12
+EV_CONNECTION = 0x45            # 6 B: 0x45, ts LE24, 0x00, code
+EV_CONN_TS, EV_CONN_TS_LEN, EV_CONN_CODE, EV_CONN_LEN = 1, 3, 5, 6
+EV_WRAPPED = F(7, 1)            # 6 + N B: size flag, ts LE32, sop, N wire bytes
+EV_WRAPPED_SIZE = F(0, 6)       # N + 5
+EV_WRAPPED_TS, EV_WRAPPED_SOP, EV_WRAPPED_WIRE = 1, 5, 6
+EV_WRAPPED_SIZE_BIAS = 5
+EV_CONNECT, EV_DISCONNECT = 0x21, 0x22
+EV_RX_FULL, EV_RX_RESYNC, EV_BAD_CRC, EV_HARD_RESET = 0x30, 0x31, 0x32, 0x33  # ours (pd.rs CAP_*)
+EVENTS = {EV_CONNECT: "*** CONNECT ***", EV_DISCONNECT: "*** DISCONNECT ***",
+          EV_RX_FULL: "!!! RX FIFO full: frames may be lost !!!",
+          EV_RX_RESYNC: "!!! RX FIFO resync: queued frames flushed !!!",
+          EV_BAD_CRC: "!!! bad-CRC packet (not captured) !!!",
+          EV_HARD_RESET: "*** HARD RESET ***"}
+SOP_NAMES = {0: "", 1: "SOP' ", 2: "SOP'' ", 3: "SOP'_DBG ", 4: "SOP''_DBG "}  # sop byte
 
 
 def parse_pdpacket(payload, dec):
     """Print the events/messages of one PdPacket payload; returns
     (vbus, ibus, cc1, cc2) from its preamble, or None if too short."""
-    if len(payload) < 12:
+    if len(payload) < PRE_LEN:
         return None
-    vbus, ibus, cc1, cc2 = (
-        int.from_bytes(payload[4:6], "little"),
-        int.from_bytes(payload[6:8], "little", signed=True),
-        int.from_bytes(payload[8:10], "little"),
-        int.from_bytes(payload[10:12], "little"),
-    )
-    i = 12
+    ibus = int.from_bytes(payload[PRE_IBUS_MA:PRE_IBUS_MA + 2], "little", signed=True)
+    vbus, cc1, cc2 = u16(payload, PRE_VBUS_MV), u16(payload, PRE_CC1_MV), u16(payload, PRE_CC2_MV)
+    i = PRE_LEN
     while i < len(payload):
         b0 = payload[i]
-        if b0 == 0x45:  # connection event
-            if i + 6 > len(payload):
+        if b0 == EV_CONNECTION:
+            if i + EV_CONN_LEN > len(payload):
                 break
-            code = payload[i + 5]
-            ets = payload[i + 1] | (payload[i + 2] << 8) | (payload[i + 3] << 16)
+            code = payload[i + EV_CONN_CODE]
+            ets = int.from_bytes(payload[i + EV_CONN_TS:i + EV_CONN_TS + EV_CONN_TS_LEN], "little")
             print("  [%8d ms] %s" % (ets, EVENTS.get(code, "event %02x" % code)))
-            i += 6
-        elif b0 & 0x80:  # wrapped PD message
-            wire_len = (b0 & 0x3F) - 5
-            if wire_len < 0 or i + 6 + wire_len > len(payload):
+            i += EV_CONN_LEN
+        elif get(b0, EV_WRAPPED):
+            wire_len = get(b0, EV_WRAPPED_SIZE) - EV_WRAPPED_SIZE_BIAS
+            if wire_len < 0 or i + EV_WRAPPED_WIRE + wire_len > len(payload):
                 break
-            ets = int.from_bytes(payload[i + 1:i + 5], "little")
-            wire = payload[i + 6:i + 6 + wire_len]
-            sop = payload[i + 5]
+            ets = u32(payload, i + EV_WRAPPED_TS)
+            wire = payload[i + EV_WRAPPED_WIRE:i + EV_WRAPPED_WIRE + wire_len]
+            sop = payload[i + EV_WRAPPED_SOP]
             line, details = dec.frame(wire, sop)
-            print("  [%8d ms] %s%s" % (ets, {0: "", 1: "SOP' ", 2: "SOP'' ", 3: "SOP'_DBG ", 4: "SOP''_DBG "}.get(sop, "sop%d " % sop), line))
+            print("  [%8d ms] %s%s" % (ets, SOP_NAMES.get(sop, "sop%d " % sop), line))
             for d in details:
                 print("               %s" % d)
-            i += 6 + wire_len
+            i += EV_WRAPPED_WIRE + wire_len
         else:
             break
     return vbus, ibus, cc1, cc2
@@ -89,9 +110,9 @@ def replay(path):
 def capture(secs, save):
     import usb.core
 
-    dev = usb.core.find(idVendor=0x5FC9, idProduct=0x0063)
+    dev = usb.core.find(idVendor=KM_VID, idProduct=KM_PID)
     if dev is None:
-        sys.exit("KM003C (5FC9:0063) not found")
+        sys.exit("KM003C (%04X:%04X) not found" % (KM_VID, KM_PID))
     try:
         if dev.is_kernel_driver_active(0):
             dev.detach_kernel_driver(0)
@@ -102,8 +123,9 @@ def capture(secs, save):
 
     def getdata(attr):
         tid[0] = (tid[0] + 1) & 0xFF
-        dev.write(0x01, bytes([0x0C, tid[0], (attr << 1) & 0xFF, (attr << 1) >> 8]))
-        return bytes(dev.read(0x81, 64, timeout=500))
+        dev.write(KM_EP_OUT, bytes([KM_CMD_GET_DATA, tid[0]]) +
+                  pack((KM_REQ_ATTRIBUTE, attr)).to_bytes(2, "little"))
+        return bytes(dev.read(KM_EP_IN, KM_REPLY_MAX, timeout=500))
 
     out = open(save, "w") if save else None
     dec = Decoder()
@@ -112,24 +134,23 @@ def capture(secs, save):
     seen_vbus = None
     while time.time() < end:
         try:
-            r = getdata(0x0010)
+            r = getdata(KM_ATT_PD)
         except usb.core.USBError:
             continue
-        if len(r) < 8 or r[0] != 0x41:
+        if len(r) < KM_HDR_LEN or r[0] != KM_PUT_DATA:
             time.sleep(0.05)
             continue
-        ext = int.from_bytes(r[4:8], "little")
-        att = ext & 0x7FFF
-        size = (ext >> 22) & 0x3FF
-        if att != 0x0010:  # ADC reply arrived first — skip, poll again
+        ext = u32(r, KM_EXT_HDR)
+        size = get(ext, KM_EXT_SIZE)
+        if get(ext, KM_EXT_ATTRIBUTE) != KM_ATT_PD:  # ADC reply arrived first — skip, poll again
             continue
-        payload = r[8:8 + size]
-        if out and size > 12:
+        payload = r[KM_HDR_LEN:KM_HDR_LEN + size]
+        if out and size > PRE_LEN:
             out.write(payload.hex() + "\n")
         info = parse_pdpacket(payload, dec)
         if info:
             seen_vbus = info[0]
-        if size <= 12:  # preamble only: ring empty, idle a little
+        if size <= PRE_LEN:  # preamble only: ring empty, idle a little
             time.sleep(0.02)  # else poll straight away — the 8-slot ring overflows in a burst
     if out:
         out.close()

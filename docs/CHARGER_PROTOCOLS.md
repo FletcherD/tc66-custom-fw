@@ -267,9 +267,11 @@ sink attach).
   steps (`pdseq.py arm wait:6 ask:srccapext wait:1 status`).
 - `tools/pdcap.py` (sudo) — live KM003C capture with decoding; `--save
   FILE` keeps the raw packets, `--replay FILE` re-decodes them offline (no
-  sudo). `tools/pd_decode.py` — the decoders (vendor names from the system
-  `usb.ids`); `tools/pd_decode_test.py` — its regression vectors (bench
-  frames + spec examples; run after changing the decoder);
+  sudo). `tools/pd_spec.py` — the spec's field layouts as named constants
+  (bit fields with units, byte offsets, enum values, per spec table);
+  `tools/pd_decode.py` — the decoders built on them (vendor names from the
+  system `usb.ids`); `tools/pd_decode_test.py` — regression vectors (bench
+  frames + vectors built from named fields; run after changing either);
   `tools/pdlog_check.py` — scores a capture per hard reset (missed messages
   via GoodCRC pairing and message-id gaps).
 - `tools/qc.py` — QC triggers; `tools/accp_decode.py` — AFC/FCP/SCP scope
