@@ -165,7 +165,7 @@ Verbs:
 | `tftfl` | `OK` / `ER`+stage | our dev verb: TFT test pattern (no args) or solid fill (RGB565 LE u16); ER stages in tft.rs (tools/tft.py) |
 | `tftbl` | `OK` / `ER`+stage | our dev verb: backlight PWM compare, LE u16 0..=999 (tools/tft.py) |
 | `tftui` | `OK` / `ER`+stage | our dev verb: force a main-screen refresh (tools/tft.py) |
-| `pdctl` | `OK` / `ER`+stage | our trigger verb: PD sink engine off (0) / arm (1) / hard-reset (2) (pd.rs, tools/pd.py) |
+| `pdctl` | `OK` / `ER`+stage | our trigger verb: PD sink engine off (0) / arm (1) / hard-reset (2) / listen-only sniffer (3) (pd.rs, tools/pd.py) |
 | `pdsta` | `OK`+20 B | our trigger verb: PD engine state (layout: `pd::status`) |
 | `pdcap` | `OK`+n+n×4 B | our trigger verb: received source PDOs (LE u32 each) |
 | `pdreq` | `OK` / `ER` | our trigger verb: `pdreq <n> [mv u16][ma u16]` — request source PDO n (1-based; fixed, or PPS APDO with a setpoint) — **raises OUT voltage** |
@@ -432,7 +432,11 @@ repo root — this unit reads Device ID **0x81** = FUSB302, silicon rev B).
 (host-armed with `pdctl 1`, nothing at boot; needs `triggers`):
 attach/orientation, Source_Capabilities collection, PD 2.0/3.0 fixed-PDO
 requests (5–20 V), PPS APDO setpoints (bench 3.3–11 V), hard reset, and the
-PD capture ring behind the powerz `ATT_PD` attribute. Verbs +
+PD capture ring behind the powerz `ATT_PD` attribute. **The FUSB302 sits on
+the pass-through CC line** (meter PD switch ON): its power-on default
+presents Rd on both CC, so with the engine off a source on IN sees the meter
+as a sink (in parallel with any device on OUT); `pdctl 3` (sniff) drops it —
+with nothing on OUT an Apple charger then turns VBUS off (bench-verified). Verbs +
 host tool in the command table above / tools/pd.py; engine internals in
 FIRMWARE.md "USB-PD sink". The INT_N pin is not needed (registers are polled).
 The chip shares the INA226/EEPROM I²C bus — all access inside `ina::pause`.

@@ -512,7 +512,16 @@ past the ~10 s keepalive deadline).
   against a **fresh** `ina::ticks()` read, not the poll-entry snapshot — a
   request is stamped mid-poll after ms of I2C, so `entry_now - req_tick`
   wraps negative and fires instantly.
-- Host tool: `tools/pd.py` (`arm/off/hardreset/status/caps/req/watch`, decodes
+- **Sniffer** (`pdctl 3`, state `ST_SNIFF`): listen-only — Switches0 with no
+  Rd (the ~500 ms MDAC sweep also runs without Rd), Switches1 without
+  AUTO_CRC or TXCC, never transmits. `sniff_poll` locks the receiver onto the
+  CC above ~0.2 V (the higher one), polls every tick (4 ms — the 80-B RX
+  FIFO), drains up to 8 frames per poll into the capture ring (both sides'
+  messages incl. GoodCRCs), re-arms the PD logic after a hard reset, and
+  unlocks when the active CC falls below ~0.2 V. `pdsta` err 0xE5 = the RX
+  FIFO filled between polls. `rx_capture` is shared with the sink's
+  `rx_frame`.
+- Host tool: `tools/pd.py` (`arm/off/hardreset/sniff/status/caps/req/watch`, decodes
   PDOs and the 20-B `pdsta` reply — field layout in `pd::status`).
 - **Danger:** a granted request raises the OUT-port voltage. Nothing may be
   attached downstream when triggering; any future always-on/auto policy must
@@ -541,13 +550,15 @@ PD traffic.
   armed ADC first, then the PD reply on its next IN; it filters by the
   ext-header attribute. One 64-B packet per poll (preamble + one/two events);
   the host polls to drain more.
-- Host tool: `tools/pdcap.py` (libusb; needs root/udev for the vendor
-  interface — the kernel `powerz` hwmon driver binds it otherwise).
-- **Verified:** the attribute/transport — `GetData(0x10)` returns a valid
-  `PutData` with a live preamble (VBUS tracked), ADC-first-then-PD filtering
-  works, empty ring returns preamble-only. Event capture against real PD
-  traffic is pending a PD source on the bench (the wire format is per spec but
-  not yet round-tripped end-to-end).
+- Host tool: `tools/pdcap.py` (uv script, libusb; needs root for the
+  vendor interface — `sudo $(uv run -q --script tools/pdcap.py
+  --python-path) tools/pdcap.py 30`). It polls back-to-back while events
+  flow: one 64-B packet carries only one or two events and the ring has 8
+  slots.
+- **Verified:** our sink's full negotiation with an Apple USB-C charger
+  (Source_Cap, Request, GoodCRC, Accept, PS_RDY, vendor VDMs) round-trips
+  through `pdcap.py`. Sniffing a third-party source/sink pair is not yet
+  bench-verified.
 
 ## BLE link (`bt.rs`)
 

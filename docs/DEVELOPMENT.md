@@ -100,13 +100,17 @@ features.
 - **Next steps** (see also the open items in QUIRKS.md):
   - Bench-test a power cut mid-session (torn-slot fallback), the K2-hold
     reset, and D± readings against a known device/charger.
+  - Bench-verify the PD sniffer (`pd.py sniff` + `pdcap.py`) with a phone
+    on OUT and a PD charger on IN; check the RX FIFO keeps up (`pdsta` err
+    0xE5) and what cable orientations pass through.
   - Bench-verify the positive QC and AFC paths of `tools/detect.py`
     (`qcdet` class 2, the `afctr 0x08` probe, `qctrg` after the detecting
     entry) against the QC/AFC charger. Verified so far: a PC host port (all
     negative) and an Apple USB-C PD charger (DCP with D± tied at 1.51 V,
     Rp 3.0 A, PD 5/9/15/20 V; `qctrg`/`qc3ct` refuse with ER 0x21 and VBUS
     stays at 5 V).
-  - **M4 extensions:** bench-test FCP/SCP against a Huawei charger
+  - **M4 extensions:** bench-test FCP/SCP against a Huawei charger (put
+    `fcp` back into `DEV_FEATURES` — it is out of the dev build for space)
     (`fcprd` reg 0x21, n 3 first — read-only — then `fcptr`; scope D− and compare
     with `tools/accp_decode.py`); an SCP voltage raise (VSET 0xb8/b9 + a
     fed watchdog — the stock SCP block only sets 5.00 V / 5 A); a
@@ -157,7 +161,7 @@ Cargo features pick what the image serves (rust/Cargo.toml):
 | build | features | used for |
 |---|---|---|
 | release (`make release`, CI release) | default = `triggers` | published images |
-| dev (`make flash`, `make recover`) | + Makefile `DEV_FEATURES` (now `fcp dev-board pcprf`) | the bench loop |
+| dev (`make flash`, `make recover`) | + Makefile `DEV_FEATURES` (now `dev-board pcprf`) | the bench loop |
 | either + `FEATURES=grace` | + boot grace window | risky always-on bring-up |
 
 The product protocol (powerz, `query getva rawva updat cfgrd cfgwr gtrec

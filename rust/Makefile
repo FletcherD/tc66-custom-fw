@@ -11,7 +11,7 @@ ELF = target/thumbv7m-none-eabi/release/tc66-fw
 # tight — swap groups here (Cargo.toml lists them: fcp dev-board dev-bt
 # dev-tft, or dev-verbs for all). Extra features stack on either:
 # make flash FEATURES=grace
-DEV_FEATURES = fcp dev-board pcprf
+DEV_FEATURES = dev-board pcprf
 CARGO_FEATURES = $(strip $(if $(RELEASE),,$(DEV_FEATURES)) $(FEATURES))
 
 all: tc66fw.pad.bin

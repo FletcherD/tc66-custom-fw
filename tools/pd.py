@@ -8,6 +8,8 @@
   pd.py arm            arm the sink engine (pdctl 1) — then plug the source in
   pd.py off            FUSB302 SW_RES + engine off (pdctl 0)
   pd.py hardreset      send a PD hard reset: source re-caps at its top rev (pdctl 2)
+  pd.py sniff          listen-only: capture a source and a sink negotiating
+                       through the meter (pdctl 3; read with tools/pdcap.py)
   pd.py status         one engine-state snapshot (pdsta)
   pd.py caps           decode the stored Source_Capabilities PDOs (pdcap)
   pd.py req <n> [volts [amps]]   request source PDO n (pdreq); volts (+ amps,
@@ -36,6 +38,7 @@ STATES = {
     4: "wait-ps-rdy",
     5: "CONTRACT",
     6: "rd-cycle (forcing re-attach)",
+    7: "SNIFF (listen-only)",
 }
 ERRS = {
     0x0D: "PPS setpoint missing or out of the APDO's range",
@@ -45,6 +48,7 @@ ERRS = {
     0xE2: "source rejected the request",
     0xE3: "Accept timeout",
     0xE4: "PS_RDY timeout",
+    0xE5: "sniff: RX FIFO overflowed between polls (frames lost)",
 }
 EVENTS = [  # Interrupta accumulator bits
     (0x10, "RETRYFAIL"),
@@ -170,6 +174,8 @@ def main():
         ok_er(xfer(s, b"pdctl\x00", 3), "off")
     elif cmd == "hardreset":
         ok_er(xfer(s, b"pdctl\x02", 3), "hard reset")
+    elif cmd == "sniff":
+        ok_er(xfer(s, b"pdctl\x03", 3), "sniff")
     elif cmd == "status":
         show_status(s)
     elif cmd == "caps":

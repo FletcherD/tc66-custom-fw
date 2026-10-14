@@ -78,6 +78,7 @@ const S0_ACTIVITY: u8 = 0x40;
 const S0_COMP: u8 = 0x20; /* CC above the MDAC threshold */
 const S0_BC_LVL: u8 = 0x03;
 const S1_RX_EMPTY: u8 = 0x20;
+const S1_RX_FULL: u8 = 0x10;
 
 /* TX FIFO tokens */
 const TK_TXON: u8 = 0xA1;
@@ -111,12 +112,14 @@ const ST_WAIT_ACCEPT: u8 = 3;
 const ST_WAIT_PSRDY: u8 = 4;
 const ST_CONTRACT: u8 = 5;
 const ST_RD_CYCLE: u8 = 6; /* Rd dropped to force the source to re-attach */
+const ST_SNIFF: u8 = 7; /* listen-only: no Rd, no GoodCRC, no TX (pdctl 3) */
 
 /* err codes carried in Pd.err (i2c stages are 1..0x0F | 0x80) */
 const E_RETRYFAIL: u8 = 0xE1;
 const E_REJECT: u8 = 0xE2;
 const E_ACCEPT_TIMEOUT: u8 = 0xE3;
 const E_PSRDY_TIMEOUT: u8 = 0xE4;
+const E_RX_FULL: u8 = 0xE5; /* sniff: the RX FIFO filled between polls */
 /* verb arg errors: 0x0D bad/missing PPS setpoint, 0x0E unsupported PDO kind */
 
 pub struct Pd {
@@ -326,6 +329,19 @@ fn rd(reg: u8, buf: &mut [u8]) -> Result<(), u8> {
 /// the attach poll. Safe with or without a source already plugged.
 #[inline(never)]
 pub fn arm() -> Result<(), u8> {
+    arm_as(ST_RD_CYCLE)
+}
+
+/// `pdctl 3`: listen-only sniffer for a source and a sink negotiating
+/// THROUGH the meter (IN → OUT): no Rd, no hardware GoodCRC, never
+/// transmits. The receiver follows whichever CC carries the Rp/Rd divider;
+/// every SOP frame from either side lands in the KM003C capture ring.
+#[inline(never)]
+pub fn sniff() -> Result<(), u8> {
+    arm_as(ST_SNIFF)
+}
+
+fn arm_as(state: u8) -> Result<(), u8> {
     let p = pd();
     p.state = ST_OFF; /* stop service() touching the chip mid-config */
     wr(R_RESET, RST_SW)?;
@@ -346,7 +362,7 @@ pub fn arm() -> Result<(), u8> {
     wr(R_SWITCHES0, 0x00)?;
     wr(R_SWITCHES1, sw1_rev(REV20))?;
     *p = Pd {
-        state: ST_RD_CYCLE,
+        state,
         cc: 0,
         msg_id: 0,
         caps_n: 0,
@@ -522,11 +538,12 @@ fn vcc_sweep(p: &mut Pd) -> Result<(), u8> {
         }
         return Ok(());
     }
-    wr(R_SWITCHES0, SW0_PDWN | SW0_MEAS_CC1)?;
+    let pdwn = if p.state == ST_SNIFF { 0 } else { SW0_PDWN };
+    wr(R_SWITCHES0, pdwn | SW0_MEAS_CC1)?;
     let m1 = mdac_search()?;
-    wr(R_SWITCHES0, SW0_PDWN | SW0_MEAS_CC2)?;
+    wr(R_SWITCHES0, pdwn | SW0_MEAS_CC2)?;
     let m2 = mdac_search()?;
-    wr(R_SWITCHES0, SW0_PDWN)?;
+    wr(R_SWITCHES0, pdwn)?;
     p.vcc1_mv = mv(m1);
     p.vcc2_mv = mv(m2);
     Ok(())
@@ -543,7 +560,11 @@ pub fn service() {
     if p.state == ST_OFF {
         return;
     }
-    let interval = if p.state >= ST_LISTEN { 2 } else { 12 };
+    let interval = match p.state {
+        ST_SNIFF => 1, /* the 80-B RX FIFO must not fill between polls */
+        s if s >= ST_LISTEN => 2,
+        _ => 12,
+    };
     if ina::ticks().wrapping_sub(p.poll_tick) < interval {
         return;
     }
@@ -569,6 +590,7 @@ fn service_due() {
             }
         }
         ST_WAIT_ATTACH => attach_poll(p),
+        ST_SNIFF => sniff_poll(p),
         _ => active_poll(p, now),
     };
     if let Err(e) = r {
@@ -646,6 +668,77 @@ fn attach_poll(p: &mut Pd) -> Result<(), u8> {
     p.cap_ask_tick = ina::ticks();
     cap_conn(0x21); /* KM003C PD capture: connect */
     Ok(())
+}
+
+/// Sniffer poll. Unlocked (cc 0): the ~500 ms sweep in service_due measures
+/// both CC pins; the higher one above ~0.2 V (Rp against the sink's Rd) gets
+/// the receiver. Locked: drain every frame into the capture ring; a hard
+/// reset re-arms the PD logic; the active CC falling below ~0.2 V unlocks
+/// (disconnect).
+#[inline(never)]
+fn sniff_poll(p: &mut Pd) -> Result<(), u8> {
+    if p.cc == 0 {
+        let (v1, v2) = (p.vcc1_mv, p.vcc2_mv);
+        if v1.max(v2) < 200 {
+            return Ok(());
+        }
+        let cc1 = v1 >= v2;
+        p.cc = if cc1 { 1 } else { 2 };
+        wr(R_SWITCHES0, if cc1 { SW0_MEAS_CC1 } else { SW0_MEAS_CC2 })?;
+        wr(R_SWITCHES1, sw1_rev(REV20))?; /* no AUTO_CRC, no TXCC */
+        wr(R_CONTROL1, C1_RX_FLUSH)?;
+        wr(R_RESET, RST_PD)?;
+        cap_conn(0x21);
+        return Ok(());
+    }
+    if (if p.cc == 1 { p.vcc1_mv } else { p.vcc2_mv }) < 200 {
+        p.cc = 0;
+        cap_conn(0x22);
+        return Ok(());
+    }
+    let mut st = [0u8; 7];
+    rd(R_STATUS0A, &mut st)?;
+    let (inta, s0, s1) = (st[2], st[4], st[5]);
+    p.events |= inta;
+    p.status0 = s0;
+    p.status1 = s1;
+    if s1 & S1_RX_FULL != 0 {
+        p.err = E_RX_FULL;
+    }
+    if inta & IA_HARDRST != 0 {
+        wr(R_CONTROL1, C1_RX_FLUSH)?;
+        wr(R_RESET, RST_PD)?;
+        return Ok(());
+    }
+    for _ in 0..8 {
+        let mut s = [0u8; 1];
+        rd(R_STATUS1, &mut s)?;
+        if s[0] & S1_RX_EMPTY != 0 {
+            break;
+        }
+        rx_capture(p)?;
+    }
+    Ok(())
+}
+
+/// Read one RX FIFO frame (token, header, objects, CRC) into the capture
+/// ring and the pdsta counters. Returns (header, objects + CRC); a non-SOP
+/// token flushes the FIFO (resync) and returns header 0.
+fn rx_capture(p: &mut Pd) -> Result<(u16, [u8; 32]), u8> {
+    let mut head = [0u8; 3];
+    let mut body = [0u8; 32]; /* 7·4 objects + 4 CRC max */
+    rd(R_FIFOS, &mut head)?;
+    if head[0] & 0xE0 != 0xE0 {
+        wr(R_CONTROL1, C1_RX_FLUSH)?;
+        return Ok((0, body));
+    }
+    let hdr = u16::from_le_bytes([head[1], head[2]]);
+    let nobj = ((hdr >> 12) & 7) as usize;
+    rd(R_FIFOS, &mut body[..4 * nobj + 4])?;
+    p.rx_msgs = p.rx_msgs.wrapping_add(1);
+    p.rx_hdr = [hdr, p.rx_hdr[0], p.rx_hdr[1]];
+    cap_msg(hdr, &body[..4 * nobj]); /* KM003C PD capture */
+    Ok((hdr, body))
 }
 
 /// One poll while attached: status burst, event handling, RX drain,
@@ -740,21 +833,12 @@ fn active_poll(p: &mut Pd, now: u32) -> Result<(), u8> {
 /// 4 CRC bytes — CRC already checked by hardware).
 #[inline(never)]
 fn rx_frame(p: &mut Pd, now: u32) -> Result<(), u8> {
-    let mut head = [0u8; 3];
-    rd(R_FIFOS, &mut head)?;
-    if head[0] & 0xE0 != 0xE0 {
-        /* not SOP (or FIFO skew): flush and resync */
-        wr(R_CONTROL1, C1_RX_FLUSH)?;
-        return Ok(());
+    let (hdr, body) = rx_capture(p)?;
+    if hdr == 0 {
+        return Ok(()); /* not SOP (or FIFO skew): flushed */
     }
-    let hdr = u16::from_le_bytes([head[1], head[2]]);
     let nobj = ((hdr >> 12) & 7) as usize;
-    let mut body = [0u8; 32]; /* 7·4 objects + 4 CRC max */
-    rd(R_FIFOS, &mut body[..4 * nobj + 4])?;
     let mtype = (hdr & 0x1F) as u8; /* 5-bit in rev 3.0; bit 4 is 0 in 2.0 */
-    p.rx_msgs = p.rx_msgs.wrapping_add(1);
-    p.rx_hdr = [hdr, p.rx_hdr[0], p.rx_hdr[1]];
-    cap_msg(hdr, &body[..4 * nobj]); /* KM003C PD capture */
 
     if nobj == 0 {
         match mtype {

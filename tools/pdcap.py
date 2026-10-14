@@ -1,9 +1,18 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.9"
+# dependencies = ["pyusb"]
+# ///
 """KM003C PD-capture reader: polls the vendor bulk endpoint for the PdPacket
 attribute (0x0010) and decodes captured USB-PD traffic.
 
-  pdcap.py [seconds]   arm the PD sink (pdctl 1), then stream PD events for
-                       `seconds` (default 20). Plug a PD source into IN.
+  pdcap.py [seconds]   stream captured PD events for `seconds` (default 20).
+                       Start the engine first over CDC: `pd.py arm` (our own
+                       sink's traffic) or `pd.py sniff` (a source and a sink
+                       negotiating through the meter).
+
+Needs root for the USB device node; run the uv environment's Python under sudo:
+  sudo $(uv run --script tools/pdcap.py --python-path) tools/pdcap.py 30
 
 Talks the POWER-Z KM003C protocol directly over libusb (VID:PID 5FC9:0063,
 bulk 0x01 OUT / 0x81 IN), independent of the CDC verb channel. The firmware
@@ -70,6 +79,9 @@ def parse_pdpacket(payload):
 
 
 def main():
+    if sys.argv[1:] == ["--python-path"]:
+        print(sys.executable)
+        return
     secs = float(sys.argv[1]) if len(sys.argv) > 1 else 20
     dev = usb.core.find(idVendor=0x5FC9, idProduct=0x0063)
     if dev is None:
@@ -89,7 +101,7 @@ def main():
 
     # arm the sink over the vendor Connect (pd.rs arms via the CDC pdctl verb;
     # here we just start polling — arm separately with tools/pd.py if needed)
-    print("Polling PdPacket (0x0010) for %.0f s. Arm the sink with: pd.py arm" % secs)
+    print("Polling PdPacket (0x0010) for %.0f s (start the engine with pd.py arm / sniff)" % secs)
     end = time.time() + secs
     seen_vbus = None
     while time.time() < end:
@@ -108,7 +120,8 @@ def main():
         info = parse_pdpacket(r[8:8 + size])
         if info:
             seen_vbus = info[0]
-        time.sleep(0.05)
+        if size <= 12:  # preamble only: ring empty, idle a little
+            time.sleep(0.02)  # else poll straight away — the 8-slot ring overflows in a burst
     if seen_vbus is not None:
         print("last: VBUS=%d mV" % seen_vbus)
 

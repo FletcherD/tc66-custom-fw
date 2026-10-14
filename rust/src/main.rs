@@ -81,7 +81,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 131;
+const BUILD_ID: u32 = 132;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -527,11 +527,12 @@ fn on_packet(buf: &[u8]) {
         {
             /* pdctl 0 = FUSB302 off (SW_RES), pdctl 1 = arm as PD sink,
              * pdctl 2 = send PD hard reset (source restarts caps at its
-             * highest rev; VBUS dips) */
+             * highest rev; VBUS dips), pdctl 3 = listen-only sniffer */
             let r = match buf.get(5) {
                 Some(0) => pd::off(),
                 Some(1) => pd::arm(),
                 Some(2) => pd::hard_reset(),
+                Some(3) => pd::sniff(),
                 _ => Err(0x0F),
             };
             reply_ok_er(r);

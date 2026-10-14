@@ -19,7 +19,9 @@ bench-verified with
 tools/ble.py), and the M4
 charge triggers (pd.rs: FUSB302 PD 2.0/3.0 sink — `pdctl`/`pdsta`/`pdcap`/
 `pdreq` + tools/pd.py, fixed PDOs + PPS + hard reset, bench-verified
-5-20 V and PPS 3.3-11 V; qc.rs: Quick Charge 2.0 D+/D− — `qctrg`/`qcoff` (entry detects QC first; `qcdet` probe)
+5-20 V and PPS 3.3-11 V, plus a listen-only sniffer `pdctl 3` (captures a
+charger and phone negotiating through the meter; read with tools/pdcap.py
+under sudo — not yet bench-verified with a phone); qc.rs: Quick Charge 2.0 D+/D− — `qctrg`/`qcoff` (entry detects QC first; `qcdet` probe)
 + tools/qc.py, bench-verified 5/9/12 V, plus QC3.0 `qc3ct` and Samsung AFC
 `afctr` — a CLOSED-LOOP D− serial that reads the charger Sping on PB4,
 bench-verified 5↔9 V; **a granted request raises the OUT
