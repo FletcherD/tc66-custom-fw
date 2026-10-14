@@ -40,13 +40,14 @@ features.
   the stock seq, both groups + run clocks + the group setting restore
   across reboots, BLE settings verbs work. Not yet exercised: a real power
   cut mid-session (torn-slot fallback) and the K2-hold reset.
-- **M3 — display: done.** ST7735S driver + five always-on screens
+- **M3 — display: done.** ST7735S driver + six always-on screens
   (V/I/P; mAh/mWh + run clock; temperature + D+/D−; a full-screen
   scrolling V/I plot using the panel's hardware scroll — `plot.rs`; period
   and V/I full scale are settings; a paged USB-PD info screen — `pdscr.rs`
   over the `pdinfo.rs` parser, 7×13 small font, scroll bar, entering it
-  starts the sniffer), K1 steps screens, K2
-  held 1 s resets energy, K2 short press pages the PD screen, idle screen-off (settings: delay + V/I thresholds) (burn-in protection; any
+  starts the sniffer; a charger detection screen — `detect.rs`, K2 runs
+  tools/detect.py's sequence on the device, `detct` verb), K1 steps screens, K2
+  held 1 s resets energy, K2 short press pages the PD/detection screens, idle screen-off (settings: delay + V/I thresholds) (burn-in protection; any
   key press wakes it — `rust/src/keys.rs`). Pixel streaming is
   DMA-driven and non-blocking (SPI0 TX on DMA ch2, pumped from the main
   loop — bench-verified via the MK_DSP markers); the first frame draws
@@ -121,8 +122,7 @@ features.
     `fcp` back into `DEV_FEATURES` — it is out of the dev build for space)
     (`fcprd` reg 0x21, n 3 first — read-only — then `fcptr`; scope D− and compare
     with `tools/accp_decode.py`); an SCP voltage raise (VSET 0xb8/b9 + a
-    fed watchdog — the stock SCP block only sets 5.00 V / 5 A); a
-    protocol-detection scan (docs/AFC_DECODE_NOTES.md). Also: a QC3.0 min-voltage clamp, and
+    fed watchdog — the stock SCP block only sets 5.00 V / 5 A). Also: a QC3.0 min-voltage clamp, and
     bench-verifying PD event capture through the KM003C PdPacket attribute.
   - The QUIRKS.md open questions (the unexplained mechanisms behind §1
     NAK/APB stalls and §2 event loss — both absorbed in firmware) and the
@@ -134,6 +134,13 @@ features.
     short press on the real button, and a look at the screen with
     `tools/tftgrab.py`. Also open: the CDC verb latency shift that came with
     the layout change (FIRMWARE.md "Fast-flash placement").
+  - Charger detection screen (build 154): on-device result matched
+    `tools/detect.py` line by line on the Apple charger (D± tied 1.51 V,
+    DCP, no AFC, CC1 Rp 3.0 A, PD 2.0 5/9/15/20 V, 20 V 4.7 A); paging,
+    re-run, busy / PD-sink-armed / load refusals and the screen checked via
+    a temporary verb + tftgrab. Still to do: the real K2 button on it, a
+    QC/AFC charger (positive paths), the `fcp` step, the sniffer-sees-a-sink
+    refusal with a device attached.
   - This unit's CC2: the OUT receptacle's CC2 contact barely connects (the
     charger's Rp reaches the FUSB302 as 1.6 V open, ~0 on 5.1 kΩ; sink
     attach and hard reset fail on CC2, CC1 is fine). Measure continuity OUT
@@ -179,7 +186,7 @@ Cargo features pick what the image serves (rust/Cargo.toml):
 | build | features | used for |
 |---|---|---|
 | release (`make release`, CI release) | default = `triggers` | published images |
-| dev (`make flash`, `make recover`) | + Makefile `DEV_FEATURES` (now `dev-board pcprf`) | the bench loop |
+| dev (`make flash`, `make recover`) | + Makefile `DEV_FEATURES` (now `pcprf` — `dev-board` no longer fits beside the detection screen) | the bench loop |
 | either + `FEATURES=grace` | + boot grace window | risky always-on bring-up |
 
 The product protocol (powerz, `query getva rawva updat cfgrd cfgwr gtrec

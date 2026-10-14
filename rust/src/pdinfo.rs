@@ -29,12 +29,12 @@ pub const COLS: usize = 22;
 const HEAD: usize = 6;
 
 pub const C_WHITE: u16 = 0xFFFF;
-const C_GREEN: u16 = 0x07E0;
-const C_YELLOW: u16 = 0xFFE0;
-const C_ORANGE: u16 = 0xFD20;
-const C_BLUE: u16 = 0xAFFF;
-const C_PINK: u16 = 0xFBEA;
-const C_GREY: u16 = 0x8410;
+pub const C_GREEN: u16 = 0x07E0;
+pub const C_YELLOW: u16 = 0xFFE0;
+pub const C_ORANGE: u16 = 0xFD20;
+pub const C_BLUE: u16 = 0xAFFF;
+pub const C_PINK: u16 = 0xFBEA;
+pub const C_GREY: u16 = 0x8410;
 
 struct Info {
     caps: [u32; 7],
@@ -199,15 +199,20 @@ pub fn on_msg(hdr: u16, objs: &[u8], sop: u8) {
 
 /* ---- text ---- */
 
-/// Bounded line writer: characters past COLS are dropped.
-struct W {
-    b: [u8; COLS],
+/// Bounded line writer: characters past COLS are dropped (shared with
+/// detect.rs).
+pub struct W {
+    pub b: [u8; COLS],
     n: usize,
 }
 
 impl W {
+    pub fn new() -> W {
+        W { b: [b' '; COLS], n: 0 }
+    }
+
     #[inline(never)]
-    fn ch(&mut self, c: u8) {
+    pub fn ch(&mut self, c: u8) {
         if let Some(x) = self.b.get_mut(self.n) {
             *x = c;
         }
@@ -215,7 +220,7 @@ impl W {
     }
 
     #[inline(never)]
-    fn s(&mut self, s: &[u8]) {
+    pub fn s(&mut self, s: &[u8]) {
         for &c in s {
             self.ch(c);
         }
@@ -223,7 +228,7 @@ impl W {
 
     /// Decimal, right-aligned in at least `width` chars.
     #[inline(never)]
-    fn uint(&mut self, v: u32, width: usize) {
+    pub fn uint(&mut self, v: u32, width: usize) {
         let mut tmp = [0u8; 10];
         let mut k = 0;
         let mut v = v;
@@ -245,7 +250,7 @@ impl W {
 
     /// `v` in units of 10^-frac (frac 1..=3), right-aligned in `width`.
     #[inline(never)]
-    fn fixed(&mut self, v: u32, frac: usize, width: usize) {
+    pub fn fixed(&mut self, v: u32, frac: usize, width: usize) {
         let mut d = [0u8; 3];
         let mut v = v;
         for x in d.iter_mut().take(frac) {
@@ -268,7 +273,7 @@ impl W {
 
     /// mV as "x.xxV" (2 decimals)
     #[inline(never)]
-    fn volts(&mut self, mv: u32, width: usize) {
+    pub fn volts(&mut self, mv: u32, width: usize) {
         self.fixed(mv / 10, 2, width);
         self.ch(b'V');
     }
@@ -287,7 +292,7 @@ pub fn lines() -> usize {
     HEAD + (st().caps_n as usize).max(1)
 }
 
-fn rev_str(rev: u8) -> &'static [u8] {
+pub fn rev_str(rev: u8) -> &'static [u8] {
     match rev {
         0 => b"PD1.0",
         1 => b"PD2.0",
@@ -299,7 +304,7 @@ fn rev_str(rev: u8) -> &'static [u8] {
 /// `lines()` come back blank.
 pub fn line(i: usize, out: &mut [u8; COLS]) -> u16 {
     let s = st();
-    let mut w = W { b: [b' '; COLS], n: 0 };
+    let mut w = W::new();
     let color = match i {
         0 => {
             let l = pd::link();
@@ -430,7 +435,7 @@ pub fn line(i: usize, out: &mut [u8; COLS]) -> u16 {
 }
 
 /// One source PDO.
-fn pdo(w: &mut W, p: u32) {
+pub fn pdo(w: &mut W, p: u32) {
     let v_lo = (p >> 10 & 0x3FF) * 50; /* fixed/variable/battery, mV */
     let v_hi = (p >> 20 & 0x3FF) * 50;
     let range = |w: &mut W, lo_mv: u32, hi_mv: u32| {

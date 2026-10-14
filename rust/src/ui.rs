@@ -5,6 +5,7 @@
 //!   2  temperature / D+ / D−
 //!   3  scrolling V/I plot   (plot.rs — full screen, no cells)
 //!   4  USB-PD info          (pdscr.rs — paged small-font text; `triggers`)
+//!   5  charger detection    (detect.rs on pdscr.rs's grid; `triggers`)
 //!
 //! The first ~2 s after boot show a splash instead: "TC66" and the version
 //! (= build id, white).
@@ -36,11 +37,12 @@ const Y_STEP: u16 = font::CELL_H + 3;
 
 const BG: u16 = 0x0000;
 #[cfg(feature = "triggers")]
-pub const SCREENS: u8 = 5;
+pub const SCREENS: u8 = 6;
 #[cfg(not(feature = "triggers"))]
 pub const SCREENS: u8 = 4;
 pub const PLOT: u8 = 3;
 pub const PD: u8 = 4;
+pub const DET: u8 = 5;
 /* per-screen line colors (RGB565) */
 const COLORS: [[u16; 3]; SCREENS as usize] = [
     [0x07E0, 0xFFE0, 0x07FF], /* V green, I yellow, P cyan (V/I as on the plot) */
@@ -49,6 +51,8 @@ const COLORS: [[u16; 3]; SCREENS as usize] = [
     [0; 3],                   /* plot: no cells */
     #[cfg(feature = "triggers")]
     [0; 3], /* PD info: own grid */
+    #[cfg(feature = "triggers")]
+    [0; 3], /* detection: the same grid */
 ];
 
 struct Racy<T>(core::cell::UnsafeCell<T>);
@@ -81,8 +85,8 @@ pub fn set_screen(n: u8) {
         plot::leave();
     }
     #[cfg(feature = "triggers")]
-    if n == PD {
-        pdscr::enter();
+    if n == PD || n == DET {
+        pdscr::enter(n == DET);
     } else {
         pdscr::leave();
     }
@@ -155,7 +159,7 @@ pub fn draw(run_secs: u32) {
         return;
     }
     #[cfg(feature = "triggers")]
-    if screen() == PD {
+    if screen() == PD || screen() == DET {
         *splash = 0;
         pdscr::draw();
         return;
@@ -247,7 +251,7 @@ pub fn service() -> Result<bool, u8> {
     if !pdscr::service()? {
         return Ok(false);
     }
-    if screen() == PLOT || screen() == PD {
+    if screen() == PLOT || screen() >= PD {
         return Ok(true);
     }
     let dirty = unsafe { &mut *DIRTY.0.get() };

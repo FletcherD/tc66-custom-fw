@@ -9,8 +9,9 @@ edition = "2021"
 # Makefile's DEV_FEATURES. Gated verbs match and silently do nothing when
 # disabled. Flash is tight: enable only the dev groups in current use.
 # - triggers: the PD sink + QC/AFC D+/D- trigger and detection verbs (pdctl
-#   pdsta pdcap pdinf pdreq qctrg qc3ct qcdet afctr qcoff), the PD engine
-#   service, the powerz PD capture attribute and the PD info screen. A granted request RAISES THE OUT
+#   pdsta pdcap pdinf pdreq qctrg qc3ct qcdet afctr qcoff detct), the PD
+#   engine service, the powerz PD capture attribute and the PD info and
+#   charger detection screens. A granted request RAISES THE OUT
 #   VOLTAGE.
 # - fcp: the untested Huawei FCP/SCP verbs (fcptr fcprd scptr), ~2.1 KB.
 # - dev-board: board debug verbs (i2crd adcrd gpird gpiot clkrd keyrd rstrd

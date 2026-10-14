@@ -1,9 +1,11 @@
-//! Screen 4: USB-PD info (`triggers` feature; ui.rs dispatches to it).
+//! Screens 4 and 5: USB-PD info and charger detection (`triggers` feature;
+//! ui.rs dispatches to it).
 //!
-//! pdinfo.rs's text lines in the small font (font_small.rs, 7x13): a grid
+//! The text lines of pdinfo.rs (PD) or detect.rs (detection) in the small font (font_small.rs, 7x13): a grid
 //! of 22 columns x 6 rows, one page of 6 lines at a time, with a 3-px
 //! scroll bar at the right edge (thumb = the shown page's share of the
 //! whole). `next_page` (K2 short press, `pdinf 1`) advances and wraps.
+//! One grid serves both screens: `enter(det)` picks the line source.
 //!
 //! Same incremental scheme as the big-font screens, per cell: `draw`
 //! (2 Hz + on events) formats the shown page into `want` and flags work;
@@ -12,6 +14,7 @@
 //! row whose color changes is repainted whole. Entering and leaving clear
 //! the panel (the big-font cells and this grid don't overlap cleanly).
 
+use crate::detect;
 use crate::font_small as font;
 use crate::pdinfo::{self, COLS};
 use crate::tft;
@@ -38,6 +41,7 @@ struct Scr {
     bar_pages: u8,
     bar_seg: u8, /* next scroll-bar segment to draw (0 = bar up to date) */
     active: bool,
+    det: bool, /* line source: detect.rs, else pdinfo.rs */
     clear: bool,
     work: bool, /* something may differ from the panel */
 }
@@ -56,6 +60,7 @@ static SCR: Racy<Scr> = Racy(core::cell::UnsafeCell::new(Scr {
     bar_pages: 0,
     bar_seg: 0,
     active: false,
+    det: false,
     clear: false,
     work: false,
 }));
@@ -66,10 +71,12 @@ fn st() -> &'static mut Scr {
 }
 
 /// Screen selected (also re-selected after a rotation change): clear, back
-/// to page 1, repaint everything on the next draw.
-pub fn enter() {
+/// to page 1, repaint everything on the next draw. `det` = the detection
+/// screen.
+pub fn enter(det: bool) {
     let s = st();
     s.active = true;
+    s.det = det;
     s.clear = true;
     s.work = true;
     s.page = 0;
@@ -87,35 +94,60 @@ pub fn leave() {
     }
 }
 
-fn pages() -> u8 {
-    pdinfo::lines().div_ceil(ROWS).clamp(1, 255) as u8
+fn lines(det: bool) -> usize {
+    if det {
+        detect::lines()
+    } else {
+        pdinfo::lines()
+    }
+}
+
+fn line(det: bool, i: usize, out: &mut [u8; COLS]) -> u16 {
+    if det {
+        detect::line(i, out)
+    } else {
+        pdinfo::line(i, out)
+    }
+}
+
+fn pages(det: bool) -> u8 {
+    lines(det).div_ceil(ROWS).clamp(1, 255) as u8
+}
+
+/// A detection run starts: its screen (if shown) back to page 1.
+pub fn top() {
+    let s = st();
+    if s.det {
+        s.page = 0;
+    }
 }
 
 /// Next page (wraps). The caller redraws.
 pub fn next_page() {
     let s = st();
-    s.page = if s.page as u32 + 1 >= pages() as u32 { 0 } else { s.page + 1 };
+    s.page = if s.page as u32 + 1 >= pages(s.det) as u32 { 0 } else { s.page + 1 };
 }
 
 /// (page, pages), 0-based page.
 pub fn page() -> (u8, u8) {
-    (st().page, pages())
+    let s = st();
+    (s.page, pages(s.det))
 }
 
-/// Format the shown page from pdinfo. Never touches the hardware.
+/// Format the shown page from the line source. Never touches the hardware.
 #[inline(never)]
 pub fn draw() {
     let s = st();
     if !s.active {
         return;
     }
-    let pages = pages();
+    let pages = pages(s.det);
     if s.page >= pages {
         s.page = 0;
     }
     for (r, (want, want_c)) in s.want.iter_mut().zip(s.want_c.iter_mut()).enumerate() {
         let mut l = [b' '; COLS];
-        let c = pdinfo::line(s.page as usize * ROWS + r, &mut l);
+        let c = line(s.det, s.page as usize * ROWS + r, &mut l);
         if l != *want || c != *want_c {
             *want = l;
             *want_c = c;

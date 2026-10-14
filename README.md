@@ -15,7 +15,7 @@ else, including the stock firmware.
   hardware timer at 250 Hz, so how fast a host polls has no effect on how
   fresh the readings are. Also: NTC temperature, D+/D− voltages, and
   mAh/mWh energy counters with run time.
-- **Screens.** Five screens, and K1 steps through them:
+- **Screens.** Six screens, and K1 steps through them:
   1. V / A / W
   2. mAh, mWh, and run time
   3. temperature, D+, and D−
@@ -24,6 +24,9 @@ else, including the stock firmware.
      VBUS, the CC line and Type-C current, the cable's e-marker, and
      message counters. Short-press K2 for the next page (a bar on the
      right shows where you are).
+  6. charger detection: short-press K2 to find out what the charger
+     supports (see "Charger protocol detection" below). Results take a few
+     pages; K2 steps through them, and K2 on the last page runs it again.
 
   Hold K2 for 1 s to reset the energy counters. The screen turns off
   after 15 s with no change in the readings, and any key wakes it.
@@ -54,7 +57,11 @@ else, including the stock firmware.
   and ask for confirmation unless you pass `--yes`.
 - **Charger protocol detection.** Reports what the charger on the meter
   supports (Apple/Samsung dividers, QC, AFC, Type-C current, the full USB-PD
-  offer) without ever raising the voltage.
+  offer) without ever raising the voltage — on the meter's detection screen
+  (K2, ~10 s) or from a computer with `tools/detect.py` (`--device` runs
+  the meter's own detection). Plug only the charger in: the meter refuses
+  to run while current flows to the other port (over 30 mA) or a USB-C
+  device is seen there, and it leaves PD off when done.
 - **USB-PD sniffing.** Put a charger on one side and a phone or laptop on
   the other, and the meter records their whole PD conversation: offers,
   requests, accept/ready, vendor messages, and the charger's queries to an
@@ -70,9 +77,8 @@ else, including the stock firmware.
 
 - There is no on-device menu. Settings are changed from a computer with
   `tools/cfg.py`.
-- The stock "quick charge protocol detection" screen and the on-device
-  PD trigger menu are missing. Triggers and detection are host-driven only
-  (`tools/detect.py`).
+- The on-device PD/QC trigger menu is missing. Triggers are host-driven
+  only.
 - RuiDeng's own PC and phone apps are only partly supported: live
   readings and screen rotation work, but page switching (next/previous
   screen) works over BLE only.

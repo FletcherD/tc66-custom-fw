@@ -177,6 +177,7 @@ Verbs:
 | `pdinf` | `OK`+page+pages+n+n×22 B | our trigger verb: the PD screen's text (pdinfo.rs) — every line, 22 ASCII bytes each, space-padded; page = the one the screen shows (0-based). `pdinf\x01` first advances the page (as K2 on the PD screen) (tools/pd.py info) |
 | `pdreq` | `OK` / `ER` | our trigger verb: `pdreq <n> [mv u16][ma u16]` — request source PDO n (1-based; fixed, or PPS APDO with a setpoint) — **raises OUT voltage** |
 | `qctrg` | `OK` / `ER`+code | our trigger verb: `qctrg <mode>` QC2.0 D+/D− trigger, mode 0/1/2/3 = 5/9/12/20 V; the first call runs the detecting QC handshake (~1.5 s) and fails with ER 0x20 (no D+/D− short) / 0x21 (DCP without QC), pins released — **raises OUT voltage** (qc.rs, tools/qc.py) |
+| `detct` | `OK` / `ER`+code; `OK`+busy+n+n×22 B | our trigger verb: `detct\x01` starts an on-device charger detection run (never above 5 V; ~10 s) — ER 0x01 busy, 0x02 PD sink session armed, 0x03 sniffer sees a sink, 0x04 load > 30 mA; `detct` returns busy (u8) + the detection screen's text lines, 22 ASCII bytes each (detect.rs, tools/detect.py --device) |
 | `qcdet` | `OK`+8 B | our trigger verb: QC handshake probe, never sets a voltage (~1.5 s): class u8 (0 = no D+/D− short, 1 = DCP without QC, 2 = QC) + D+, D− at 0.1 s, D− at 1.5 s (u16 LE mV); pins released after (tools/detect.py) |
 | `qc3ct` | `OK` / `ER` | our trigger verb: `qc3ct <dir> <count>` QC3.0 continuous, dir 0/1 = up/down, count 200 mV steps — **raises OUT voltage** |
 | `afctr` | `OK` / `ER`+code | our trigger verb: `afctr <byte> [reps]` Samsung AFC serial trigger on D−, byte = voltage/current nibbles (0x46 = 9 V, 0x08 = 5 V); closed-loop (reads the charger Sping on PB4); first call blocks ~2.3 s on entry; ER 0x22 = the charger never answered (so `afctr 0x08` is a 5 V AFC probe) — **raises OUT voltage** (qc.rs) |
@@ -188,7 +189,7 @@ Keeping `getva` byte-compatible (same reply) lets existing host tools work
 unchanged. Verbs are grouped by cargo feature (docs/DEVELOPMENT.md "Feature
 sets"): the product verbs above (`getva query rotat gtrec cfgrd cfgwr updat
 versn eeprd rawva`) are always served; the trigger verbs (`pdctl pdsta pdcap
-pdinf pdreq qctrg qc3ct qcdet afctr qcoff`) need `triggers` (in release builds);
+pdinf pdreq qctrg qc3ct qcdet afctr qcoff detct`) need `triggers` (in release builds);
 the dev verbs need their group — `dev-board` (`i2crd adcrd gpird gpiot
 clkrd keyrd rstrd wdtst idlrd`), `dev-tft` (`uiscr tftfl tftbl tftui tftrd`), `dev-bt`
 (`btini btcmd btget btrun btsta btspy`), `fcp` (the untested
@@ -490,8 +491,9 @@ trigger holds them; `qcoff` releases all four pins.
   pull-up when released — verified with `keyrd`); polled at 250 Hz with 20 ms
   debounce (keys.rs), no EXTI. K1 = next screen, K2 held 1 s = reset the active
   energy group + run clock, K2 short press (released before 1 s) on the PD
-  screen = next page (or start the sniffer if PD is off); any press wakes an
-  idle-off screen.
+  screen = next page (or start the sniffer if PD is off), on the detection
+  screen = next page, or a detection run on the last page; any press wakes
+  an idle-off screen.
 
 ### Bluetooth
 - A **DX-BT24-M** BLE module on **USART1**: **TX = PA2 (AF1), RX = PB0 (AF4)**

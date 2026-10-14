@@ -78,7 +78,8 @@ fn drive(levels: (bool, bool, bool, bool)) {
 }
 
 /// A D± line via its ADC channel (1 = D+, 9 = D−) in mV; 0 on an ADC error.
-fn line_mv(ch: u8) -> u16 {
+#[inline(never)]
+pub fn line_mv(ch: u8) -> u16 {
     crate::adc::read_sum16(ch).map_or(0, |s| (s * 3300 / 65520) as u16)
 }
 
@@ -96,22 +97,32 @@ const E_NO_HVDCP: u8 = 0x21;
 /// Fills `out` = [class, D+ mV, D− early mV, D− late mV] (class 0 = no short,
 /// 1 = DCP without QC, 2 = QC); returns the class. Leaves D− released.
 fn hvdcp_entry(out: &mut [u16; 4]) -> u16 {
-    config_pins();
-    drive(LEVELS[0]); /* D+ 0.6 V */
-    dm_drive(false);
+    hvdcp_begin();
     hold_50ms(2);
     out[1] = line_mv(1);
     out[2] = line_mv(9);
     hold_50ms(28);
     out[3] = line_mv(9);
-    out[0] = if out[2] < DM_LOW_MV {
+    out[0] = hvdcp_class(out[2], out[3]);
+    out[0]
+}
+
+/// The handshake's drive: D+ 0.6 V, D− released (detect.rs times the reads).
+pub fn hvdcp_begin() {
+    config_pins();
+    drive(LEVELS[0]);
+    dm_drive(false);
+}
+
+/// Class from D− at 0.1 s and 1.5 s (see `hvdcp_entry`).
+pub fn hvdcp_class(dm_early: u16, dm_late: u16) -> u16 {
+    if dm_early < DM_LOW_MV {
         0
-    } else if out[3] >= DM_LOW_MV {
+    } else if dm_late >= DM_LOW_MV {
         1
     } else {
         2
-    };
-    out[0]
+    }
 }
 
 /// QC entry for `trigger`/`qc3` on the first call after `off()`: the
@@ -617,14 +628,33 @@ fn accp_entry() {
     if unsafe { *ENTERED.0.get() } {
         return;
     }
+    accp_release();
+    hold_50ms(4); /* 200 ms preamble, all released */
+    accp_hold();
+    hold_50ms(41); /* 2050 ms hold */
+    accp_entered();
+}
+
+/// Entry phase 1 (`accp_entry`; detect.rs runs the phases from the main
+/// loop): all four pins released.
+pub fn accp_release() {
+    config_pins();
     dp_drive(false);
     dm_drive(false);
-    hold_50ms(4); /* 200 ms preamble, all released */
+}
+
+/// Entry phase 2: D+ 0.6 V, D− released.
+pub fn accp_hold() {
     dp_drive(true);
-    drive((true, false, false, false)); /* D+ 0.6 V, D− released */
-    hold_50ms(41); /* 2050 ms hold */
-    unsafe { *ENTERED.0.get() = true };
-    unsafe { *IN_QC3.0.get() = false };
+    drive((true, false, false, false));
+}
+
+/// Entry complete: the next `afc`/`fcp*` call skips the entry.
+pub fn accp_entered() {
+    unsafe {
+        *ENTERED.0.get() = true;
+        *IN_QC3.0.get() = false;
+    }
 }
 
 /// Mping → Sping → `frame` → Mping → Sping.

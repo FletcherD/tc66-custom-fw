@@ -51,6 +51,8 @@ mod aes256;
 mod board;
 mod bt;
 mod cfg;
+#[cfg(feature = "triggers")]
+mod detect;
 mod eeprom;
 mod flasher;
 mod font;
@@ -89,7 +91,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 150;
+const BUILD_ID: u32 = 154;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -333,6 +335,9 @@ fn run() -> ! {
         /* FUSB302 PD sink engine — no-op until armed by `pdctl 1` */
         #[cfg(feature = "triggers")]
         pd::service();
+        /* charger detection run (K2 / `detct`) — no-op unless a step is due */
+        #[cfg(feature = "triggers")]
+        detect::service();
         let now = ina::ticks();
         let elapsed = now.wrapping_sub(last_ticks);
         last_ticks = now;
@@ -367,7 +372,7 @@ fn run() -> ! {
             #[cfg(feature = "triggers")]
             if ui::screen() != last_screen {
                 last_screen = ui::screen();
-                if last_screen == ui::PD && pd::is_off() {
+                if last_screen == ui::PD && pd::is_off() && !detect::busy() {
                     let _ = pd::sniff(); /* failure shows as "PD off" */
                 }
             }
@@ -633,6 +638,9 @@ fn on_packet(buf: &[u8]) {
     } else if match5(buf, b"fcprd") {
         #[cfg(feature = "fcp")]
         do_fcprd(buf);
+    } else if match5(buf, b"detct") {
+        #[cfg(feature = "triggers")]
+        do_detct(buf.get(5) == Some(&1));
     } else if match5(buf, b"qcoff") {
         #[cfg(feature = "triggers")]
         reply_ok_er(qc::off());
@@ -1196,13 +1204,19 @@ fn do_fcprd(buf: &[u8]) {
 }
 
 /// K2 short press: on the PD screen, start the sniffer if the PD engine is
-/// off, else show the next page.
+/// off, else show the next page; on the detection screen, next page or (on
+/// the last page) a detection run (detect::k2).
 #[inline(never)]
 fn k2_short() {
     #[cfg(feature = "triggers")]
-    if ui::screen() == ui::PD {
+    if ui::screen() == ui::DET {
+        detect::k2();
+        ui::draw(persist::run_secs());
+    } else if ui::screen() == ui::PD {
         if pd::is_off() {
-            let _ = pd::sniff(); /* failure shows as "PD off" */
+            if !detect::busy() {
+                let _ = pd::sniff(); /* failure shows as "PD off" */
+            }
         } else {
             pdscr::next_page();
         }
@@ -1227,6 +1241,27 @@ fn do_pdinf(next: bool) {
     for i in 0..n {
         let mut l = [b' '; pdinfo::COLS];
         pdinfo::line(i, &mut l);
+        write_all(&l);
+    }
+}
+
+/// trigger verb: detct 1 -> start a charger detection run: "OK", or "ER" +
+/// code (detect.rs E_*: busy, PD sink armed, sink seen, load). detct ->
+/// "OK" + running + n + n x COLS bytes: the detection screen's text lines.
+#[cfg(feature = "triggers")]
+#[inline(never)]
+fn do_detct(start: bool) {
+    if start {
+        let r = detect::start();
+        ui::draw(persist::run_secs());
+        reply_ok_er(r);
+        return;
+    }
+    let n = detect::lines();
+    write_all(&[b'O', b'K', detect::busy() as u8, n as u8]);
+    for i in 0..n {
+        let mut l = [b' '; pdinfo::COLS];
+        detect::line(i, &mut l);
         write_all(&l);
     }
 }

@@ -21,6 +21,11 @@ modes):
               pdcap (Source_Capabilities); then pdctl 0
 Between steps `qcoff` releases D+/D- and the charger gets time to fall back.
 
+--device runs the same detection ON the meter instead (the `detct` verb —
+the detection screen's state machine, also started by K2 on that screen) and
+prints the screen's text lines; the meter refuses (ER) while a PD sink
+session is armed, the sniffer sees a sink, or the load exceeds 30 mA.
+
 Nothing should be plugged into the other port: the probes drive D+/D- and
 present Rd on CC, and a device there would take part in (and disturb) the
 handshakes. The current reads unsigned: with the charger on OUT and the
@@ -96,6 +101,33 @@ def fcp_read(s, reg, n):
     return "no answer (firmware without the `fcp` feature?)"
 
 
+DETCT_ER = {1: "a run is already in progress", 2: "PD sink session armed (pdctl 0 first)",
+            3: "the sniffer sees a sink on the other port", 4: "load current above 30 mA"}
+
+
+def device_run(s, timeout):
+    """Start the on-device detection (detct 1), wait for it, print its lines."""
+    r = cmd(s, b"detct\x01", 3, 1.0)
+    if r[:2] == b"ER" and len(r) == 3:
+        print("refused:", DETCT_ER.get(r[2], f"ER 0x{r[2]:02x}"))
+    elif r != b"OK":
+        sys.exit(f"detct: bad reply {r!r} (firmware without detection?)")
+    t_end = time.time() + timeout
+    while True:
+        r = cmd(s, b"detct", 4, 1.0)
+        if r[:2] != b"OK" or len(r) != 4:
+            sys.exit(f"detct: bad reply {r!r}")
+        busy, n = r[2], r[3]
+        lines = s.read(n * 22)
+        if not busy or time.time() > t_end:
+            break
+        time.sleep(0.5)
+    for i in range(n):
+        print(lines[22 * i:22 * i + 22].decode(errors="replace").rstrip())
+    if busy:
+        sys.exit("timed out while the run was still in progress")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -105,10 +137,17 @@ def main():
                     help="seconds to wait for PD Source_Capabilities (default: %(default)s)")
     ap.add_argument("--no-fcp", action="store_true", help="skip the FCP step (default: off)")
     ap.add_argument("--no-pd", action="store_true", help="skip the PD step (default: off)")
+    ap.add_argument("--device", action="store_true",
+                    help="run the meter's own detection (detct) and print its result (default: off)")
+    ap.add_argument("--timeout", type=float, default=30.0,
+                    help="--device: seconds to wait for the run (default: %(default)s)")
     a = ap.parse_args()
 
     s = open_meter()
     print("firmware:", cmd(s, b"versn", 32, 1.0).decode(errors="replace"))
+    if a.device:
+        device_run(s, a.timeout)
+        return
     cmd(s, b"pdctl\x00", 2, 1.0)
     release(s, a.settle)
 
@@ -153,11 +192,16 @@ def main():
     if not a.no_pd:
         cmd(s, b"pdctl\x01", 2, 1.0)
         st = None
+        bc = 0
         t_end = time.time() + a.pd_wait
         while time.time() < t_end:
             r = cmd(s, b"pdsta", 22, 1.0)
             if r[:2] == b"OK" and len(r) == 22:
                 st = r[2:]
+                # Rp: BC_LVL only from a poll without CC activity (one taken
+                # during BMC traffic reads low)
+                if 2 <= st[0] <= 5 and not st[7] & 0x40:
+                    bc = st[7] & 3
                 if st[2] and st[0] == 5:  # caps stored, contract (5 V PDO 1)
                     break
             time.sleep(0.25)
@@ -170,7 +214,7 @@ def main():
             if st[0] <= 1:  # off / wait-attach: no Rp seen on either CC
                 print("\n[Type-C] no Type-C source on CC (Type-A charger or A-to-C cable)")
             else:
-                print(f"\n[Type-C] CC{st[1]}, Rp advertises {BC_LVL[st[7] & 3]}")
+                print(f"\n[Type-C] CC{st[1]}, Rp advertises {BC_LVL[bc]}")
                 rev = {1: "PD 2.0", 2: "PD 3.0"}.get(st[13], "?")
                 print(f"[PD] {rev}, {len(pd_caps)} PDO(s):" if pd_caps else "[PD] no Source_Capabilities")
                 for i, p in enumerate(pd_caps, 1):

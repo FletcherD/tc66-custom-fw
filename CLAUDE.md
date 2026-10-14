@@ -6,13 +6,17 @@ M1 (real calibrated measurement), M2 persistence (eeprom.rs/cfg.rs/
 persist.rs: stock-compatible EEPROM layout — settings via `cfgrd`/`cfgwr`
 + tools/cfg.py, energy ring, datalog + `gtrec`, run count/serial in
 getva; docs/HARDWARE.md "EEPROM layout", docs/FIRMWARE.md "Persistence"), the M3 basics (ST7735S driver in
-tft.rs + five screens in ui.rs — V/I/P, energy + run clock, temp/D±,
+tft.rs + six screens in ui.rs — V/I/P, energy + run clock, temp/D±,
 plot.rs's full-screen V/I plot on the panel's hardware rolling scroll, and
 pdscr.rs's paged PD info screen (pdinfo.rs parser fed at pd.rs's capture
 points, 7×13 font_small.rs, scroll bar; entering it starts the sniffer if
-PD is off — never at boot; `pdinf` verb + `pd.py info`) —
+PD is off — never at boot; `pdinf` verb + `pd.py info`), and detect.rs's
+charger detection screen on the same grid (K2 runs tools/detect.py's
+sequence on the device as a main-loop-stepped state machine, ≤5 V,
+refuses with a load/sink on the other port, ends PD off; `detct` verb +
+`detect.py --device`) —
 with no-change screen-off after `idle_off_s` (default 15 s); keys.rs polls K1/K2 — K1 next screen, K2
-held 1 s resets energy, K2 short press = next PD page, any press wakes; `keyrd`/`uiscr` dev verbs), the
+held 1 s resets energy, K2 short press = next page (detection: a run on the last page), any press wakes; `keyrd`/`uiscr` dev verbs), the
 FWDGT watchdog (wdg.rs, ~13 s, fed per loop pass + inside the flasher —
 bench-verified with tools/wdgtest.py; `rstrd` reads the reset cause), the
 BLE link (bt.rs: DX-BT24-M on USART1 at 9600 — its power-on default, it
@@ -89,7 +93,9 @@ Makefile's `DEV_FEATURES` — dev verb groups `fcp`/`dev-board`/`dev-bt`/
 groups in current use) + `pcprf`; `make release` / `RELEASE=1` builds the
 defaults only. New debug verbs go behind a dev group (or a new one).
 Charger protocol detection at 5 V: `tools/detect.py` (`qcdet`, `afctr 0x08`
-probe, `fcprd`, PD caps). **Version**: just BUILD_ID (no semver),
+probe, `fcprd`, PD caps) or on-device (screen 5 / `detct`). Flash is nearly
+full (release ~250 B spare): `DEV_FEATURES` = `pcprf` only — `dev-board`
+(~0.8 KB over) and `dev-tft` no longer fit beside the detection screen. **Version**: just BUILD_ID (no semver),
 shown on the ~2 s boot splash (ui.rs `SPLASH`) and by the `versn` verb.
 Host trigger tools (pd.py/qc.py) go through tools/trigger_guard.py
 (default --max-v 9, confirmation unless --yes).
