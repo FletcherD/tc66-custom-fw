@@ -602,7 +602,10 @@ PD traffic.
   current / speed — via `tools/pd_decode.py`; vendor/product names from the
   system `usb.ids` (PD shares the USB-IF vendor IDs; cable PD product IDs
   are vendor-assigned and mostly unlisted; the Cert Stat XID is only
-  searchable on usb.org); needs root for the
+  searchable on usb.org). Field layouts are checked against the Linux
+  kernel's `include/linux/usb/pd.h` + `pd_vdo.h` (bit-by-bit PD 2.0/3.x VDO
+  comments; Chromium EC's `include/usb_pd_vdo.h` agrees) — the reference to
+  use when extending the decoder; needs root for the
   vendor interface — `sudo $(uv run -q --script tools/pdcap.py
   --python-path) tools/pdcap.py 30`). It polls back-to-back while events
   flow: one 64-B packet carries only one or two events and the ring has 8
