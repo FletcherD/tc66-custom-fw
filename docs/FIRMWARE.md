@@ -564,12 +564,48 @@ past the ~10 s keepalive deadline).
   a source plugged in before we armed has exhausted its Source_Capabilities
   retries against a silent sink and stopped listening; only a detach makes it
   start over — bench-hit) → attach + orientation via the BC_LVL comparator →
-  BMC on the active CC, PD_RESET → collect caps (asking Get_Source_Cap every
-  500 ms if none arrive) → **immediately Request PDO 1** (5 V — a sink that
+  BMC on the active CC, PD_RESET → **cable-listen phase** (below) → collect
+  caps (asking Get_Source_Cap every 500 ms if none arrive) → **immediately
+  Request PDO 1** (5 V — a sink that
   GoodCRCs caps but never Requests is hard-reset by the source ~30 ms later)
   → Accept → PS_RDY = contract. `pdreq <n> [mv] [ma]` renegotiates; hard/soft
   reset and detach are handled (detach debounce: BC_LVL=0 with no BMC activity
   for 10 polls).
+- **Cable-listen phase** (`sop1_start`/`sop1_end`): a source probes the
+  cable's e-marker (SOP′ Discover Identity) right after attach, before its
+  first caps (Apple 96 W: within ~4 ms). With SOP′ reception on, AUTO_CRC
+  would GoodCRC that probe too ("back to the relevant SOP*" — datasheet)
+  and collide with the e-marker's own GoodCRC, so after attach and after
+  every hard reset the sink runs listen-only: Switches1 without AUTO_CRC,
+  Control1 ENSOP1/2 + the two _DEBUG variants. The first Source_Cap (left
+  unacknowledged) or ~1 s ends it: AUTO_CRC on, **then** the RX flush
+  (stale, never-acknowledged caps must not be answered), SOP′ off; the
+  source's next caps start the normal flow. Bench: the Apple cable's
+  identity is captured on every attach in sink mode (PD screen `CBL …`);
+  the contract follows within ~0.1 s, or ~1 s when the charger doesn't
+  re-send its caps (the Get_Source_Cap ask recovers it). After a hard reset
+  the Apple charger didn't re-probe a cable it already knew.
+- **TX completion:** a message counts as delivered on I_TXSENT **or** on the
+  partner's GoodCRC with our message id in the RX FIFO, whichever is seen
+  first (`tx_done`, guarded by `tx_pend`). The FUSB302 is a PD 2.0 part and
+  reads the message type as 4 bits: it sends control type 17
+  (Get_Source_Cap_Ext) as type 1 = GoodCRC, which expects no acknowledge —
+  I_TXSENT and I_RETRYFAIL never fire for it (bench 4/4), leaving
+  `tx_pend` stuck without the FIFO path. (The Apple 96 W, also PD 2.0,
+  answers Get_Source_Info — type 23 — with its Source_Capabilities: 23 & 0xF
+  = Get_Source_Cap.)
+- **`pdsnd`** (`dev-pd` group): sends one host-built SOP message from a
+  contracted sink (`pd.py ask srccapext|mfrinfo|status|discid|…|raw:…`);
+  the source's next message is its answer and is never Not_Supported'ed;
+  `pdsta` byte 20 shows tx_pend / cable-listen / asked. Read the answer
+  with `pdcap.py` (or `tools/pdseq.py`, which runs a capture around a
+  sequence of `pd.py` steps).
+- **Open:** a rare sticky `pdsta` error 0x84 (I²C NACK/bus error while
+  writing a byte) on the FUSB302 FIFO register 0x43 — about 1 in 10 sink
+  sessions, often the first arm after boot; present before the cable-listen
+  phase too (build 157: 1/10); not reproducible on demand, the next poll
+  recovers. `pdsta` byte 21 reports the register of the last failed
+  transaction.
 - **Rev negotiation:** the FUSB302 hardware GoodCRC carries a rev field, so we
   lead with **rev 2.0** in Switches1 (a 3.0-stamped GoodCRC to a 2.0 message
   makes some sources — the Apple 96 W — soft/hard-reset the link) and upgrade

@@ -93,7 +93,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 157;
+const BUILD_ID: u32 = 161;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -576,6 +576,17 @@ fn on_packet(buf: &[u8]) {
     } else if match5(buf, b"pdcap") {
         #[cfg(feature = "triggers")]
         do_pdcap();
+    } else if match5(buf, b"pdsnd") {
+        #[cfg(feature = "dev-pd")]
+        {
+            /* pdsnd <type> <objects…>: send one SOP message from the
+             * contracted sink (type bit 7 = extended) — pd::send_raw */
+            let r = match buf.get(5) {
+                Some(&t) => pd::send_raw(t, &buf[6..]),
+                None => Err(0x0F),
+            };
+            reply_ok_er(r);
+        }
     } else if match5(buf, b"pdreq") {
         #[cfg(feature = "triggers")]
         {
@@ -1272,11 +1283,11 @@ fn do_detct(start: bool) {
 #[cfg(feature = "triggers")]
 #[inline(never)]
 fn do_pdsta() {
-    let mut reply = [0u8; 22];
+    let mut reply = [0u8; 24];
     reply[..2].copy_from_slice(b"OK");
-    let mut st = [0u8; 20];
+    let mut st = [0u8; 22];
     pd::status(&mut st);
-    reply[2..22].copy_from_slice(&st);
+    reply[2..24].copy_from_slice(&st);
     write_all(&reply);
 }
 

@@ -35,7 +35,13 @@ events; `pdctl 2` while sniffing re-triggers the negotiation; read with
 tools/pdcap.py under sudo — decodes all PD message types incl. identities,
 extended caps/status, chunk reassembly via tools/pd_decode.py (layouts from
 the USB PD R3.2 spec; regression vectors in tools/pd_decode_test.py;
-`--save`/`--replay` for offline re-decoding); tools/pdlog_check.py scores a capture; bench-verified
+`--save`/`--replay` for offline re-decoding; tools/pdseq.py runs a capture
+around a sequence of pd.py steps); tools/pdlog_check.py scores a capture.
+The sink also captures the source's cable probe at attach (listen-only, no
+AUTO_CRC, until the first caps — FIRMWARE.md "Cable-listen phase"), and in
+`dev-pd` builds asks the source for PD 3.x info (`pdsnd` + `pd.py ask`; the
+FUSB302 sends type 17 as a GoodCRC — TX completes on the FIFO GoodCRC);
+bench-verified
 with an Apple charger + Pixel/Moto; this unit's OUT-port CC2 contact is
 near-open, so sink attach / hard reset only work with the line on CC1 —
 a board fault, not firmware: both CC nodes are unloaded at DC and no GPIO
@@ -93,13 +99,13 @@ server — never redistribute vendor binaries, `backup-eeprom` via `eeprd`,
 `version`). **Feature sets**: cargo default = release = `triggers` (PD/QC/
 AFC trigger + detection verbs); `make flash`/`make recover` add the
 Makefile's `DEV_FEATURES` — dev verb groups `fcp`/`dev-board`/`dev-bt`/
-`dev-tft` (`dev-verbs` = all; they no longer fit together, so carry only the
+`dev-tft`/`dev-pd` (`dev-verbs` = all; they no longer fit together, so carry only the
 groups in current use) + `pcprf`; `make release` / `RELEASE=1` builds the
 defaults only. New debug verbs go behind a dev group (or a new one).
 Charger protocol detection at 5 V: `tools/detect.py` (`qcdet`, `afctr 0x08`
 probe, `fcprd`, PD caps) or on-device (screen 5 / `detct`). Flash is nearly
-full (release ~250 B spare): `DEV_FEATURES` = `pcprf` only — `dev-board`
-(~0.8 KB over) and `dev-tft` no longer fit beside the detection screen. **Version**: just BUILD_ID (no semver),
+full (build 161: release ~1.7 KB spare, dev ~1.5 KB): `DEV_FEATURES` =
+`pcprf dev-pd`. **Version**: just BUILD_ID (no semver),
 shown on the ~2 s boot splash (ui.rs `SPLASH`) and by the `versn` verb.
 Host trigger tools (pd.py/qc.py) go through tools/trigger_guard.py
 (default --max-v 9, confirmation unless --yes).

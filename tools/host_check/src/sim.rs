@@ -18,7 +18,7 @@ pub struct Sim {
     pub afc_ok: bool,
     pub fcp: Result<[u8; 2], u8>,
     pub arm: Result<(), u8>,
-    pub status: [u8; 20],
+    pub status: [u8; 22],
     pub caps: Vec<u32>,
     pub ticks: u32,
 }
@@ -37,7 +37,7 @@ pub const DEFAULT: Sim = Sim {
     afc_ok: false,
     fcp: Err(0x41),
     arm: Ok(()),
-    status: [0; 20],
+    status: [0; 22],
     caps: Vec::new(),
     ticks: 0,
 };
@@ -82,7 +82,7 @@ pub mod pd {
     pub fn arm() -> Result<(), u8> {
         super::get().arm
     }
-    pub fn status(out: &mut [u8; 20]) {
+    pub fn status(out: &mut [u8; 22]) {
         *out = super::get().status;
     }
     pub fn caps(out: &mut [u8; 28]) -> u8 {

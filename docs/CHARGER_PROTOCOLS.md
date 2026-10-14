@@ -145,7 +145,20 @@ device on the other port).
 
 - **Meter as sink** (`pdctl 1`, `pd.py arm`): collects the source's caps
   and takes PDO 1 (5 V) immediately; `pdreq` renegotiates (fixed + PPS,
-  bench-verified 5–20 V, PPS 3.3–11 V). Our own traffic is captured.
+  bench-verified 5–20 V, PPS 3.3–11 V). Our own traffic is captured, and so
+  is the source's cable probe at attach (listen-only phase until the first
+  caps — see the e-marker section), so no device is needed to read the
+  cable.
+- **Asking the source** (sink in contract, `dev-pd` builds: `pd.py ask
+  <what>`, answer read with `pdcap.py` / `tools/pdseq.py`): Get_Source_Cap,
+  Get_Source_Cap_Extended, Get_Manufacturer_Info, Get_Status,
+  Get_PPS_Status, Get_Source_Info, Get_Revision, Get_Country_Codes,
+  Discover Identity, or any raw message. All but Get_Source_Cap and Discover
+  Identity are PD 3.x messages. Bench (Apple 96 W, PD 2.0): Reject to
+  Get_Source_Cap_Extended, Get_Manufacturer_Info, Get_Status,
+  Get_Country_Codes; no answer to Discover Identity; Get_Source_Info
+  answered with Source_Capabilities (the charger reads the type as 4 bits).
+  A PD 3.x charger is needed for its identity.
 - **Meter as listen-only sniffer** (`pdctl 3`, `pd.py sniff`, or entering
   the PD info screen): no Rd, no GoodCRC, never transmits; the receiver
   locks onto the CC carrying the source's Rp; every SOP/SOP′/SOP″ frame from
@@ -194,6 +207,15 @@ device on the other port).
   cable lets the charger offer 5 A even if the device-side cable is 3 A.
 - **Meter:** the sniffer receives SOP′/SOP″ (Control1 ENSOP1/2) and the
   parser shows `CBL 5A USB2 05AC`; `pdcap.py` decodes the full identity.
+  The sink receives it too, at attach: the hardware would GoodCRC SOP′
+  traffic as well (colliding with the e-marker's GoodCRC), so the sink
+  acknowledges nothing until the source's first caps — the cable probe
+  comes before them. Probes after the contract (some PD 3.x sources) are not
+  heard in sink mode.
+- **Actively querying the e-marker** (not implemented): only the VCONN
+  source may talk SOP′; the meter can't supply VCONN, so it could only ask
+  the charger-side cable while the charger powers it, sharing the cable's
+  message-id counter with the charger.
 - **Bench:** Apple cable → passive cable, VID 0x05AC (Apple), PID 0x1781,
   XID 2598, 5 A, USB 2.0 only, Type-C, latency class ~2 m.
 
@@ -212,7 +234,8 @@ sink, or the load exceeds 30 mA (re-checked after the first settle; the
 meter's own supply reads 10–13 mA when the charger is on OUT). Ends with
 the PD engine off and D± released. Host: `detct\x01` starts a run,
 `detct` returns busy + the screen lines; `uv run tools/detect.py --device`.
-Doesn't show a cable e-marker (the sink doesn't receive SOP′).
+Doesn't show the cable e-marker (the PD screen and `pd.py info` do after a
+sink attach).
 
 ## What we can learn — summary
 
@@ -226,9 +249,9 @@ Doesn't show a cable e-marker (the sink doesn't receive SOP′).
 | PD offer (all PDOs) | Source_Caps | sink: active (5 V contract); sniff: yes | `pdcap`, `pdinf`, `pdcap.py` |
 | Negotiated contract | Request + PS_RDY | sniff: yes | `pdinf`, PD screen, `pdcap.py` |
 | PD revision, roles | message headers | yes | `pdcap.py`, `pdinf` |
-| Cable rating / vendor / speed | SOP′ Discover Identity | sniff: yes (charger asks) | `pdcap.py`, PD screen |
+| Cable rating / vendor / speed | SOP′ Discover Identity | yes, the charger asks at attach (sniff, and sink before its first caps) | `pdcap.py`, PD screen |
 | Device (sink) identity | SOP Discover Identity ACK from the device — the charger, as DFP, asks; Sink_Capabilities_Extended | sniff: yes when answered (phones often NAK) | `pdcap.py` |
-| Charger identity | Source_Capabilities_Extended, Manufacturer_Info, or the charger's Discover Identity ACK — only when the device asks (PD 3.x) | sniff: yes when the device asks; never with a PD 2.0 charger (no extended messages) | `pdcap.py` |
+| Charger identity | Source_Capabilities_Extended, Manufacturer_Info, or the charger's Discover Identity ACK (PD 3.x) | sniff: when the device asks; sink: we ask (`pd.py ask`, dev-pd); a PD 2.0 charger Rejects | `pdcap.py` |
 | QC2 requested level (by a device) | D± levels | yes, not implemented | — |
 | AFC/FCP traffic (device ↔ charger) | D− serial | needs timer capture, not implemented | — |
 | VBUS / current under the contract | INA226 | yes | everywhere (current unsigned) |
@@ -239,7 +262,9 @@ Doesn't show a cable e-marker (the sink doesn't receive SOP′).
   `fcprd` (if built), Type-C Rp + PD caps; nothing on the other port.
   `--device` runs the on-device detection instead and prints its lines.
 - `tools/pd.py` — `arm` / `off` / `sniff` / `hardreset` / `status` / `caps` /
-  `req` / `info` (the PD screen's lines).
+  `req` / `info` (the PD screen's lines) / `ask` (dev-pd: send a request
+  from the sink). `tools/pdseq.py` — a capture around a sequence of `pd.py`
+  steps (`pdseq.py arm wait:6 ask:srccapext wait:1 status`).
 - `tools/pdcap.py` (sudo) — live KM003C capture with decoding; `--save
   FILE` keeps the raw packets, `--replay FILE` re-decodes them offline (no
   sudo). `tools/pd_decode.py` — the decoders (vendor names from the system
@@ -251,7 +276,8 @@ Doesn't show a cable e-marker (the sink doesn't receive SOP′).
   capture decoder; `tools/fusb_intn.py`, `tools/gpio_cc_sweep.py` — FUSB302
   INT_N and CC wiring checks.
 - Verbs: `qcdet`, `qctrg`, `qc3ct`, `afctr`, `qcoff`, `fcprd`/`fcptr`/`scptr`
-  (`fcp`), `pdctl` 0–3, `pdsta`, `pdcap`, `pdreq`, `pdinf`, `detct` — HARDWARE.md
+  (`fcp`), `pdctl` 0–3, `pdsta`, `pdcap`, `pdreq`, `pdinf`, `detct`, `pdsnd`
+  (`dev-pd`) — HARDWARE.md
   "CDC verb protocol".
 
 ## Known limits on this unit

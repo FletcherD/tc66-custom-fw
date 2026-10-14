@@ -133,8 +133,8 @@ fn det_run(out: &mut String, title: &str, s: Sim) {
 }
 
 /// Status0 BC_LVL, contract flag, rev for the PD step: `pdsta` layout.
-fn status(state: u8, contract: u8, status0: u8, rev: u8) -> [u8; 20] {
-    let mut p = [0u8; 20];
+fn status(state: u8, contract: u8, status0: u8, rev: u8) -> [u8; 22] {
+    let mut p = [0u8; 22];
     p[0] = state;
     p[1] = 1;
     p[2] = contract;

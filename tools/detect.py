@@ -195,8 +195,8 @@ def main():
         bc = 0
         t_end = time.time() + a.pd_wait
         while time.time() < t_end:
-            r = cmd(s, b"pdsta", 22, 1.0)
-            if r[:2] == b"OK" and len(r) == 22:
+            r = cmd(s, b"pdsta", 24, 1.0)
+            if r[:2] == b"OK" and len(r) == 24:
                 st = r[2:]
                 # Rp: BC_LVL only from a poll without CC activity (one taken
                 # during BMC traffic reads low)

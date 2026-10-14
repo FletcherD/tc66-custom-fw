@@ -18,7 +18,8 @@ edition = "2021"
 #   wdtst idlrd).
 # - dev-bt: BLE bring-up verbs (btini btcmd btget btrun btsta btspy).
 # - dev-tft: display bring-up verbs (tftfl tftbl tftui uiscr tftrd).
-# - dev-verbs: all four groups above.
+# - dev-pd: PD experiments (pdsnd: send a host-built message from the sink).
+# - dev-verbs: all five groups above.
 # - pcprf: the TIMER5-veneer PC profiler (ina.rs) + its `pcprf` dump verb
 #   (without it TIMER5_DAC branches straight to the tick body).
 # - grace: the 10 s boot grace window (pseudo-bootloader escape hatch:
@@ -33,7 +34,8 @@ fcp = ["triggers"]
 dev-board = []
 dev-bt = []
 dev-tft = []
-dev-verbs = ["fcp", "dev-board", "dev-bt", "dev-tft"]
+dev-pd = ["triggers"]
+dev-verbs = ["fcp", "dev-board", "dev-bt", "dev-tft", "dev-pd"]
 grace = []
 
 [dependencies]

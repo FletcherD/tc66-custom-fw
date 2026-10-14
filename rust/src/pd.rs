@@ -78,7 +78,8 @@ const MASKB_SNIFF: u8 = 0x01;
 /* backup poll while attached/sniffing (ticks): timeouts, detach, CC sweep */
 const BACKUP_POLL: u32 = 12;
 const C1_RX_FLUSH: u8 = 0x04;
-const C1_ENSOP12: u8 = 0x03; /* also receive SOP' / SOP'' (cable traffic) */
+/* also receive SOP' / SOP'' (cable traffic) and their _DEBUG variants */
+const C1_ENSOP12: u8 = 0x63;
 /* Control3: AUTO_RETRY + N_RETRIES=3 */
 const C3_RETRIES: u8 = 0x07;
 /* Reset */
@@ -178,6 +179,11 @@ pub struct Pd {
     last_rdo: u32, /* last Request object sent (PPS keepalive re-sends it) */
     sink: bool,    /* sniff: a sink's Rd loads the locked CC (pdsta byte 3) */
     rx_full: bool, /* sniff: RX FIFO full at the last poll (edge → event) */
+    sop1: bool,    /* sink: listen-only phase after attach / hard reset (no
+                    * AUTO_CRC, SOP'/SOP'' received) until the first caps */
+    asked: bool,   /* sink: a pdsnd request is out — its answer is not
+                    * Not_Supported'ed */
+    err_reg: u8,   /* register of the last failed I2C transaction (pdsta) */
     poll_tick: u32,
     req_tick: u32,
     cap_ask_tick: u32,
@@ -212,6 +218,9 @@ static PD: Racy<Pd> = Racy(core::cell::UnsafeCell::new(Pd {
     last_rdo: 0,
     sink: false,
     rx_full: false,
+    sop1: false,
+    asked: false,
+    err_reg: 0,
     poll_tick: 0,
     req_tick: 0,
     cap_ask_tick: 0,
@@ -350,16 +359,21 @@ fn stage(e: i2c::I2cErr) -> u8 {
     e.stage
 }
 
+fn failed(reg: u8, e: i2c::I2cErr) -> u8 {
+    pd().err_reg = reg;
+    stage(e)
+}
+
 fn wr(reg: u8, val: u8) -> Result<(), u8> {
-    ina::pause(|| i2c::transact(ADDR, &[reg, val], &mut [])).map_err(stage)
+    ina::pause(|| i2c::transact(ADDR, &[reg, val], &mut [])).map_err(|e| failed(reg, e))
 }
 
 fn wr_buf(buf: &[u8]) -> Result<(), u8> {
-    ina::pause(|| i2c::transact(ADDR, buf, &mut [])).map_err(stage)
+    ina::pause(|| i2c::transact(ADDR, buf, &mut [])).map_err(|e| failed(buf[0], e))
 }
 
 fn rd(reg: u8, buf: &mut [u8]) -> Result<(), u8> {
-    ina::pause(|| i2c::transact(ADDR, &[reg], buf)).map_err(stage)
+    ina::pause(|| i2c::transact(ADDR, &[reg], buf)).map_err(|e| failed(reg, e))
 }
 
 /* ---- verb entry points (thread mode) ---- */
@@ -425,6 +439,9 @@ fn arm_as(state: u8) -> Result<(), u8> {
         last_rdo: 0,
         sink: false,
         rx_full: false,
+        sop1: false,
+        asked: false,
+        err_reg: 0,
         poll_tick: ina::ticks(),
         req_tick: ina::ticks(), /* ST_RD_CYCLE start */
         cap_ask_tick: 0,
@@ -442,9 +459,9 @@ pub fn off() -> Result<(), u8> {
     wr(R_RESET, RST_SW)
 }
 
-/// `pdsta` payload: 20 bytes of engine state.
+/// `pdsta` payload: 22 bytes of engine state.
 #[inline(never)]
-pub fn status(out: &mut [u8; 20]) {
+pub fn status(out: &mut [u8; 22]) {
     let p = pd();
     out[0] = p.state;
     out[1] = p.cc;
@@ -462,6 +479,8 @@ pub fn status(out: &mut [u8; 20]) {
     for i in 0..3 {
         out[14 + 2 * i..16 + 2 * i].copy_from_slice(&p.rx_hdr[i].to_le_bytes());
     }
+    out[20] = p.tx_pend as u8 | (p.sop1 as u8) << 1 | (p.asked as u8) << 2;
+    out[21] = p.err_reg;
 }
 
 pub const MODE_OFF: u8 = 0;
@@ -549,6 +568,23 @@ pub fn request(idx: u8, mv: u16, ma: u16) -> Result<(), u8> {
         }
         _ => Err(0x0E), /* variable/battery APDO kinds: not supported */
     }
+}
+
+/// `pdsnd`: send one host-built SOP message from a contracted sink. `t` =
+/// message type (bit 7: extended), `objs` = its data objects (LE, ≤ 7; an
+/// extended message's first object starts with its extended header); the
+/// header's rev, roles and message id are ours. The source's next message is
+/// taken as the answer (captured, never Not_Supported'ed).
+#[cfg(feature = "dev-pd")]
+#[inline(never)]
+pub fn send_raw(t: u8, objs: &[u8]) -> Result<(), u8> {
+    let p = pd();
+    if p.state != ST_CONTRACT || p.tx_pend || objs.len() % 4 != 0 || objs.len() > 28 {
+        return Err(0x0F);
+    }
+    p.asked = true;
+    p.events = 0; /* pdsta then shows what this exchange raised */
+    send_frame(p, t, (objs.len() / 4) as u8, objs)
 }
 
 /// `pdctl 2`: send a PD Hard Reset (Control3 SEND_HARD_RESET); while
@@ -779,11 +815,7 @@ fn attach_poll(p: &mut Pd) -> Result<(), u8> {
      * soft/hard-reset the link. If a source's caps arrive at 3.0 the
      * handler upgrades Switches1 + our headers before the Request. */
     p.rev = REV20;
-    wr(
-        R_SWITCHES1,
-        sw1_rev(REV20) | SW1_AUTO_CRC | if cc1 { 0x01 } else { 0x02 },
-    )?;
-    wr(R_CONTROL1, C1_RX_FLUSH)?;
+    sop1_start(p)?;
     wr(R_RESET, RST_PD)?;
     p.msg_id = 0;
     p.detach = 0;
@@ -909,10 +941,40 @@ fn rx_ready() -> Result<bool, u8> {
     Ok(s[0] & S1_RX_EMPTY == 0)
 }
 
-/// Flush the RX FIFO, keeping SOP'/SOP'' reception on while sniffing.
+/// Flush the RX FIFO, keeping SOP'/SOP'' reception on while sniffing or in
+/// the sink's listen-only phase.
 fn rx_flush(p: &Pd) -> Result<(), u8> {
-    let ensop = if p.state == ST_SNIFF { C1_ENSOP12 } else { 0 };
+    let ensop = if p.state == ST_SNIFF || p.sop1 { C1_ENSOP12 } else { 0 };
     wr(R_CONTROL1, C1_RX_FLUSH | ensop)
+}
+
+fn txcc(p: &Pd) -> u8 {
+    if p.cc == 1 {
+        0x01
+    } else {
+        0x02
+    }
+}
+
+/// Sink attach / hard reset: listen-only until the source's first
+/// Source_Capabilities. A source probes the cable (SOP' Discover Identity)
+/// before its first caps; with SOP' reception on, AUTO_CRC would GoodCRC
+/// that probe too ("back to the relevant SOP*" — datasheet) and collide with
+/// the e-marker's own GoodCRC, so the hardware acknowledges nothing until
+/// the cable exchange is over.
+fn sop1_start(p: &mut Pd) -> Result<(), u8> {
+    wr(R_SWITCHES1, sw1_rev(p.rev) | txcc(p))?;
+    p.sop1 = true;
+    rx_flush(p)
+}
+
+/// End the listen-only phase: AUTO_CRC on, SOP' off. AUTO_CRC goes on
+/// BEFORE the flush, so the queued (never acknowledged) caps are dropped and
+/// the source's next, acknowledged, caps start the negotiation.
+fn sop1_end(p: &mut Pd) -> Result<(), u8> {
+    wr(R_SWITCHES1, sw1_rev(p.rev) | SW1_AUTO_CRC | txcc(p))?;
+    p.sop1 = false;
+    rx_flush(p)
 }
 
 /// Read one RX FIFO frame (token, header, objects, CRC) into the capture
@@ -927,6 +989,8 @@ fn rx_capture(p: &mut Pd) -> Result<(u16, u8, [u8; 32]), u8> {
         7 => 0,
         6 => 1,
         5 => 2,
+        4 => 3, /* SOP'_DEBUG */
+        3 => 4, /* SOP''_DEBUG */
         _ => {
             rx_flush(p)?;
             cap_conn(CAP_RX_RESYNC);
@@ -957,14 +1021,15 @@ fn active_poll(p: &mut Pd, now: u32) -> Result<(), u8> {
     p.status1 = s1;
 
     if inta & IA_TXSENT != 0 {
-        p.msg_id = (p.msg_id + 1) & 7;
+        tx_done(p);
     }
-    if inta & (IA_TXSENT | IA_RETRYFAIL) != 0 {
+    if inta & IA_RETRYFAIL != 0 {
         p.tx_pend = false;
     }
     if inta & (IA_HARDRST | IA_HARDSENT) != 0 {
-        /* hard reset on the wire: back to listening, source re-sends caps */
-        wr(R_CONTROL1, C1_RX_FLUSH)?;
+        /* hard reset on the wire: back to listening, source re-sends caps
+         * (and re-probes the cable first: listen-only phase again) */
+        sop1_start(p)?;
         wr(R_RESET, RST_PD)?;
         p.msg_id = 0;
         p.tx_pend = false;
@@ -1022,9 +1087,14 @@ fn active_poll(p: &mut Pd, now: u32) -> Result<(), u8> {
         p.state = ST_LISTEN;
     }
 
+    /* listen-only phase: no caps within ~1 s of attach / hard reset (the
+     * source gave up before we armed) — become a normal sink */
+    if p.sop1 && now.wrapping_sub(p.cap_ask_tick) > 250 {
+        sop1_end(p)?;
+    }
     /* no caps yet: the source may have exhausted its caps retries before we
      * armed — ask every ~500 ms */
-    if p.state == ST_LISTEN && p.caps_n == 0 && now.wrapping_sub(p.cap_ask_tick) > 125 {
+    if p.state == ST_LISTEN && p.caps_n == 0 && !p.sop1 && now.wrapping_sub(p.cap_ask_tick) > 125 {
         p.cap_ask_tick = now;
         send(p, CTL_GET_SRC_CAP, &[])?;
     }
@@ -1041,10 +1111,26 @@ fn rx_frame(p: &mut Pd, now: u32) -> Result<(), u8> {
     }
     let nobj = ((hdr >> 12) & 7) as usize;
     let mtype = (hdr & 0x1F) as u8; /* 5-bit in rev 3.0; bit 4 is 0 in 2.0 */
+    if p.sop1 {
+        /* listen-only: nothing was acknowledged; the first caps end it */
+        if hdr & 0x8000 == 0 && nobj > 0 && mtype == DAT_SOURCE_CAP {
+            sop1_end(p)?;
+        }
+        return Ok(());
+    }
+    /* the first message after a pdsnd request is its answer */
+    let answer = p.asked && !(nobj == 0 && mtype == CTL_GOODCRC);
+    if answer {
+        p.asked = false;
+    }
 
     if nobj == 0 {
         match mtype {
-            CTL_GOODCRC => {}
+            CTL_GOODCRC => {
+                if (hdr >> 9 & 7) as u8 == p.msg_id {
+                    tx_done(p);
+                }
+            }
             CTL_ACCEPT => {
                 if p.state == ST_WAIT_ACCEPT {
                     p.state = ST_WAIT_PSRDY;
@@ -1081,7 +1167,7 @@ fn rx_frame(p: &mut Pd, now: u32) -> Result<(), u8> {
                  * Not_Supported; 2.0 lets GoodCRC (hardware) stand alone.
                  * tx_pend gate: one reply at a time — a burst (Apple sends
                  * ~7 VDMs) must not duplicate msg ids / flush TX mid-flight */
-                if p.rev >= REV30 && !p.tx_pend {
+                if p.rev >= REV30 && !p.tx_pend && !answer {
                     send(p, CTL_NOT_SUPPORTED, &[])?;
                 }
             }
@@ -1092,7 +1178,7 @@ fn rx_frame(p: &mut Pd, now: u32) -> Result<(), u8> {
     if hdr & 0x8000 != 0 {
         /* extended message: its type numbers are a separate space (type 1
          * is Source_Capabilities_Extended, not Source_Capabilities) */
-        if p.rev >= REV30 && !p.tx_pend {
+        if p.rev >= REV30 && !p.tx_pend && !answer {
             send(p, CTL_NOT_SUPPORTED, &[])?;
         }
     } else if mtype == DAT_SOURCE_CAP {
@@ -1110,15 +1196,14 @@ fn rx_frame(p: &mut Pd, now: u32) -> Result<(), u8> {
         let rev = (((hdr >> 6) & 3) as u8).clamp(REV20, REV30);
         if rev != p.rev {
             p.rev = rev;
-            let txcc = if p.cc == 1 { 0x01 } else { 0x02 };
-            wr(R_SWITCHES1, sw1_rev(rev) | SW1_AUTO_CRC | txcc)?;
+            wr(R_SWITCHES1, sw1_rev(rev) | SW1_AUTO_CRC | txcc(p))?;
         }
         /* a sink that GoodCRCs caps MUST Request within tSenderResponse or
          * the source hard-resets: immediately take PDO 1 (vSafe5V — no
          * output-voltage change). `pdreq` renegotiates from there. */
         let ma10 = p.caps[0] & 0x3FF;
         send_rdo(p, 1, 1 << 28 | 1 << 24 | ma10 << 10 | ma10)?;
-    } else if p.rev >= REV30 && !p.tx_pend {
+    } else if p.rev >= REV30 && !p.tx_pend && !answer {
         /* VDMs, Alert, … — PD 3.0 requires Not_Supported (tx_pend-gated) */
         send(p, CTL_NOT_SUPPORTED, &[])?;
     }
@@ -1126,6 +1211,19 @@ fn rx_frame(p: &mut Pd, now: u32) -> Result<(), u8> {
 }
 
 /* ---- TX ---- */
+
+/// Our message was acknowledged — on I_TXSENT or on the partner's GoodCRC
+/// with our message id in the RX FIFO, whichever is seen first. The FUSB302
+/// (a PD 2.0 part) reads the message type as 4 bits: it sends control type
+/// 17 (Get_Source_Cap_Ext) as type 1, GoodCRC, which expects no
+/// acknowledge — I_TXSENT never fires for it (bench: 4/4), though the
+/// partner's GoodCRC arrives.
+fn tx_done(p: &mut Pd) {
+    if p.tx_pend {
+        p.tx_pend = false;
+        p.msg_id = (p.msg_id + 1) & 7;
+    }
+}
 
 /// Send a Request carrying `rdo` for object position `idx` and enter
 /// WAIT_ACCEPT. The RDO is remembered for the PPS keepalive.
@@ -1154,11 +1252,13 @@ fn send(p: &mut Pd, mtype: u8, objs: &[u8]) -> Result<(), u8> {
 #[inline(never)]
 fn send_frame(p: &mut Pd, mtype: u8, nobj: u8, objs: &[u8]) -> Result<(), u8> {
     wr(R_CONTROL0, C0_TX_FLUSH)?; /* flush any stale TX */
-    let hdr = (mtype as u16)
+    /* mtype bit 7 = Extended (header bit 15) */
+    let hdr = (mtype as u16 & 0x1F)
+        | ((mtype as u16 & 0x80) << 8)
         | ((p.rev as u16) << 6)
         | ((p.msg_id as u16) << 9)
         | ((nobj as u16) << 12);
-    let mut buf = [0u8; 16];
+    let mut buf = [0u8; 40]; /* 6 tokens + header + 7 objects + 4 tail */
     buf[0] = R_FIFOS;
     buf[1..5].copy_from_slice(&[TK_SOP1, TK_SOP1, TK_SOP1, TK_SOP2]);
     let n = 2 + objs.len();

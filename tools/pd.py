@@ -20,6 +20,11 @@
   pd.py info [next]    the meter's PD screen text (pdinf): parsed source caps,
                        contract, cable, counters; `next` first advances the
                        screen's page as K2 does
+  pd.py ask <what>     (dev-pd builds, sink in contract) send a request to the
+                       source and let tools/pdcap.py capture its answer:
+                       srccap, snkcap, srccapext, status, ppsstatus, countries,
+                       srcinfo, revision, mfrinfo, discid, or
+                       raw:<type>[:<hex object>...] (type | 0x80 = extended)
 
 DANGER: a granted request RAISES THE OUT-PORT VOLTAGE (9/12/15/20 V).
 Nothing should be attached downstream of the meter when triggering. `req`
@@ -138,8 +143,8 @@ def hdr_name(h):
 
 
 def show_status(s):
-    r = xfer(s, b"pdsta", 22)
-    if r[:2] != b"OK" or len(r) < 22:
+    r = xfer(s, b"pdsta", 24)
+    if r[:2] != b"OK" or len(r) < 24:
         sys.exit("garbled pdsta reply: %r" % r)
     st = r[2:]
     ev = ",".join(n for b, n in EVENTS if st[6] & b) or "-"
@@ -166,6 +171,8 @@ def show_status(s):
             "  ".join(hdr_name(h) for h in hdrs),
         )
     )
+    fl = [n for b, n in ((1, "tx_pend"), (2, "cable-listen"), (4, "asked")) if st[20] & b]
+    print("flags: %s%s" % (",".join(fl) or "-", "  last I2C error at reg 0x%02x" % st[21] if st[5] else ""))
     if st[0] == 7:  # sniff: byte 3 = a sink's Rd on the locked CC
         print("sniff: sink %s" % ("ATTACHED" if st[3] else "not attached"))
     return st
@@ -188,6 +195,36 @@ def show_info(s, advance=False):
     for i in range(n):
         mark = "*" if i // 6 == page else " "
         print("%s %2d | %s" % (mark, i, body[i * COLS:(i + 1) * COLS].decode("ascii", "replace")))
+
+
+# pdsnd presets: (message type, bit 7 = extended; data objects)
+ASK = {
+    "srccap": (7, []),       # Get_Source_Cap
+    "snkcap": (8, []),       # Get_Sink_Cap (dual-role sources only)
+    "srccapext": (17, []),   # Get_Source_Cap_Extended (PD 3.x)
+    "status": (18, []),      # Get_Status
+    "ppsstatus": (20, []),   # Get_PPS_Status
+    "countries": (21, []),   # Get_Country_Codes
+    "srcinfo": (23, []),     # Get_Source_Info
+    "revision": (24, []),    # Get_Revision
+    # Get_Manufacturer_Info: extended header (chunked, 2 data bytes) + target 0 (port), ref 0
+    "mfrinfo": (0x80 | 6, [0x00008002]),
+}
+
+
+def ask(s, what):
+    if what.startswith("raw:"):
+        f = what.split(":")[1:]
+        t, objs = int(f[0], 0), [int(x, 16) for x in f[1:]]
+    elif what == "discid":  # SOP Discover Identity REQ, SVDM version per the negotiated rev
+        st = xfer(s, b"pdsta", 24)
+        t, objs = 15, [0xFF00A001 if st[2 + 13] >= 2 else 0xFF008001]
+    elif what in ASK:
+        t, objs = ASK[what]
+    else:
+        sys.exit("unknown request %r (pd.py --help)" % what)
+    pkt = b"pdsnd" + bytes([t]) + b"".join(o.to_bytes(4, "little") for o in objs)
+    ok_er(xfer(s, pkt, 3), "ask %s (type 0x%02x, %d objects)" % (what, t, len(objs)))
 
 
 def main():
@@ -225,6 +262,8 @@ def main():
             show_status(s)
     elif cmd == "info":
         show_info(s, len(argv) > 1 and argv[1] == "next")
+    elif cmd == "ask":
+        ask(s, argv[1])
     elif cmd == "watch":
         secs = float(argv[1]) if len(argv) > 1 else 20
         end = time.time() + secs

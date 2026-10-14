@@ -68,7 +68,7 @@ def parse_pdpacket(payload, dec):
             wire = payload[i + 6:i + 6 + wire_len]
             sop = payload[i + 5]
             line, details = dec.frame(wire, sop)
-            print("  [%8d ms] %s%s" % (ets, {0: "", 1: "SOP' ", 2: "SOP'' "}.get(sop, "sop%d " % sop), line))
+            print("  [%8d ms] %s%s" % (ets, {0: "", 1: "SOP' ", 2: "SOP'' ", 3: "SOP'_DBG ", 4: "SOP''_DBG "}.get(sop, "sop%d " % sop), line))
             for d in details:
                 print("               %s" % d)
             i += 6 + wire_len

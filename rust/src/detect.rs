@@ -274,7 +274,7 @@ fn step(s: &mut Det) {
             }
         }
         S_PD_WAIT => {
-            let mut p = [0u8; 20];
+            let mut p = [0u8; 22];
             pd::status(&mut p);
             /* Rp level: BC_LVL from a poll without CC activity while
              * attached — one taken during BMC traffic reads low (bench:
