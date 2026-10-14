@@ -122,6 +122,9 @@ Bench: >5000 reads/s sustained with zero timeouts.
 The vendor protocol also serves **`GetData(ATT_PD=0x0010)`** — the KM003C
 `PdPacket` attribute carrying captured PD traffic (12-B measurement preamble +
 event records); built from the `pd.rs` capture ring, read by `tools/pdcap.py`.
+Each message event carries the KM003C `sop` byte (0 SOP, 1 SOP', 2 SOP''); besides
+KM003C's connect/disconnect (0x21/0x22) we emit 0x30 RX FIFO full, 0x31 RX
+resync, 0x32 bad-CRC packet, 0x33 hard reset (FIRMWARE.md "Sniffer").
 Needs the `triggers` feature (in release builds; otherwise Rejected). It queues behind the pre-armed ADC packet, so the ADC fast-path is untouched
 (the host reads the armed ADC first, then the PD reply, filtering by attribute).
 See FIRMWARE.md "PD capture".
@@ -167,15 +170,15 @@ Verbs:
 | `tftbl` | `OK` / `ER`+stage | our dev verb: backlight PWM compare, LE u16 0..=999 (tools/tft.py) |
 | `tftui` | `OK` / `ER`+stage | our dev verb: force a main-screen refresh (tools/tft.py) |
 | `pdctl` | `OK` / `ER`+stage | our trigger verb: PD sink engine off (0) / arm (1) / hard-reset (2 — while sniffing: makes the pair renegotiate) / listen-only sniffer (3) (pd.rs, tools/pd.py) |
-| `pdsta` | `OK`+20 B | our trigger verb: PD engine state (layout: `pd::status`) |
+| `pdsta` | `OK`+20 B | our trigger verb: PD engine state (layout: `pd::status`; while sniffing — state 7 — byte 3 = a sink is attached) |
 | `pdcap` | `OK`+n+n×4 B | our trigger verb: received source PDOs (LE u32 each) |
 | `pdreq` | `OK` / `ER` | our trigger verb: `pdreq <n> [mv u16][ma u16]` — request source PDO n (1-based; fixed, or PPS APDO with a setpoint) — **raises OUT voltage** |
 | `qctrg` | `OK` / `ER`+code | our trigger verb: `qctrg <mode>` QC2.0 D+/D− trigger, mode 0/1/2/3 = 5/9/12/20 V; the first call runs the detecting QC handshake (~1.5 s) and fails with ER 0x20 (no D+/D− short) / 0x21 (DCP without QC), pins released — **raises OUT voltage** (qc.rs, tools/qc.py) |
 | `qcdet` | `OK`+8 B | our trigger verb: QC handshake probe, never sets a voltage (~1.5 s): class u8 (0 = no D+/D− short, 1 = DCP without QC, 2 = QC) + D+, D− at 0.1 s, D− at 1.5 s (u16 LE mV); pins released after (tools/detect.py) |
 | `qc3ct` | `OK` / `ER` | our trigger verb: `qc3ct <dir> <count>` QC3.0 continuous, dir 0/1 = up/down, count 200 mV steps — **raises OUT voltage** |
 | `afctr` | `OK` / `ER`+code | our trigger verb: `afctr <byte> [reps]` Samsung AFC serial trigger on D−, byte = voltage/current nibbles (0x46 = 9 V, 0x08 = 5 V); closed-loop (reads the charger Sping on PB4); first call blocks ~2.3 s on entry; ER 0x22 = the charger never answered (so `afctr 0x08` is a 5 V AFC probe) — **raises OUT voltage** (qc.rs) |
-| `fcptr` / `scptr` | `OK` / `ER`+code | our dev verbs, **untested on a real charger**: Huawei FCP 9 V / SCP stock 5 V/5 A block on D− (qc.rs, docs/AFC_DECODE_NOTES.md); ER 0x40\|i = no/garbled reply to packet i, 0x50\|i = NACK; first call blocks ~2.3 s — `fcptr` **raises OUT voltage** |
-| `fcprd` | `OK`+n B / `ER`+code | our dev verb, **untested on a real charger**: `fcprd <reg> [n]` (raw bytes, n clamped 1..=8) reads n consecutive FCP/SCP registers with single reads — no write, voltage unchanged (0x21 = # raised voltages, 0x30+k = voltage k ×100 mV, 0x22 = max power ×0.5 W); ER as `fcptr` |
+| `fcptr` / `scptr` | `OK` / `ER`+code | our dev verbs (`fcp` feature), **untested on a real charger**: Huawei FCP 9 V / SCP stock 5 V/5 A block on D− (qc.rs, docs/AFC_DECODE_NOTES.md); ER 0x40\|i = no/garbled reply to packet i, 0x50\|i = NACK; first call blocks ~2.3 s — `fcptr` **raises OUT voltage** |
+| `fcprd` | `OK`+n B / `ER`+code | our dev verb (`fcp` feature), **untested on a real charger**: `fcprd <reg> [n]` (raw bytes, n clamped 1..=8) reads n consecutive FCP/SCP registers with single reads — no write, voltage unchanged (0x21 = # raised voltages, 0x30+k = voltage k ×100 mV, 0x22 = max power ×0.5 W); ER as `fcptr` |
 | `qcoff` | `OK` / `ER` | our trigger verb: release the QC/AFC D+/D− pins (charger reverts to 5 V; restores D± ADC + SWD) |
 
 Keeping `getva` byte-compatible (same reply) lets existing host tools work
@@ -442,7 +445,8 @@ host tool in the command table above / tools/pd.py; engine internals in
 FIRMWARE.md "USB-PD sink". **INT_N = PA15** (open-drain, active-low; needs
 the GPIO's internal pull-up, as stock configures it) — bench-verified: an
 unmasked I_COMP_CHNG pulls PA15 low, reading Interrupt or setting
-Control0.INT_MASK releases it, no other GPIOA/B/F pin moves. pd.rs reads it
+Control0.INT_MASK releases it, no other GPIOA/B/F pin moves
+(`tools/fusb_intn.py` repeats the test). pd.rs reads it
 as a GPIO to wake the PD engine. Slice (0x05) sets the BMC receiver's slicer threshold SDAC[5:0] +
 hysteresis (reset 0x60); our engine uses 0x58 in both modes (bench-swept, FIRMWARE.md
 "Sniffer"). Unused options worth knowing: Control1 ENSOP1DB/ENSOP2DB receive SOP'/SOP''

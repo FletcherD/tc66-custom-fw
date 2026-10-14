@@ -3,8 +3,9 @@
 # requires-python = ">=3.9"
 # dependencies = ["pyserial"]
 # ///
-"""Detect which charge protocols the charger on the meter's IN port supports,
-without ever raising VBUS above 5 V.
+"""Detect which charge protocols the charger on the meter supports (either
+port: the probed lines pass straight through), without ever raising VBUS
+above 5 V.
 
 Steps (D+/D- protocols first: a PD contract can disable a charger's legacy
 modes):
@@ -20,8 +21,11 @@ modes):
               pdcap (Source_Capabilities); then pdctl 0
 Between steps `qcoff` releases D+/D- and the charger gets time to fall back.
 
-Nothing should be plugged into OUT: the probes drive D+/D- and present Rd on
-CC, and a device downstream would take part in (and disturb) the handshakes.
+Nothing should be plugged into the other port: the probes drive D+/D- and
+present Rd on CC, and a device there would take part in (and disturb) the
+handshakes. The current reads unsigned: with the charger on OUT and the
+meter powered from its measured rail, its own supply current shows as a
+small load.
 """
 import argparse
 import struct
@@ -112,7 +116,7 @@ def main():
     print(f"\n[passive] VBUS {m['V']:.2f} V, load {m['A'] * 1000:.0f} mA, "
           f"D+ {m['dp_V']:.2f} V, D- {m['dm_V']:.2f} V")
     if m["A"] > 0.005:
-        print("  WARNING: current is flowing to OUT — unplug the downstream device; "
+        print("  WARNING: current is flowing — unplug any device on the other port; "
               "results below may be wrong")
     div = divider(m["dp_V"], m["dm_V"])
     print("  divider signature:", div or "none")

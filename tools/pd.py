@@ -8,7 +8,7 @@
   pd.py arm            arm the sink engine (pdctl 1) — then plug the source in
   pd.py off            FUSB302 SW_RES + engine off (pdctl 0)
   pd.py hardreset      send a PD hard reset: source re-caps at its top rev (pdctl 2);
-                       while sniffing, makes the charger and the device on OUT
+                       while sniffing, makes the charger and the device
                        renegotiate from scratch (a re-plug without unplugging)
   pd.py sniff          listen-only: capture a source and a sink negotiating
                        through the meter (pdctl 3; read with tools/pdcap.py)

@@ -40,7 +40,8 @@ drive HW is proven independently (QC2.0 `qctrg` switches this charger to 9/12 V)
 ## FCP / SCP — IMPLEMENTED FROM THE STOCK CAPTURES, UNTESTED ON A CHARGER
 
 qc.rs `fcp()`/`fcp_read()`/`scp()`, verbs `fcptr`/`fcprd`/`scptr`, compiled
-only with `dev-verbs` (`make flash`), not into release images. Shared with
+only with the `fcp` feature (add it to the Makefile's `DEV_FEATURES`; it is
+out of the default dev build for space), never into release images. Shared with
 AFC: `accp_entry` (release → D+ 0.6 V / D− released → 2050 ms) and the
 Mping/Sping helpers (`proto_line_idle`/`proto_wait_sping`). FCP/SCP have their
 own framer (`accp_frame`) and reply reader (`accp_capture` + `accp_decode`);

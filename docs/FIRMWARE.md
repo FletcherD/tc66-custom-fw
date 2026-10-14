@@ -467,7 +467,8 @@ Related subtleties, all load-bearing:
 
 Host-armed FUSB302 PD 2.0/3.0 sink (`triggers` feature — in release builds)
 — **nothing runs at boot**; `pdctl 1` arms
-it, `pdctl 0` shuts it off, `pdctl 2` sends a Hard Reset. Bench-verified
+it, `pdctl 0` shuts it off, `pdctl 2` sends a Hard Reset, `pdctl 3` starts
+the listen-only sniffer (below). Bench-verified
 against two chargers: an Apple 96 W (fixed PDOs at PD 2.0, 5/9/15/20 V) and a
 PD 3.0 source with a 3.3–11 V PPS APDO (rev-3.0 negotiation, fixed PDOs, and
 PPS fine-stepping across the whole APDO range, with a 9 V PPS contract held
@@ -566,7 +567,7 @@ past the ~10 s keepalive deadline).
   storms come through whole (76 of 82 messages with all 4 copies, vs 33 of
   41 at 100 kHz), no FIFO-full/resync events. Apple's first VDM to the Moto
   (id5) is never captured although the Moto GoodCRCs it at the slicer's reset
-  threshold — fixed by `SLICE` (below). `rx_capture` is shared with the sink's
+  threshold — fixed by `SLICE` (above). `rx_capture` is shared with the sink's
   `rx_frame`.
 - Host tool: `tools/pd.py` (`arm/off/hardreset/sniff/status/caps/req/watch`, decodes
   PDOs and the 20-B `pdsta` reply — field layout in `pd::status`).
@@ -612,8 +613,9 @@ PD traffic.
   slots.
 - **Verified:** our sink's full negotiation with an Apple USB-C charger
   (Source_Cap, Request, GoodCRC, Accept, PS_RDY, vendor VDMs) round-trips
-  through `pdcap.py`. Sniffing a third-party source/sink pair is not yet
-  bench-verified.
+  through `pdcap.py`, and so does a sniffed charger ↔ phone negotiation
+  (Pixel, Moto; see "Sniffer") incl. an Apple cable's e-marker Discover
+  Identity reply.
 
 ## BLE link (`bt.rs`)
 
@@ -710,7 +712,7 @@ from `pd.rs` (different pins, no FUSB302, no CC). Host-armed verbs
   (`us()`), never busy-loop delays (qc.rs is in slow flash, where loop
   fetch time is unpredictable). Protocol notes: qc.rs module doc +
   docs/AFC_DECODE_NOTES.md.
-- **Huawei FCP/SCP** (`fcptr`/`fcprd`/`scptr`, modes 2/3 — `dev-verbs`
+- **Huawei FCP/SCP** (`fcptr`/`fcprd`/`scptr`, modes 2/3 — `fcp` feature
   only, never run against an FCP/SCP charger): AFC's entry and Mping/Sping
   helpers, then 3 `01` pings and register packets with a CRC-8 (`qc::crc8`).
   Own framer `accp_frame` (per-byte SYNC quarters + odd parity) and reply

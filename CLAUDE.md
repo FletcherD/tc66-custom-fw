@@ -20,8 +20,14 @@ tools/ble.py), and the M4
 charge triggers (pd.rs: FUSB302 PD 2.0/3.0 sink — `pdctl`/`pdsta`/`pdcap`/
 `pdreq` + tools/pd.py, fixed PDOs + PPS + hard reset, bench-verified
 5-20 V and PPS 3.3-11 V, plus a listen-only sniffer `pdctl 3` (captures a
-charger and phone negotiating through the meter; read with tools/pdcap.py
-under sudo — not yet bench-verified with a phone); qc.rs: Quick Charge 2.0 D+/D− — `qctrg`/`qcoff` (entry detects QC first; `qcdet` probe)
+charger and device negotiating through the meter, either orientation, incl.
+SOP'/SOP'' cable e-marker traffic, attach/detach, bad-CRC and hard-reset
+events; `pdctl 2` while sniffing re-triggers the negotiation; read with
+tools/pdcap.py under sudo — decodes PDOs/Requests/VDMs/cable identity via
+tools/pd_decode.py; tools/pdlog_check.py scores a capture; bench-verified
+with an Apple charger + Pixel/Moto). The PD engine wakes on the FUSB302's
+INT_N (PA15, read as a GPIO) and runs the BMC slicer at Slice 0x58; I²C is
+400 kHz; qc.rs: Quick Charge 2.0 D+/D− — `qctrg`/`qcoff` (entry detects QC first; `qcdet` probe)
 + tools/qc.py, bench-verified 5/9/12 V, plus QC3.0 `qc3ct` and Samsung AFC
 `afctr` — a CLOSED-LOOP D− serial that reads the charger Sping on PB4,
 bench-verified 5↔9 V; **a granted request raises the OUT
@@ -49,7 +55,8 @@ pac3+4. The build is a pinned nightly (rust-toolchain.toml: build-std core
 + panic=immediate-abort — a panic hits UDF/HardFault, MK_PANIC is dead).
 **If new code overflows flash or the stack-gate: stop and ask — never
 "make room" by changing unrelated working code.** Next: power-cut / K2
-tests of the energy ring, M4 extensions (Huawei FCP/SCP: `fcptr`/`fcprd`/`scptr` dev verbs —
+tests of the energy ring, M4 extensions (Huawei FCP/SCP: `fcptr`/`fcprd`/`scptr` verbs, `fcp`
+feature — currently out of DEV_FEATURES for space —
 framing + reply decoding matched to the stock captures (fcp.csv/scp.csv,
 tools/accp_decode.py) but never run against an FCP/SCP charger; an SCP
 voltage raise (VSET 0xb8/b9 + watchdog) is not implemented — stock SCP is

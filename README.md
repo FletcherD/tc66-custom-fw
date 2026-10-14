@@ -42,6 +42,15 @@ else, including the stock firmware.
   the voltage on the OUT port, up to 20 V on whatever is plugged in.**
   `pd.py` and `qc.py` refuse anything above 9 V unless you pass `--max-v`,
   and ask for confirmation unless you pass `--yes`.
+- **Charger protocol detection.** Reports what the charger on the meter
+  supports (Apple/Samsung dividers, QC, AFC, Type-C current, the full USB-PD
+  offer) without ever raising the voltage.
+- **USB-PD sniffing.** Put a charger on one side and a phone or laptop on
+  the other, and the meter records their whole PD conversation: offers,
+  requests, accept/ready, vendor messages, and the charger's queries to an
+  e-marked cable (whose vendor, current rating and speed get decoded). Plug
+  and unplug events and corrupted packets are logged too, and the meter can
+  make the pair renegotiate on command, so you don't have to re-plug.
 - **Firmware updates without the button.** Once this firmware is installed,
   it can reflash itself over USB.
 - **Watchdog.** If the firmware hangs, the meter reboots.
@@ -128,8 +137,23 @@ image or stock.
 - **Charge triggers:** `tools/pd.py arm`, then `caps` and `req <n>`. QC
   uses `tools/qc.py 9`. Read the warnings in each tool's `--help` first.
 - **Charger protocol detection:** `tools/detect.py` reports what the
-  charger on IN supports (Apple/Samsung dividers, QC, AFC, Type-C current,
-  USB PD capabilities) without raising the voltage. Unplug OUT first.
+  charger supports (Apple/Samsung dividers, QC, AFC, Type-C current,
+  USB PD capabilities) without raising the voltage. Unplug the other port
+  first.
+- **PD sniffing** (the meter's PD switch must be on):
+  ```
+  uv run tools/pd.py sniff
+  sudo $(uv run -q --script tools/pdcap.py --python-path) tools/pdcap.py 60
+  ```
+  then plug in the device. `uv run tools/pd.py hardreset` makes the charger
+  and device renegotiate from scratch, and `uv run tools/pd.py off` ends
+  sniffing. Notes:
+  - **Sudo:** `pdcap.py` needs root to claim the meter's USB interface
+    from the Linux `powerz` driver.
+  - **Missed messages:** the meter's PD chip can miss a frame when several
+    arrive within about a millisecond, typically around the Accept.
+  - **After a reboot:** the chip keeps its sniff setup through a meter
+    reboot, so run `pd.py off` if the charger stops powering the other port.
 
 The serial protocol, packet formats, and the full command list are in
 [docs/HARDWARE.md](docs/HARDWARE.md).

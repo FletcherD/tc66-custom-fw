@@ -91,11 +91,15 @@ features.
   (bidirectional) against real chargers. **Samsung AFC** (`afctr`, same
   module, closed-loop D− serial reading the charger's Sping on PB4) is
   bench-verified 5↔9 V. **Huawei FCP/SCP** (`fcptr`/`fcprd`/`scptr`,
-  `dev-verbs` builds only) have framing and reply decoding matched to the
-  stock captures but are untested — see the next steps. Captured PD traffic is exposed over
+  `fcp` feature) have framing and reply decoding matched to the
+  stock captures but are untested — see the next steps. Charger protocol
+  detection at 5 V: `tools/detect.py`. Captured PD traffic is exposed over
   the powerz vendor endpoint as the **KM003C PdPacket attribute (0x0010)**
-  (`tools/pdcap.py`; the transport is verified, event capture awaits a PD
-  source on the bench). Nothing runs at boot; a granted request **raises the
+  (`tools/pdcap.py`, bench-verified): our own sink's traffic, or with the
+  listen-only **sniffer** (`pdctl 3`) a charger and a device negotiating
+  through the meter — SOP'/SOP'' cable traffic, attach/detach, bad-CRC and
+  hard-reset events; `pdctl 2` re-triggers the negotiation. The PD engine
+  wakes on the FUSB302 INT_N (PA15); I²C runs at 400 kHz. Nothing runs at boot; a granted request **raises the
   OUT-port voltage** (trigger with nothing downstream).
 - **Next steps** (see also the open items in QUIRKS.md):
   - Bench-test a power cut mid-session (torn-slot fallback), the K2-hold
