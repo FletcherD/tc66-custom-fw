@@ -22,9 +22,7 @@
 
 use crate::ina;
 use crate::pd;
-
-/// Text columns per line (the PD screen's width in 7-px cells).
-pub const COLS: usize = 22;
+use crate::text::*;
 /// Fixed status lines ahead of the PDO list.
 const HEAD: usize = 6;
 
@@ -199,105 +197,10 @@ pub fn on_msg(hdr: u16, objs: &[u8], sop: u8) {
 
 /* ---- text ---- */
 
-/// Bounded line writer: characters past COLS are dropped (shared with
-/// detect.rs).
-pub struct W {
-    pub b: [u8; COLS],
-    n: usize,
-}
-
-impl W {
-    pub fn new() -> W {
-        W { b: [b' '; COLS], n: 0 }
-    }
-
-    #[inline(never)]
-    pub fn ch(&mut self, c: u8) {
-        if let Some(x) = self.b.get_mut(self.n) {
-            *x = c;
-        }
-        self.n += 1;
-    }
-
-    #[inline(never)]
-    pub fn s(&mut self, s: &[u8]) {
-        for &c in s {
-            self.ch(c);
-        }
-    }
-
-    /// Decimal, right-aligned in at least `width` chars.
-    #[inline(never)]
-    pub fn uint(&mut self, v: u32, width: usize) {
-        let mut tmp = [0u8; 10];
-        let mut k = 0;
-        let mut v = v;
-        for t in tmp.iter_mut() {
-            *t = b'0' + (v % 10) as u8;
-            k += 1;
-            v /= 10;
-            if v == 0 {
-                break;
-            }
-        }
-        for _ in k..width {
-            self.ch(b' ');
-        }
-        for &t in tmp.iter().take(k).rev() {
-            self.ch(t);
-        }
-    }
-
-    /// `v` in units of 10^-frac (frac 1..=3), right-aligned in `width`.
-    #[inline(never)]
-    pub fn fixed(&mut self, v: u32, frac: usize, width: usize) {
-        let mut d = [0u8; 3];
-        let mut v = v;
-        for x in d.iter_mut().take(frac) {
-            *x = b'0' + (v % 10) as u8;
-            v /= 10;
-        }
-        self.uint(v, width.saturating_sub(frac + 1));
-        self.ch(b'.');
-        for &x in d.iter().take(frac).rev() {
-            self.ch(x);
-        }
-    }
-
-    #[inline(never)]
-    fn hex16(&mut self, v: u16) {
-        for sh in [12, 8, 4, 0] {
-            self.ch(b"0123456789ABCDEF"[(v >> sh & 0xF) as usize]);
-        }
-    }
-
-    /// mV as "x.xxV" (2 decimals)
-    #[inline(never)]
-    pub fn volts(&mut self, mv: u32, width: usize) {
-        self.fixed(mv / 10, 2, width);
-        self.ch(b'V');
-    }
-
-    /// mA as "x.xxA"
-    #[inline(never)]
-    fn amps(&mut self, ma: u32) {
-        self.fixed(ma / 10, 2, 0);
-        self.ch(b'A');
-    }
-}
-
 /// Number of text lines (the status block + one per source PDO, or one
 /// "no source caps" line).
 pub fn lines() -> usize {
     HEAD + (st().caps_n as usize).max(1)
-}
-
-pub fn rev_str(rev: u8) -> &'static [u8] {
-    match rev {
-        0 => b"PD1.0",
-        1 => b"PD2.0",
-        _ => b"PD3.x",
-    }
 }
 
 /// Format line `i` into `out` (space-padded); returns its color. Lines past
@@ -309,15 +212,19 @@ pub fn line(i: usize, out: &mut [u8; COLS]) -> u16 {
         0 => {
             let l = pd::link();
             match l.mode {
-                pd::MODE_OFF => w.s(b"PD off   K2: sniff"),
+                pd::MODE_OFF => w.t(PD_OFF),
                 m => {
-                    w.s(if m == pd::MODE_SNIFF { b"SNIFF " } else { b"SINK  " });
-                    w.s(if s.caps_n > 0 { rev_str(s.rev) } else { b"     " });
+                    w.t(if m == pd::MODE_SNIFF { SNIFF } else { SINK });
+                    if s.caps_n > 0 {
+                        w.rev(s.rev);
+                    } else {
+                        w.t(NO_REV);
+                    }
                     if l.src {
-                        w.s(b" src");
+                        w.t(SRC);
                     }
                     if l.snk && m == pd::MODE_SNIFF {
-                        w.s(b" snk");
+                        w.t(SNK);
                     }
                 }
             }
@@ -331,15 +238,15 @@ pub fn line(i: usize, out: &mut [u8; COLS]) -> u16 {
                 contract(&mut w, b'>', s.rdo, s.pdo);
                 C_GREEN
             } else {
-                w.s(b"no contract");
+                w.t(NO_CONTRACT);
                 C_GREY
             }
         }
         2 => {
             let (v, a) = ina::snapshot_vi(); /* 1e-4 V, 1e-5 A */
-            w.s(b"VBUS ");
+            w.t(VBUS);
             w.fixed(v / 10, 3, 0);
-            w.s(b"V ");
+            w.t(V_SP);
             w.fixed(a / 100, 3, 0);
             w.ch(b'A');
             C_YELLOW
@@ -347,9 +254,9 @@ pub fn line(i: usize, out: &mut [u8; COLS]) -> u16 {
         3 => {
             let l = pd::link();
             if l.cc == 0 {
-                w.s(b"CC  no source");
+                w.t(CC_NO_SOURCE);
             } else {
-                w.s(b"CC");
+                w.t(CC);
                 w.uint(l.cc as u32, 0);
                 w.ch(b' ');
                 w.volts(l.cc_mv as u32, 0);
@@ -358,60 +265,53 @@ pub fn line(i: usize, out: &mut [u8; COLS]) -> u16 {
                  * 1.5 A 0.70-1.16 V, 3 A 1.31-2.04 V); without a sink's Rd
                  * the line just shows the open-circuit level */
                 if l.snk {
-                    w.s(match l.cc_mv {
-                        0..=659 => b" Rp USB" as &[u8],
-                        660..=1229 => b" Rp 1.5A",
-                        _ => b" Rp 3.0A",
+                    w.t(match l.cc_mv {
+                        0..=659 => RP_USB,
+                        660..=1229 => RP_1A5,
+                        _ => RP_3A,
                     });
                 } else {
-                    w.s(b" open");
+                    w.t(OPEN);
                 }
             }
             C_BLUE
         }
         4 => {
             if s.cable == 0 {
-                w.s(b"no e-marker seen");
+                w.t(NO_EMARKER);
                 C_GREY
             } else {
                 let v = s.cable_vdo;
-                w.s(b"CBL ");
-                w.s(match v >> 5 & 3 {
-                    1 => b"3A" as &[u8],
-                    2 => b"5A",
-                    _ => b"--",
+                w.t(CBL);
+                w.t(match v >> 5 & 3 {
+                    1 => CBL_3A,
+                    2 => CBL_5A,
+                    _ => CBL_NO_A,
                 });
                 if s.cable == 2 {
                     w.ch(b' ');
                     w.uint(20 + 10 * (v >> 9 & 3), 0);
                     w.ch(b'V');
                 }
-                w.s(match v & 7 {
-                    0 => b" USB2" as &[u8],
-                    1 => b" Gen1",
-                    2 => b" Gen2",
-                    3 => b" Gen3",
-                    4 => b" Gen4",
-                    _ => b" ?",
-                });
+                w.t(USB2 + (v & 7).min(5) as u8);
                 w.ch(b' ');
                 w.hex16(s.cable_vid);
                 C_PINK
             }
         }
         5 => {
-            w.s(b"msg ");
+            w.t(MSG);
             w.uint((s.msgs as u32).min(9999), 0);
-            w.s(b" crc ");
+            w.t(CRC);
             w.uint((s.bad_crc as u32).min(999), 0);
-            w.s(b" hr ");
+            w.t(HR);
             w.uint((s.hard_resets as u32).min(99), 0);
             C_GREY
         }
         _ => {
             let k = i - HEAD;
             if s.caps_n == 0 && k == 0 {
-                w.s(b"no source caps");
+                w.t(NO_CAPS);
                 C_GREY
             } else if let Some(&p) = s.caps.get(k).filter(|_| k < s.caps_n as usize) {
                 let pos = k as u32 + 1;
@@ -442,7 +342,7 @@ pub fn pdo(w: &mut W, p: u32) {
         w.fixed(lo_mv / 100, 1, 0);
         w.ch(b'-');
         w.fixed(hi_mv / 100, 1, 0);
-        w.s(b"V ");
+        w.t(V_SP);
     };
     match p >> 30 {
         0 => {
@@ -451,29 +351,29 @@ pub fn pdo(w: &mut W, p: u32) {
             w.amps((p & 0x3FF) * 10);
         }
         1 => {
-            w.s(b"VAR ");
+            w.t(VAR);
             range(w, v_lo, v_hi);
             w.amps((p & 0x3FF) * 10);
         }
         2 => {
-            w.s(b"BAT ");
+            w.t(BAT);
             range(w, v_lo, v_hi);
             w.uint((p & 0x3FF) / 4, 0);
             w.ch(b'W');
         }
         _ => match p >> 28 & 3 {
             0 => {
-                w.s(b"PPS ");
+                w.t(PPS);
                 range(w, (p >> 8 & 0xFF) * 100, (p >> 17 & 0xFF) * 100);
                 w.amps((p & 0x7F) * 50);
             }
             2 => {
                 /* SPR AVS: 9-15 V current shown (bits 19:10), 15-20 V's in 9:0 */
-                w.s(b"AVS 9-20V ");
+                w.t(AVS_SPR);
                 w.amps((p >> 10 & 0x3FF) * 10);
             }
             _ => {
-                w.s(b"APDO ");
+                w.t(APDO);
                 w.hex16((p >> 16) as u16);
                 w.hex16(p as u16);
             }
@@ -492,7 +392,7 @@ fn contract(w: &mut W, mark: u8, rdo: u32, p: u32) {
     let op10 = rdo >> 10 & 0x3FF;
     if p == 0 {
         /* PDO not among the stored caps: fixed-supply RDO reading */
-        w.s(b"? ");
+        w.t(UNKNOWN_PDO);
         w.amps(op10 * 10);
         return;
     }
@@ -503,17 +403,17 @@ fn contract(w: &mut W, mark: u8, rdo: u32, p: u32) {
             w.amps(op10 * 10);
         }
         1 => {
-            w.s(b"VAR ");
+            w.t(VAR);
             w.amps(op10 * 10);
         }
         2 => {
-            w.s(b"BAT ");
+            w.t(BAT);
             w.uint(op10 / 4, 0);
             w.ch(b'W');
         }
         _ => {
             let avs = p >> 28 & 3 == 2;
-            w.s(if avs { b"AVS " } else { b"PPS " });
+            w.t(if avs { AVS } else { PPS });
             /* output voltage bits 20:9 — 20 mV (PPS) / 25 mV (AVS) units */
             w.volts((rdo >> 9 & 0xFFF) * if avs { 25 } else { 20 }, 0);
             w.ch(b' ');

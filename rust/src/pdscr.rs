@@ -16,7 +16,8 @@
 
 use crate::detect;
 use crate::font_small as font;
-use crate::pdinfo::{self, COLS};
+use crate::pdinfo;
+use crate::text::COLS;
 use crate::tft;
 
 const ROWS: usize = 6;

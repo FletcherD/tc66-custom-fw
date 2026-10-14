@@ -14,7 +14,9 @@ PD is off — never at boot; `pdinf` verb + `pd.py info`), and detect.rs's
 charger detection screen on the same grid (K2 runs tools/detect.py's
 sequence on the device as a main-loop-stepped state machine, ≤5 V,
 refuses with a load/sink on the other port, ends PD off; `detct` verb +
-`detect.py --device`) —
+`detect.py --device`; both screens' strings are ids into text.rs's packed
+table, every line + color pinned by tools/host_check/text.golden —
+`-- --bless` after an intended change) —
 with no-change screen-off after `idle_off_s` (default 15 s); keys.rs polls K1/K2 — K1 next screen, K2
 held 1 s resets energy, K2 short press = next page (detection: a run on the last page), any press wakes; `keyrd`/`uiscr` dev verbs), the
 FWDGT watchdog (wdg.rs, ~13 s, fed per loop pass + inside the flasher —

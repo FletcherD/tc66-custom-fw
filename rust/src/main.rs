@@ -76,6 +76,8 @@ mod powerz;
 #[cfg(feature = "triggers")]
 mod qc;
 mod startup;
+#[cfg(feature = "triggers")]
+mod text;
 mod tft;
 mod ui;
 mod usb_bus;
@@ -91,7 +93,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 155;
+const BUILD_ID: u32 = 156;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -1239,7 +1241,7 @@ fn do_pdinf(next: bool) {
     let (page, pages) = pdscr::page();
     write_all(&[b'O', b'K', page, pages, n as u8]);
     for i in 0..n {
-        let mut l = [b' '; pdinfo::COLS];
+        let mut l = [b' '; text::COLS];
         pdinfo::line(i, &mut l);
         write_all(&l);
     }
@@ -1260,7 +1262,7 @@ fn do_detct(start: bool) {
     let n = detect::lines();
     write_all(&[b'O', b'K', detect::busy() as u8, n as u8]);
     for i in 0..n {
-        let mut l = [b' '; pdinfo::COLS];
+        let mut l = [b' '; text::COLS];
         detect::line(i, &mut l);
         write_all(&l);
     }

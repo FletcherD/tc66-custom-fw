@@ -7,37 +7,26 @@
 //! - pdinfo.rs: the PD parser + screen text replayed over a negotiation
 //!   (Source_Cap, Request, PS_RDY, PPS, Reject, cable identity, hard reset);
 //!   the frames' meaning cross-checked with tools/pd_decode.py.
+//! - pdinfo.rs + detect.rs: every screen line kind (text + color) over a
+//!   scripted set of states, compared with text.golden (textdump.rs;
+//!   `cargo run --release -- --bless` rewrites it after an intended change).
 
 #[path = "../../../rust/src/ntc.rs"]
 mod ntc;
 #[allow(dead_code)]
 #[path = "../../../rust/src/aes256.rs"]
 mod aes256;
+#[path = "../../../rust/src/text.rs"]
+mod text;
 #[path = "../../../rust/src/pdinfo.rs"]
 mod pdinfo;
 
-/// Stand-ins for the firmware modules pdinfo.rs formats from.
 #[allow(dead_code)]
-mod pd {
-    pub const MODE_OFF: u8 = 0;
-    pub const MODE_SINK: u8 = 1;
-    pub const MODE_SNIFF: u8 = 2;
-    pub struct Link {
-        pub mode: u8,
-        pub src: bool,
-        pub snk: bool,
-        pub cc: u8,
-        pub cc_mv: u16,
-    }
-    pub fn link() -> Link {
-        Link { mode: MODE_SNIFF, src: true, snk: true, cc: 1, cc_mv: 1680 }
-    }
-}
-mod ina {
-    pub fn snapshot_vi() -> (u32, u32) {
-        (90_210, 123_400) /* 9.021 V, 1.234 A */
-    }
-}
+#[path = "../../../rust/src/detect.rs"]
+mod detect;
+mod sim;
+mod textdump;
+use sim::{ina, pd, pdscr, qc};
 
 use aes::cipher::{BlockEncrypt, KeyInit};
 
@@ -137,7 +126,7 @@ fn check_aes() -> bool {
 fn pd_text() -> Vec<String> {
     (0..pdinfo::lines())
         .map(|i| {
-            let mut l = [b' '; pdinfo::COLS];
+            let mut l = [b' '; text::COLS];
             pdinfo::line(i, &mut l);
             String::from_utf8_lossy(&l).trim_end().to_string()
         })
@@ -224,6 +213,10 @@ fn check_pdinfo() -> bool {
 }
 
 fn main() {
-    let ok = check_ntc() & check_aes() & check_pdinfo();
+    if std::env::args().any(|a| a == "--bless") {
+        textdump::bless();
+        return;
+    }
+    let ok = check_ntc() & check_aes() & check_pdinfo() & textdump::check();
     std::process::exit(!ok as i32);
 }

@@ -30,7 +30,8 @@ the ina.rs module doc.
 | `pd.rs` | (`triggers` feature) FUSB302 USB-PD sink engine (M4): attach/orientation, source-caps collection, voltage trigger, KM003C PD capture ring; `pdctl`/`pdsta`/`pdcap`/`pdreq` verb backends |
 | `pdinfo.rs` | (`triggers`) PD state parser fed at pd.rs's capture points (caps, contract from Request + PS_RDY, cable e-marker, counters) + the PD screen's text lines; `pdinf` verb backend; host-checked by tools/host_check |
 | `pdscr.rs` | (`triggers`) screens 4 and 5: pdinfo's (PD) or detect's (detection) lines in the small font, 22×6 grid, paged (K2 short press), 3-px scroll bar; per-cell incremental draw like ui.rs |
-| `detect.rs` | (`triggers`) on-device charger protocol detection (screen 5, `detct` verb): main-loop-stepped state machine over qc.rs/pd.rs + its result text |
+| `detect.rs` | (`triggers`) on-device charger protocol detection (screen 5, `detct` verb): main-loop-stepped state machine over qc.rs/pd.rs + its result text; host-checked by tools/host_check |
+| `text.rs` | (`triggers`) the screens' text: line writer `W` (22 columns, bounded) + `TEXT`, every pdinfo/detect screen string packed length-prefixed at compile time and written by u8 id (`w.t(VBUS)`) — see "Screen text" |
 | `qc.rs` | (`triggers` feature) D+/D− charge triggers (M4): PA13/PA14 + PB4/PB5 level synthesis — QC2.0 `qctrg`, QC3.0 `qc3ct`, Samsung AFC `afctr` (closed-loop D− serial), Huawei FCP/SCP `fcptr`/`fcprd`/`scptr` (dev-verbs only, untested), `qcoff` |
 | `ina.rs` | the measurement subsystem: TIMER5 250 Hz sampler ISR (interleaved INA226 reads), EEPROM calibration, D± conversion, published-measurement state (`Meas`/`snapshot()`), `pause()` bus rule |
 | `ntc.rs` | NTC temperature from the ADC sum16: the stock beta model in fixed point (no float in the image); host-checked by tools/host_check |
@@ -674,6 +675,19 @@ past the ~10 s keepalive deadline).
   3). Extended messages (EPR caps) are ignored. `pdinf` returns every line;
   `tools/host_check` replays a negotiation through it (frames cross-checked
   with tools/pd_decode.py).
+- **Screen text** (`text.rs`): pdinfo.rs and detect.rs format lines with
+  `text::W` (`t(id)` table string, `ch`, `uint`, `fixed`, `volts`, `amps`,
+  `hex16`, `rev`; all `#[inline(never)]`). Strings are not literals at the
+  call site but entries of the `table!` in text.rs: a call then loads an
+  8-bit id instead of a 32-bit address + length (~8 B less per string;
+  ~830 B of flash over open-coded `w.s(b"...")` calls). A new string = a
+  new table entry (≤ 22 B); entries marked "in order" are indexed as
+  `FIRST + k` and must stay consecutive. `tools/host_check` renders every
+  line kind of both screens (text + color) over scripted states
+  (src/textdump.rs, stub hardware in src/sim.rs) and compares with
+  `tools/host_check/text.golden` byte for byte; after an intended text
+  change, `cargo run --release -- --bless` there rewrites the golden file
+  and its diff is reviewed with the change.
 - Host tool: `tools/pd.py` (`arm/off/hardreset/sniff/status/caps/req/watch/info`, decodes
   PDOs and the 20-B `pdsta` reply — field layout in `pd::status`; `info`
   prints the PD screen's text via `pdinf`).
@@ -891,7 +905,8 @@ All wrapped in `rust/Makefile`:
 - `make gates` — `host-check` (tools/host_check, on the host: src/ntc.rs
   bit-identical to the stock f32 temperature model over all inputs,
   src/aes256.rs vs FIPS-197 and the RustCrypto `aes` crate, src/pdinfo.rs
-  over a replayed PD negotiation) +
+  over a replayed PD negotiation, every pdinfo/detect screen line vs
+  text.golden) +
   build + every gate on both the dev and release feature sets (what CI runs).
 - `make markers` — non-halting SRAM marker read via openocd (`openocd.cfg` at
   the repo root; Pico debugprobe wiring in HARDWARE.md).

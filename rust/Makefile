@@ -72,8 +72,9 @@ gates: host-check
 
 # Host-side proofs of the pure modules: src/ntc.rs bit-identical to the
 # stock f32 temperature model over all inputs, src/aes256.rs vs FIPS-197 and
-# the RustCrypto aes crate, src/pdinfo.rs replaying a PD negotiation (own
-# dir: rust/.cargo's thumb target must not apply)
+# the RustCrypto aes crate, src/pdinfo.rs replaying a PD negotiation, every
+# pdinfo/detect screen line vs tools/host_check/text.golden (own dir:
+# rust/.cargo's thumb target must not apply)
 host-check:
 	cd ../tools/host_check && cargo run -q --release
 

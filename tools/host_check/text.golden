@@ -1,0 +1,880 @@
+## pdinfo: reset, sniff, sink on CC1
+FFFF |SNIFF       src snk   |
+8410 |no contract           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 0 crc 0 hr 0      |
+8410 |no source caps        |
+0000 |                      |
+## pdinfo: off
+FFFF |PD off   K2: sniff    |
+8410 |no contract           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC  no source         |
+8410 |no e-marker seen      |
+8410 |msg 0 crc 0 hr 0      |
+8410 |no source caps        |
+0000 |                      |
+## pdinfo: sniff, no source
+FFFF |SNIFF                 |
+8410 |no contract           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC  no source         |
+8410 |no e-marker seen      |
+8410 |msg 0 crc 0 hr 0      |
+8410 |no source caps        |
+0000 |                      |
+## pdinfo: sniff, open CC2
+FFFF |SNIFF       src       |
+8410 |no contract           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC2 2.70V open        |
+8410 |no e-marker seen      |
+8410 |msg 0 crc 0 hr 0      |
+8410 |no source caps        |
+0000 |                      |
+## pdinfo: sniff, Rp USB
+FFFF |SNIFF       src snk   |
+8410 |no contract           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 0.65V Rp USB      |
+8410 |no e-marker seen      |
+8410 |msg 0 crc 0 hr 0      |
+8410 |no source caps        |
+0000 |                      |
+## pdinfo: sniff, Rp 1.5A
+FFFF |SNIFF       src snk   |
+8410 |no contract           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 0.66V Rp 1.5A     |
+8410 |no e-marker seen      |
+8410 |msg 0 crc 0 hr 0      |
+8410 |no source caps        |
+0000 |                      |
+## pdinfo: sniff, Rp 3.0A
+FFFF |SNIFF       src snk   |
+8410 |no contract           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.23V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 0 crc 0 hr 0      |
+8410 |no source caps        |
+0000 |                      |
+## pdinfo: sink
+FFFF |SINK        src       |
+8410 |no contract           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.57V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 0 crc 0 hr 0      |
+8410 |no source caps        |
+0000 |                      |
+## pdinfo: all PDO kinds, caps rev 0
+FFFF |SNIFF PD1.0 src snk   |
+8410 |no contract           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 1 crc 0 hr 0      |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: all PDO kinds, caps rev 1
+FFFF |SNIFF PD2.0 src snk   |
+8410 |no contract           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 2 crc 0 hr 0      |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: all PDO kinds, caps rev 2
+FFFF |SNIFF PD3.x src snk   |
+8410 |no contract           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 3 crc 0 hr 0      |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: request 1 pending
+FFFF |SNIFF PD3.x src snk   |
+FD20 |?#1 5.00V 3.00A       |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 4 crc 0 hr 0      |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: contract 1
+FFFF |SNIFF PD3.x src snk   |
+07E0 |>#1 5.00V 3.00A       |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 5 crc 0 hr 0      |
+07E0 |>1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: request 2 pending
+FFFF |SNIFF PD3.x src snk   |
+FD20 |?#2 VAR 2.00A         |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 6 crc 0 hr 0      |
+07E0 |>1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: contract 2
+FFFF |SNIFF PD3.x src snk   |
+07E0 |>#2 VAR 2.00A         |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 7 crc 0 hr 0      |
+FFFF | 1  5.00V 3.00A       |
+07E0 |>2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: request 3 pending
+FFFF |SNIFF PD3.x src snk   |
+FD20 |?#3 BAT 60W           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 8 crc 0 hr 0      |
+FFFF | 1  5.00V 3.00A       |
+07E0 |>2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: contract 3
+FFFF |SNIFF PD3.x src snk   |
+07E0 |>#3 BAT 60W           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 9 crc 0 hr 0      |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+07E0 |>3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: request 4 pending
+FFFF |SNIFF PD3.x src snk   |
+FD20 |?#4 PPS 9.00V 3.00A   |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 10 crc 0 hr 0     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+07E0 |>3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: contract 4
+FFFF |SNIFF PD3.x src snk   |
+07E0 |>#4 PPS 9.00V 3.00A   |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 11 crc 0 hr 0     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+07E0 |>4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: request 5 pending
+FFFF |SNIFF PD3.x src snk   |
+FD20 |?#5 AVS 15.00V 2.00A  |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 12 crc 0 hr 0     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+07E0 |>4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: contract 5
+FFFF |SNIFF PD3.x src snk   |
+07E0 |>#5 AVS 15.00V 2.00A  |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 13 crc 0 hr 0     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+07E0 |>5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: request 6 pending
+FFFF |SNIFF PD3.x src snk   |
+FD20 |?#6 PPS 14.40V 2.00A  |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 14 crc 0 hr 0     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+07E0 |>5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: contract 6
+FFFF |SNIFF PD3.x src snk   |
+07E0 |>#6 PPS 14.40V 2.00A  |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 15 crc 0 hr 0     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+07E0 |>6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: request 8 pending
+FFFF |SNIFF PD3.x src snk   |
+FD20 |?#8 ? 3.00A           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 16 crc 0 hr 0     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+07E0 |>6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: contract 8
+FFFF |SNIFF PD3.x src snk   |
+07E0 |>#8 ? 3.00A           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 17 crc 0 hr 0     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: cable rev 1 vdo 00000020
+FFFF |SNIFF PD3.x src snk   |
+07E0 |>#8 ? 3.00A           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+FBEA |CBL 3A USB2 05AC      |
+8410 |msg 18 crc 0 hr 0     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: cable rev 2 vdo 00000241
+FFFF |SNIFF PD3.x src snk   |
+07E0 |>#8 ? 3.00A           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+FBEA |CBL 5A 30V Gen1 05AC  |
+8410 |msg 19 crc 0 hr 0     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: cable rev 2 vdo 00000442
+FFFF |SNIFF PD3.x src snk   |
+07E0 |>#8 ? 3.00A           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+FBEA |CBL 5A 40V Gen2 05AC  |
+8410 |msg 20 crc 0 hr 0     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: cable rev 2 vdo 00000663
+FFFF |SNIFF PD3.x src snk   |
+07E0 |>#8 ? 3.00A           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+FBEA |CBL -- 50V Gen3 05AC  |
+8410 |msg 21 crc 0 hr 0     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: cable rev 2 vdo 00000004
+FFFF |SNIFF PD3.x src snk   |
+07E0 |>#8 ? 3.00A           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+FBEA |CBL -- 20V Gen4 05AC  |
+8410 |msg 22 crc 0 hr 0     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: cable rev 2 vdo 00000047
+FFFF |SNIFF PD3.x src snk   |
+07E0 |>#8 ? 3.00A           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+FBEA |CBL 5A 20V ? 05AC     |
+8410 |msg 23 crc 0 hr 0     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+0000 |                      |
+## pdinfo: counters clamped, after hard resets
+FFFF |SNIFF       src snk   |
+8410 |no contract           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+FBEA |CBL 5A 20V ? 05AC     |
+8410 |msg 9999 crc 999 hr 99|
+8410 |no source caps        |
+0000 |                      |
+## pdinfo: source gone
+FFFF |SNIFF       src snk   |
+8410 |no contract           |
+FFE0 |VBUS 9.021V 1.234A    |
+AFFF |CC1 1.68V Rp 3.0A     |
+8410 |no e-marker seen      |
+8410 |msg 9999 crc 999 hr 99|
+8410 |no source caps        |
+0000 |                      |
+## detect: never run
+FFFF |K2: detect charger    |
+0000 |                      |
+# refused: sink armed: start Err(2)
+## detect: refused: sink armed, running
+FD20 |refused: PD sink on   |
+8410 |K2: run again         |
+0000 |                      |
+## detect: refused: sink armed, done
+FD20 |refused: PD sink on   |
+8410 |K2: run again         |
+0000 |                      |
+# refused: sink seen: start Err(3)
+## detect: refused: sink seen, running
+FD20 |refused: sink on port |
+8410 |K2: run again         |
+0000 |                      |
+## detect: refused: sink seen, done
+FD20 |refused: sink on port |
+8410 |K2: run again         |
+0000 |                      |
+# refused: load: start Err(4)
+## detect: refused: load, running
+FD20 |refused: load 45mA    |
+8410 |K2: run again         |
+0000 |                      |
+## detect: refused: load, done
+FD20 |refused: load 45mA    |
+8410 |K2: run again         |
+0000 |                      |
+# load during passive: start Ok(())
+## detect: load during passive
+FD20 |refused: load 33mA    |
+8410 |K2: run again         |
+0000 |                      |
+# Apple 0: start Ok(())
+## detect: Apple 0, running
+FFE0 |detecting: D+/D-      |
+0000 |                      |
+## detect: Apple 0, running
+FFE0 |detecting: QC         |
+0000 |                      |
+## detect: Apple 0, running
+FFE0 |detecting: AFC        |
+0000 |                      |
+## detect: Apple 0, running
+FFE0 |detecting: FCP        |
+0000 |                      |
+## detect: Apple 0, running
+FFE0 |detecting: PD         |
+0000 |                      |
+## detect: Apple 0, running
+FFFF |charger detect done   |
+07E0 |Apple                 |
+FFE0 |VBUS 5.16V load 10mA  |
+07E0 |Apple divider 0.5A    |
+8410 |QC n/a (divider)      |
+8410 |AFC no answer         |
+8410 |FCP no reply          |
+FD20 |PD error 3            |
+8410 |K2: run again         |
+0000 |                      |
+## detect: Apple 0, done
+FFFF |charger detect done   |
+07E0 |Apple                 |
+FFE0 |VBUS 5.16V load 10mA  |
+07E0 |Apple divider 0.5A    |
+8410 |QC n/a (divider)      |
+8410 |AFC no answer         |
+8410 |FCP no reply          |
+FD20 |PD error 3            |
+8410 |K2: run again         |
+0000 |                      |
+# Apple 1: start Ok(())
+## detect: Apple 1, running
+FFE0 |detecting: D+/D-      |
+0000 |                      |
+## detect: Apple 1, running
+FFE0 |detecting: QC         |
+0000 |                      |
+## detect: Apple 1, running
+FFE0 |detecting: AFC        |
+0000 |                      |
+## detect: Apple 1, running
+FFE0 |detecting: FCP        |
+0000 |                      |
+## detect: Apple 1, running
+FFE0 |detecting: PD         |
+0000 |                      |
+## detect: Apple 1, running
+FFFF |charger detect done   |
+07E0 |Apple                 |
+FFE0 |VBUS 5.16V load 10mA  |
+07E0 |Apple divider 1A      |
+8410 |QC n/a (divider)      |
+8410 |AFC no answer         |
+8410 |FCP no reply          |
+FD20 |PD error 3            |
+8410 |K2: run again         |
+0000 |                      |
+## detect: Apple 1, done
+FFFF |charger detect done   |
+07E0 |Apple                 |
+FFE0 |VBUS 5.16V load 10mA  |
+07E0 |Apple divider 1A      |
+8410 |QC n/a (divider)      |
+8410 |AFC no answer         |
+8410 |FCP no reply          |
+FD20 |PD error 3            |
+8410 |K2: run again         |
+0000 |                      |
+# Apple 2: start Ok(())
+## detect: Apple 2, running
+FFE0 |detecting: D+/D-      |
+0000 |                      |
+## detect: Apple 2, running
+FFE0 |detecting: QC         |
+0000 |                      |
+## detect: Apple 2, running
+FFE0 |detecting: AFC        |
+0000 |                      |
+## detect: Apple 2, running
+FFE0 |detecting: FCP        |
+0000 |                      |
+## detect: Apple 2, running
+FFE0 |detecting: PD         |
+0000 |                      |
+## detect: Apple 2, running
+FFFF |charger detect done   |
+07E0 |Apple                 |
+FFE0 |VBUS 5.16V load 10mA  |
+07E0 |Apple divider 2.1A    |
+8410 |QC n/a (divider)      |
+8410 |AFC no answer         |
+8410 |FCP no reply          |
+FD20 |PD error 3            |
+8410 |K2: run again         |
+0000 |                      |
+## detect: Apple 2, done
+FFFF |charger detect done   |
+07E0 |Apple                 |
+FFE0 |VBUS 5.16V load 10mA  |
+07E0 |Apple divider 2.1A    |
+8410 |QC n/a (divider)      |
+8410 |AFC no answer         |
+8410 |FCP no reply          |
+FD20 |PD error 3            |
+8410 |K2: run again         |
+0000 |                      |
+# Apple 3: start Ok(())
+## detect: Apple 3, running
+FFE0 |detecting: D+/D-      |
+0000 |                      |
+## detect: Apple 3, running
+FFE0 |detecting: QC         |
+0000 |                      |
+## detect: Apple 3, running
+FFE0 |detecting: AFC        |
+0000 |                      |
+## detect: Apple 3, running
+FFE0 |detecting: FCP        |
+0000 |                      |
+## detect: Apple 3, running
+FFE0 |detecting: PD         |
+0000 |                      |
+## detect: Apple 3, running
+FFFF |charger detect done   |
+07E0 |Apple                 |
+FFE0 |VBUS 5.16V load 10mA  |
+07E0 |Apple divider 2.4A    |
+8410 |QC n/a (divider)      |
+8410 |AFC no answer         |
+8410 |FCP no reply          |
+FD20 |PD error 3            |
+8410 |K2: run again         |
+0000 |                      |
+## detect: Apple 3, done
+FFFF |charger detect done   |
+07E0 |Apple                 |
+FFE0 |VBUS 5.16V load 10mA  |
+07E0 |Apple divider 2.4A    |
+8410 |QC n/a (divider)      |
+8410 |AFC no answer         |
+8410 |FCP no reply          |
+FD20 |PD error 3            |
+8410 |K2: run again         |
+0000 |                      |
+# Samsung, AFC, FCP, no source: start Ok(())
+## detect: Samsung, AFC, FCP, no source, running
+FFE0 |detecting: D+/D-      |
+0000 |                      |
+## detect: Samsung, AFC, FCP, no source, running
+FFE0 |detecting: QC         |
+0000 |                      |
+## detect: Samsung, AFC, FCP, no source, running
+FFE0 |detecting: AFC        |
+0000 |                      |
+## detect: Samsung, AFC, FCP, no source, running
+FFE0 |detecting: FCP        |
+0000 |                      |
+## detect: Samsung, AFC, FCP, no source, running
+FFE0 |detecting: PD         |
+0000 |                      |
+## detect: Samsung, AFC, FCP, no source, running
+FFFF |charger detect done   |
+07E0 |Samsung AFC FCP       |
+FFE0 |VBUS 5.16V load 10mA  |
+07E0 |Samsung divider 2A    |
+8410 |QC n/a (divider)      |
+07E0 |AFC answered          |
+07E0 |FCP 2 raised, 18.0W   |
+8410 |no Type-C source      |
+8410 |K2: run again         |
+0000 |                      |
+## detect: Samsung, AFC, FCP, no source, done
+FFFF |charger detect done   |
+07E0 |Samsung AFC FCP       |
+FFE0 |VBUS 5.16V load 10mA  |
+07E0 |Samsung divider 2A    |
+8410 |QC n/a (divider)      |
+07E0 |AFC answered          |
+07E0 |FCP 2 raised, 18.0W   |
+8410 |no Type-C source      |
+8410 |K2: run again         |
+0000 |                      |
+# tied, QC, PD 3.0 Rp 3A: start Ok(())
+## detect: tied, QC, PD 3.0 Rp 3A, running
+FFE0 |detecting: D+/D-      |
+0000 |                      |
+## detect: tied, QC, PD 3.0 Rp 3A, running
+FFE0 |detecting: QC         |
+0000 |                      |
+## detect: tied, QC, PD 3.0 Rp 3A, running
+FFE0 |detecting: AFC        |
+0000 |                      |
+## detect: tied, QC, PD 3.0 Rp 3A, running
+FFE0 |detecting: FCP        |
+0000 |                      |
+## detect: tied, QC, PD 3.0 Rp 3A, running
+FFE0 |detecting: PD         |
+0000 |                      |
+## detect: tied, QC, PD 3.0 Rp 3A, running
+FFFF |charger detect done   |
+07E0 |QC PD                 |
+FFE0 |VBUS 5.16V load 10mA  |
+FFFF |D+=D- tied, biased    |
+07E0 |QC (HVDCP)            |
+8410 |AFC no answer         |
+8410 |FCP NACK              |
+07E0 |CC1 Rp 3.0A PD3.x     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2  9.00V 3.00A       |
+FFFF | 3 15.00V 3.00A       |
+FFFF | 4 20.00V 4.70A       |
+8410 |K2: run again         |
+0000 |                      |
+## detect: tied, QC, PD 3.0 Rp 3A, done
+FFFF |charger detect done   |
+07E0 |QC PD                 |
+FFE0 |VBUS 5.16V load 10mA  |
+FFFF |D+=D- tied, biased    |
+07E0 |QC (HVDCP)            |
+8410 |AFC no answer         |
+8410 |FCP NACK              |
+07E0 |CC1 Rp 3.0A PD3.x     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2  9.00V 3.00A       |
+FFFF | 3 15.00V 3.00A       |
+FFFF | 4 20.00V 4.70A       |
+8410 |K2: run again         |
+0000 |                      |
+# DCP, Rp USB, no PD: start Ok(())
+## detect: DCP, Rp USB, no PD, running
+FFE0 |detecting: D+/D-      |
+0000 |                      |
+## detect: DCP, Rp USB, no PD, running
+FFE0 |detecting: QC         |
+0000 |                      |
+## detect: DCP, Rp USB, no PD, running
+FFE0 |detecting: AFC        |
+0000 |                      |
+## detect: DCP, Rp USB, no PD, running
+FFE0 |detecting: FCP        |
+0000 |                      |
+## detect: DCP, Rp USB, no PD, running
+FFE0 |detecting: PD         |
+0000 |                      |
+## detect: DCP, Rp USB, no PD, running
+FFFF |charger detect done   |
+07E0 |DCP                   |
+FFE0 |VBUS 5.16V load 10mA  |
+8410 |no D+/D- divider      |
+FFFF |DCP, no QC            |
+8410 |AFC no answer         |
+8410 |FCP no reply          |
+FFFF |CC1 Rp USB  no PD     |
+8410 |K2: run again         |
+0000 |                      |
+## detect: DCP, Rp USB, no PD, done
+FFFF |charger detect done   |
+07E0 |DCP                   |
+FFE0 |VBUS 5.16V load 10mA  |
+8410 |no D+/D- divider      |
+FFFF |DCP, no QC            |
+8410 |AFC no answer         |
+8410 |FCP no reply          |
+FFFF |CC1 Rp USB  no PD     |
+8410 |K2: run again         |
+0000 |                      |
+# QC, Rp 1.5A, PD 1.0, all PDO kinds: start Ok(())
+## detect: QC, Rp 1.5A, PD 1.0, all PDO kinds, running
+FFE0 |detecting: D+/D-      |
+0000 |                      |
+## detect: QC, Rp 1.5A, PD 1.0, all PDO kinds, running
+FFE0 |detecting: QC         |
+0000 |                      |
+## detect: QC, Rp 1.5A, PD 1.0, all PDO kinds, running
+FFE0 |detecting: AFC        |
+0000 |                      |
+## detect: QC, Rp 1.5A, PD 1.0, all PDO kinds, running
+FFE0 |detecting: FCP        |
+0000 |                      |
+## detect: QC, Rp 1.5A, PD 1.0, all PDO kinds, running
+FFE0 |detecting: PD         |
+0000 |                      |
+## detect: QC, Rp 1.5A, PD 1.0, all PDO kinds, running
+FFFF |charger detect done   |
+07E0 |QC AFC PD             |
+FFE0 |VBUS 5.16V load 10mA  |
+8410 |no D+/D- divider      |
+07E0 |QC (HVDCP)            |
+07E0 |AFC answered          |
+8410 |FCP no reply          |
+07E0 |CC1 Rp 1.5A PD1.0     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+8410 |K2: run again         |
+0000 |                      |
+## detect: QC, Rp 1.5A, PD 1.0, all PDO kinds, done
+FFFF |charger detect done   |
+07E0 |QC AFC PD             |
+FFE0 |VBUS 5.16V load 10mA  |
+8410 |no D+/D- divider      |
+07E0 |QC (HVDCP)            |
+07E0 |AFC answered          |
+8410 |FCP no reply          |
+07E0 |CC1 Rp 1.5A PD1.0     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2 VAR 5.0-12.0V 2.00A|
+FFFF | 3 BAT 5.0-20.0V 60W  |
+FFFF | 4 PPS 3.3-11.0V 3.00A|
+FFFF | 5 AVS 9-20V 3.00A    |
+FFFF | 6 APDO D0123456      |
+FFFF | 7  9.00V 3.00A       |
+8410 |K2: run again         |
+0000 |                      |
+# Rp unknown (CC activity): start Ok(())
+## detect: Rp unknown (CC activity), running
+FFE0 |detecting: D+/D-      |
+0000 |                      |
+## detect: Rp unknown (CC activity), running
+FFE0 |detecting: QC         |
+0000 |                      |
+## detect: Rp unknown (CC activity), running
+FFE0 |detecting: AFC        |
+0000 |                      |
+## detect: Rp unknown (CC activity), running
+FFE0 |detecting: FCP        |
+0000 |                      |
+## detect: Rp unknown (CC activity), running
+FFE0 |detecting: PD         |
+0000 |                      |
+## detect: Rp unknown (CC activity), running
+FFFF |charger detect done   |
+07E0 |PD                    |
+FFE0 |VBUS 5.16V load 10mA  |
+8410 |no D+/D- divider      |
+FFFF |no D+/D- short        |
+8410 |AFC no answer         |
+8410 |FCP no reply          |
+07E0 |CC1 Rp ?    PD3.x     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2  9.00V 3.00A       |
+FFFF | 3 15.00V 3.00A       |
+FFFF | 4 20.00V 4.70A       |
+8410 |K2: run again         |
+0000 |                      |
+## detect: Rp unknown (CC activity), done
+FFFF |charger detect done   |
+07E0 |PD                    |
+FFE0 |VBUS 5.16V load 10mA  |
+8410 |no D+/D- divider      |
+FFFF |no D+/D- short        |
+8410 |AFC no answer         |
+8410 |FCP no reply          |
+07E0 |CC1 Rp ?    PD3.x     |
+FFFF | 1  5.00V 3.00A       |
+FFFF | 2  9.00V 3.00A       |
+FFFF | 3 15.00V 3.00A       |
+FFFF | 4 20.00V 4.70A       |
+8410 |K2: run again         |
+0000 |                      |
+# plain USB: start Ok(())
+## detect: plain USB, running
+FFE0 |detecting: D+/D-      |
+0000 |                      |
+## detect: plain USB, running
+FFE0 |detecting: QC         |
+0000 |                      |
+## detect: plain USB, running
+FFE0 |detecting: AFC        |
+0000 |                      |
+## detect: plain USB, running
+FFE0 |detecting: FCP        |
+0000 |                      |
+## detect: plain USB, running
+FFE0 |detecting: PD         |
+0000 |                      |
+## detect: plain USB, running
+FFFF |charger detect done   |
+8410 |plain USB only        |
+FFE0 |VBUS 5.16V load 10mA  |
+8410 |no D+/D- divider      |
+FFFF |no D+/D- short        |
+8410 |AFC no answer         |
+8410 |FCP no reply          |
+8410 |no Type-C source      |
+8410 |K2: run again         |
+0000 |                      |
+## detect: plain USB, done
+FFFF |charger detect done   |
+8410 |plain USB only        |
+FFE0 |VBUS 5.16V load 10mA  |
+8410 |no D+/D- divider      |
+FFFF |no D+/D- short        |
+8410 |AFC no answer         |
+8410 |FCP no reply          |
+8410 |no Type-C source      |
+8410 |K2: run again         |
+0000 |                      |

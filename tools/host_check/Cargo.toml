@@ -5,10 +5,17 @@ publish = false
 
 # Host-side checks of the firmware's pure modules (rust/src/ntc.rs,
 # rust/src/aes256.rs against reference implementations; rust/src/pdinfo.rs
-# against a replayed PD negotiation).
+# against a replayed PD negotiation; every pdinfo/detect screen line against
+# text.golden).
 # Run: cargo run --release --manifest-path tools/host_check/Cargo.toml
+# (`-- --bless` rewrites text.golden after an intended screen text change)
 [dependencies]
 libm = "=0.2.16"
 aes = "=0.8.4"
 
 [workspace]
+
+# detect.rs's FCP step is cfg(feature = "fcp") in the firmware
+[features]
+default = ["fcp"]
+fcp = []

@@ -25,15 +25,16 @@
 //! restored — re-entering the PD screen starts it again). The D+/D− steps
 //! run before PD: a PD contract can disable a charger's legacy modes.
 //!
-//! Text: `lines`/`line` (pdinfo.rs's writer, shown by pdscr.rs). K2 short
-//! press (`k2`): pages while a later page exists, on the last page (or
-//! with no results) starts a run; ignored while running.
+//! Text: `lines`/`line` (text.rs's writer and string table, shown by
+//! pdscr.rs). K2 short press (`k2`): pages while a later page exists, on
+//! the last page (or with no results) starts a run; ignored while running.
 //!
 //! Thread-exclusive: main loop (service, K2) and verb dispatch only.
 
 use crate::ina;
 use crate::pd;
-use crate::pdinfo::{self, W, COLS};
+use crate::pdinfo;
+use crate::text::*;
 use crate::qc;
 
 /// Load above which a run is refused: a device on the other port would take
@@ -403,98 +404,95 @@ pub fn line(i: usize, out: &mut [u8; COLS]) -> u16 {
     let color = match k {
         L_HEAD => {
             if s.refused != 0 {
-                w.s(b"refused: ");
-                w.s(match s.refused {
-                    E_SINK_ARMED => b"PD sink on" as &[u8],
-                    E_SINK_SEEN => b"sink on port",
-                    _ => b"load ",
+                w.t(REFUSED);
+                w.t(match s.refused {
+                    E_SINK_ARMED => REF_SINK_ARMED,
+                    E_SINK_SEEN => REF_SINK_SEEN,
+                    _ => REF_LOAD,
                 });
                 if s.refused == E_LOAD {
                     w.uint(s.ma as u32, 0);
-                    w.s(b"mA");
+                    w.t(MA);
                 }
                 pdinfo::C_ORANGE
             } else if s.step != S_IDLE {
-                w.s(b"detecting: ");
-                w.s(match s.step {
-                    S_START | S_PASSIVE => b"D+/D-" as &[u8],
-                    S_QC_EARLY | S_QC_LATE => b"QC",
-                    S_AFC_REL | S_AFC_HOLD | S_AFC => b"AFC",
-                    S_PD_ARM | S_PD_WAIT => b"PD",
-                    _ => b"FCP",
+                w.t(DETECTING);
+                w.t(match s.step {
+                    S_START | S_PASSIVE => STEP_DPDM,
+                    S_QC_EARLY | S_QC_LATE => STEP_QC,
+                    S_AFC_REL | S_AFC_HOLD | S_AFC => STEP_AFC,
+                    S_PD_ARM | S_PD_WAIT => FOUND_PD,
+                    _ => STEP_FCP,
                 });
                 pdinfo::C_YELLOW
             } else if s.ran {
-                w.s(b"charger detect done");
+                w.t(DET_DONE);
                 pdinfo::C_WHITE
             } else {
-                w.s(b"K2: detect charger");
+                w.t(DET_START);
                 pdinfo::C_WHITE
             }
         }
         L_FOUND => {
             let div = divider(s.dp_mv, s.dm_mv);
             let qc = if div == 0 || div == 6 { s.qc[0] } else { 0 };
+            /* FOUND_APPLE.. in order */
             let found = [
-                (matches!(div, 1..=4), b"Apple " as &[u8]),
-                (div == 5, b"Samsung "),
-                (qc == 2, b"QC "),
-                (qc == 1, b"DCP "),
-                (s.afc, b"AFC "),
-                (s.done & D_FCP != 0 && s.fcp_err == 0, b"FCP "),
-                (s.caps_n != 0, b"PD"),
+                matches!(div, 1..=4),
+                div == 5,
+                qc == 2,
+                qc == 1,
+                s.afc,
+                s.done & D_FCP != 0 && s.fcp_err == 0,
+                s.caps_n != 0,
             ];
             let mut any = false;
-            for (f, t) in found {
+            for (k, f) in found.into_iter().enumerate() {
                 if f {
-                    w.s(t);
+                    w.t(FOUND_APPLE + k as u8);
                     any = true;
                 }
             }
             if !any {
-                w.s(b"plain USB only");
+                w.t(PLAIN_USB);
                 pdinfo::C_GREY
             } else {
                 pdinfo::C_GREEN
             }
         }
         L_VBUS => {
-            w.s(b"VBUS ");
+            w.t(VBUS);
             w.volts(s.v_mv as u32, 0);
-            w.s(b" load ");
+            w.t(LOAD);
             w.uint(s.ma as u32, 0);
-            w.s(b"mA");
+            w.t(MA);
             pdinfo::C_YELLOW
         }
         L_DIV => match divider(s.dp_mv, s.dm_mv) {
             0 => {
-                w.s(b"no D+/D- divider");
+                w.t(NO_DIVIDER);
                 pdinfo::C_GREY
             }
             5 => {
-                w.s(b"Samsung divider 2A");
+                w.t(SAMSUNG_DIV);
                 pdinfo::C_GREEN
             }
             6 => {
-                w.s(b"D+=D- tied, biased");
+                w.t(TIED);
                 pdinfo::C_WHITE
             }
             d => {
-                w.s(b"Apple divider ");
-                w.s([b"0.5A" as &[u8], b"1A", b"2.1A", b"2.4A"].get((d as usize).wrapping_sub(1)).copied().unwrap_or(b""));
+                w.t(APPLE_DIV);
+                w.t(APPLE_0A5 - 1 + d); /* d = 1..=4 */
                 pdinfo::C_GREEN
             }
         },
         L_QC => {
             if !matches!(divider(s.dp_mv, s.dm_mv), 0 | 6) {
-                w.s(b"QC n/a (divider)");
+                w.t(QC_NA);
                 pdinfo::C_GREY
             } else {
-                w.s(match s.qc[0] {
-                    0 => b"no D+/D- short" as &[u8],
-                    1 => b"DCP, no QC",
-                    _ => b"QC (HVDCP)",
-                });
+                w.t(QC_NO_SHORT + s.qc[0].min(2) as u8);
                 if s.qc[0] == 2 {
                     pdinfo::C_GREEN
                 } else {
@@ -504,54 +502,49 @@ pub fn line(i: usize, out: &mut [u8; COLS]) -> u16 {
         }
         L_AFC => {
             if s.afc {
-                w.s(b"AFC answered");
+                w.t(AFC_YES);
                 pdinfo::C_GREEN
             } else {
-                w.s(b"AFC no answer");
+                w.t(AFC_NO);
                 pdinfo::C_GREY
             }
         }
         L_FCP => {
             if s.fcp_err == 0 {
-                w.s(b"FCP ");
+                w.t(FOUND_FCP);
                 w.uint(s.fcp[0] as u32, 0);
-                w.s(b" raised, ");
+                w.t(RAISED);
                 w.fixed(s.fcp[1] as u32 * 5, 1, 0);
                 w.ch(b'W');
                 pdinfo::C_GREEN
             } else {
-                w.s(if s.fcp_err & 0xF0 == 0x40 { b"FCP no reply" as &[u8] } else { b"FCP NACK" });
+                w.t(if s.fcp_err & 0xF0 == 0x40 { FCP_NO_REPLY } else { FCP_NACK });
                 pdinfo::C_GREY
             }
         }
         L_PD => {
             if s.pd_err != 0 {
-                w.s(b"PD error ");
+                w.t(PD_ERROR);
                 w.uint(s.pd_err as u32, 0);
                 pdinfo::C_ORANGE
             } else if s.pd_state <= 1 {
-                w.s(b"no Type-C source");
+                w.t(NO_TYPEC);
                 pdinfo::C_GREY
             } else {
-                w.s(b"CC");
+                w.t(CC);
                 w.uint(s.cc as u32, 0);
-                w.s(match s.bc_lvl {
-                    1 => b" Rp USB  " as &[u8],
-                    2 => b" Rp 1.5A ",
-                    3 => b" Rp 3.0A ",
-                    _ => b" Rp ?    ",
-                });
+                w.t(BC_UNKNOWN + s.bc_lvl.min(3));
                 if s.caps_n != 0 {
-                    w.s(pdinfo::rev_str(s.rev));
+                    w.rev(s.rev);
                     pdinfo::C_GREEN
                 } else {
-                    w.s(b"no PD");
+                    w.t(NO_PD);
                     pdinfo::C_WHITE
                 }
             }
         }
         L_AGAIN => {
-            w.s(b"K2: run again");
+            w.t(AGAIN);
             pdinfo::C_GREY
         }
         _ => {
