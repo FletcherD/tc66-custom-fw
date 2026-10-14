@@ -161,6 +161,8 @@ def show_status(s):
             "  ".join(hdr_name(h) for h in hdrs),
         )
     )
+    if st[0] == 7:  # sniff: byte 3 = a sink's Rd on the locked CC
+        print("sniff: sink %s" % ("ATTACHED" if st[3] else "not attached"))
     return st
 
 

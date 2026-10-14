@@ -48,7 +48,6 @@ const R_MASKA: u8 = 0x0E;
 const R_MASKB: u8 = 0x0F;
 const R_STATUS0A: u8 = 0x3C; /* burst 0x3C..0x42: s0a s1a inta intb s0 s1 int */
 const R_STATUS0: u8 = 0x40;
-const R_STATUS1: u8 = 0x41;
 const R_FIFOS: u8 = 0x43;
 
 /* Switches0 */
@@ -134,6 +133,13 @@ const E_REJECT: u8 = 0xE2;
 const E_ACCEPT_TIMEOUT: u8 = 0xE3;
 const E_PSRDY_TIMEOUT: u8 = 0xE4;
 const E_RX_FULL: u8 = 0xE5; /* sniff: the RX FIFO filled between polls */
+/* sniff: MDAC threshold ~2.69 V on the locked CC. A source's Rp alone pulls
+ * CC above it (open); a sink's Rd holds it at 0.4-2.04 V (Type-C vRd). */
+const SNIFF_OPEN_MDAC: u8 = 0x3F;
+/* capture event codes (ours, beside KM003C's 0x21/0x22): RX FIFO went full;
+ * RX FIFO resync (a non-SOP token: the queued frames were flushed) */
+const CAP_RX_FULL: u8 = 0x30;
+const CAP_RX_RESYNC: u8 = 0x31;
 /* verb arg errors: 0x0D bad/missing PPS setpoint, 0x0E unsupported PDO kind */
 
 pub struct Pd {
@@ -158,6 +164,8 @@ pub struct Pd {
                     * non-essential replies so bursts (Apple VDM spam) can't
                     * duplicate msg ids or flush a message mid-flight */
     last_rdo: u32, /* last Request object sent (PPS keepalive re-sends it) */
+    sink: bool,    /* sniff: a sink's Rd loads the locked CC (pdsta byte 3) */
+    rx_full: bool, /* sniff: RX FIFO full at the last poll (edge → event) */
     poll_tick: u32,
     req_tick: u32,
     cap_ask_tick: u32,
@@ -190,6 +198,8 @@ static PD: Racy<Pd> = Racy(core::cell::UnsafeCell::new(Pd {
     rev: REV20,
     tx_pend: false,
     last_rdo: 0,
+    sink: false,
+    rx_full: false,
     poll_tick: 0,
     req_tick: 0,
     cap_ask_tick: 0,
@@ -280,7 +290,7 @@ fn cap_msg(hdr: u16, objs: &[u8]) {
     cap_push(&e[..6 + wire]);
 }
 
-/// Capture a connect (0x21) / disconnect (0x22) event.
+/// Capture a connect (0x21) / disconnect (0x22) / CAP_RX_* event.
 fn cap_conn(code: u8) {
     let ms = now_ms();
     let e = [0x45, ms as u8, (ms >> 8) as u8, (ms >> 16) as u8, 0x00, code];
@@ -396,6 +406,8 @@ fn arm_as(state: u8) -> Result<(), u8> {
         rev: REV20,
         tx_pend: false,
         last_rdo: 0,
+        sink: false,
+        rx_full: false,
         poll_tick: ina::ticks(),
         req_tick: ina::ticks(), /* ST_RD_CYCLE start */
         cap_ask_tick: 0,
@@ -420,7 +432,7 @@ pub fn status(out: &mut [u8; 20]) {
     out[0] = p.state;
     out[1] = p.cc;
     out[2] = p.caps_n;
-    out[3] = p.contract;
+    out[3] = if p.state == ST_SNIFF { p.sink as u8 } else { p.contract };
     out[4] = p.req_obj;
     out[5] = p.err;
     out[6] = p.events;
@@ -633,6 +645,12 @@ fn service_due() {
         if let Err(e) = vcc_sweep(p) {
             p.err = e;
         }
+        /* the sweep moved the MDAC: park it back on the sniff threshold */
+        if p.state == ST_SNIFF && p.cc != 0 {
+            if let Err(e) = wr(R_MEASURE, SNIFF_OPEN_MDAC) {
+                p.err = e;
+            }
+        }
     }
     /* publish the KM003C PD-capture preamble (measurement block) */
     let m = ina::snapshot();
@@ -701,10 +719,12 @@ fn attach_poll(p: &mut Pd) -> Result<(), u8> {
 }
 
 /// Sniffer poll. Unlocked (cc 0): the ~500 ms sweep in service_due measures
-/// both CC pins; the higher one above ~0.2 V (Rp against the sink's Rd) gets
-/// the receiver. Locked: drain every frame into the capture ring; a hard
-/// reset re-arms the PD logic; the active CC falling below ~0.2 V unlocks
-/// (disconnect).
+/// both CC pins; the higher one above ~0.2 V (a source's Rp) gets the
+/// receiver, and the MDAC is parked at SNIFF_OPEN_MDAC. Locked: Status0.COMP
+/// says whether a sink's Rd loads the CC — two agreeing quiet polls (no BMC
+/// activity) emit the capture's CONNECT / DISCONNECT; every frame goes to the
+/// capture ring; an RX-FIFO-full edge emits a CAP_RX_FULL event; a hard reset
+/// re-arms the PD logic; the CC falling below ~0.2 V (source gone) unlocks.
 #[inline(never)]
 fn sniff_poll(p: &mut Pd) -> Result<(), u8> {
     if p.cc == 0 {
@@ -716,14 +736,19 @@ fn sniff_poll(p: &mut Pd) -> Result<(), u8> {
         p.cc = if cc1 { 1 } else { 2 };
         wr(R_SWITCHES0, if cc1 { SW0_MEAS_CC1 } else { SW0_MEAS_CC2 })?;
         wr(R_SWITCHES1, sw1_rev(REV20))?; /* no AUTO_CRC, no TXCC */
+        wr(R_MEASURE, SNIFF_OPEN_MDAC)?;
         wr(R_CONTROL1, C1_RX_FLUSH)?;
         wr(R_RESET, RST_PD)?;
-        cap_conn(0x21);
+        p.sink = false;
+        p.detach = 0;
         return Ok(());
     }
     if (if p.cc == 1 { p.vcc1_mv } else { p.vcc2_mv }) < 200 {
+        if p.sink {
+            cap_conn(0x22);
+        }
         p.cc = 0;
-        cap_conn(0x22);
+        p.sink = false;
         return Ok(());
     }
     let mut st = [0u8; 7];
@@ -732,23 +757,48 @@ fn sniff_poll(p: &mut Pd) -> Result<(), u8> {
     p.events |= inta;
     p.status0 = s0;
     p.status1 = s1;
-    if s1 & S1_RX_FULL != 0 {
-        p.err = E_RX_FULL;
+    if s0 & S0_ACTIVITY == 0 {
+        let loaded = s0 & S0_COMP == 0;
+        if loaded != p.sink {
+            p.detach += 1;
+            if p.detach >= 2 {
+                p.sink = loaded;
+                p.detach = 0;
+                cap_conn(if loaded { 0x21 } else { 0x22 });
+            }
+        } else {
+            p.detach = 0;
+        }
     }
+    let full = s1 & S1_RX_FULL != 0;
+    if full {
+        p.err = E_RX_FULL;
+        if !p.rx_full {
+            cap_conn(CAP_RX_FULL);
+        }
+    }
+    p.rx_full = full;
     if inta & IA_HARDRST != 0 {
         wr(R_CONTROL1, C1_RX_FLUSH)?;
         wr(R_RESET, RST_PD)?;
         return Ok(());
     }
     for _ in 0..8 {
-        let mut s = [0u8; 1];
-        rd(R_STATUS1, &mut s)?;
-        if s[0] & S1_RX_EMPTY != 0 {
+        if !rx_ready()? {
             break;
         }
         rx_capture(p)?;
     }
     Ok(())
+}
+
+/// Whether the RX FIFO holds a frame. (Waiting for Status0.ACTIVITY to
+/// clear as well was tried: under dense traffic — Source_Cap retry storms —
+/// it held off draining until the FIFO overflowed and dropped more frames.)
+fn rx_ready() -> Result<bool, u8> {
+    let mut s = [0u8; 1];
+    rd(R_STATUS0 + 1, &mut s)?; /* Status1 */
+    Ok(s[0] & S1_RX_EMPTY == 0)
 }
 
 /// Read one RX FIFO frame (token, header, objects, CRC) into the capture
@@ -760,6 +810,7 @@ fn rx_capture(p: &mut Pd) -> Result<(u16, [u8; 32]), u8> {
     rd(R_FIFOS, &mut head)?;
     if head[0] & 0xE0 != 0xE0 {
         wr(R_CONTROL1, C1_RX_FLUSH)?;
+        cap_conn(CAP_RX_RESYNC);
         return Ok((0, body));
     }
     let hdr = u16::from_le_bytes([head[1], head[2]]);
@@ -829,9 +880,7 @@ fn active_poll(p: &mut Pd, now: u32) -> Result<(), u8> {
     /* drain RX (bounded: at most 8 frames per poll — the INT_N wake only
      * comes per CC activity edge, so leave nothing queued) */
     for _ in 0..8 {
-        let mut s = [0u8; 1];
-        rd(R_STATUS1, &mut s)?;
-        if s[0] & S1_RX_EMPTY != 0 {
+        if !rx_ready()? {
             break;
         }
         rx_frame(p, now)?;

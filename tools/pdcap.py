@@ -63,7 +63,9 @@ def parse_pdpacket(payload):
                 break
             code = payload[i + 5]
             ets = payload[i + 1] | (payload[i + 2] << 8) | (payload[i + 3] << 16)
-            print("  [%8d ms] %s" % (ets, {0x21: "*** CONNECT ***", 0x22: "*** DISCONNECT ***"}.get(code, "event %02x" % code)))
+            print("  [%8d ms] %s" % (ets, {0x21: "*** CONNECT ***", 0x22: "*** DISCONNECT ***",
+                                            0x30: "!!! RX FIFO full: frames may be lost !!!",
+                                            0x31: "!!! RX FIFO resync: queued frames flushed !!!"}.get(code, "event %02x" % code)))
             i += 6
         elif b0 & 0x80:  # wrapped PD message
             wire_len = (b0 & 0x3F) - 5

@@ -524,8 +524,17 @@ past the ~10 s keepalive deadline).
   CC above ~0.2 V (the higher one), polls on every INT_N wake (CC activity
   edges — each frame on the wire), drains up to 8 frames per poll into the capture ring (both sides'
   messages incl. GoodCRCs), re-arms the PD logic after a hard reset, and
-  unlocks when the active CC falls below ~0.2 V. `pdsta` err 0xE5 = the RX
-  FIFO filled between polls (frames lost). `rx_capture` is shared with the sink's
+  unlocks when the active CC falls below ~0.2 V. **Sink attach/detach**: the
+  MDAC is parked at ~2.69 V (`SNIFF_OPEN_MDAC`, restored after each CC
+  sweep); Status0.COMP clear = a sink's Rd loads the CC (vRd 0.4-2.04 V),
+  set = the source's Rp alone. Two agreeing polls without BMC activity emit
+  the capture's CONNECT/DISCONNECT (`pdsta` byte 3 = sink attached while
+  sniffing). Capture events of ours beside KM003C's 0x21/0x22: 0x30 = RX
+  FIFO went full (`pdsta` err 0xE5 too), 0x31 = RX FIFO resync (a non-SOP
+  token flushed the queue). Bench (Apple charger, Pixel + Moto on OUT,
+  100 kHz I²C): every negotiation captured complete; Source_Cap retry storms
+  lose some retries; Apple's first VDM to the Moto (id5) is never captured
+  although the Moto GoodCRCs it — unexplained. `rx_capture` is shared with the sink's
   `rx_frame`.
 - Host tool: `tools/pd.py` (`arm/off/hardreset/sniff/status/caps/req/watch`, decodes
   PDOs and the 20-B `pdsta` reply — field layout in `pd::status`).
