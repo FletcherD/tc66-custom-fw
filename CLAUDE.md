@@ -122,6 +122,9 @@ within ~10 s of power-up, no K1.
   bus stalls, the no-thread-sweeps rule) + open investigations. Read it
   BEFORE changing anything in the USB service paths — several lines of
   main.rs exist only because of what is documented there.
+- **docs/CHARGER_PROTOCOLS.md** — charger detection and sniffing protocol by
+  protocol (BC1.2/dividers, QC, AFC, FCP/SCP, Type-C Rp, USB PD, e-markers):
+  signalling, passive vs 5 V-probe, what's implemented, bench results.
 - **docs/AFC_DECODE_NOTES.md** — the AFC / FCP / SCP D− serial protocol as
   reverse-engineered from stock and its captures, plus public FCP/SCP sources.
 

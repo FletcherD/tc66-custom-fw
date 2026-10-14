@@ -112,6 +112,10 @@ device on the other port).
   `detect.py` reads it with the sink armed.
 - **Sniffer attach detection:** with the MDAC parked at 2.69 V, a sink's Rd
   pulls the line below it (attached), the source's Rp alone doesn't.
+- **Sample only a quiet line:** a CC level read during PD traffic reads low
+  (the BMC signalling drags the average) — at the contract moment the
+  Apple charger's 3.0 A read as 1.5 A. The on-device detection and
+  `detect.py` only accept readings with Status0.ACTIVITY clear.
 - **Bench:** Apple charger → 3.0 A on CC1.
 
 ### USB Power Delivery (CC)
@@ -187,6 +191,22 @@ device on the other port).
 - **Bench:** Apple cable → passive cable, VID 0x05AC (Apple), PID 0x1781,
   XID 2598, 5 A, USB 2.0 only, Type-C, latency class ~2 m.
 
+## On-device detection (screen 6)
+
+The meter runs the same sequence as `tools/detect.py` itself: K1 to the
+detection screen (after the PD info screen), K2 short press to start (on
+the last results page K2 runs again; earlier pages: K2 pages). Steps, each
+driven from the main loop with progress on screen (~9.5 s total, longest
+single block ~0.14 s): D± dividers → QC (`qcdet` logic) → AFC 5 V probe →
+FCP (only in `fcp` builds) → Type-C Rp + PD offer from a 5 V contract.
+Never above 5 V. Refuses (with the reason on screen, ER code over USB) if a
+run is already going, a host-armed PD sink is active, the sniffer sees a
+sink, or the load exceeds 30 mA (re-checked after the first settle; the
+meter's own supply reads 10–13 mA when the charger is on OUT). Ends with
+the PD engine off and D± released. Host: `detct\x01` starts a run,
+`detct` returns busy + the screen lines; `uv run tools/detect.py --device`.
+Doesn't show a cable e-marker (the sink doesn't receive SOP′).
+
 ## What we can learn — summary
 
 | Information | How | Passive? | Tool / verb |
@@ -209,6 +229,7 @@ device on the other port).
 
 - `tools/detect.py` — full detection at 5 V: dividers, `qcdet`, AFC probe,
   `fcprd` (if built), Type-C Rp + PD caps; nothing on the other port.
+  `--device` runs the on-device detection instead and prints its lines.
 - `tools/pd.py` — `arm` / `off` / `sniff` / `hardreset` / `status` / `caps` /
   `req` / `info` (the PD screen's lines).
 - `tools/pdcap.py` (sudo) — live KM003C capture with decoding;
@@ -219,7 +240,7 @@ device on the other port).
   capture decoder; `tools/fusb_intn.py`, `tools/gpio_cc_sweep.py` — FUSB302
   INT_N and CC wiring checks.
 - Verbs: `qcdet`, `qctrg`, `qc3ct`, `afctr`, `qcoff`, `fcprd`/`fcptr`/`scptr`
-  (`fcp`), `pdctl` 0–3, `pdsta`, `pdcap`, `pdreq`, `pdinf` — HARDWARE.md
+  (`fcp`), `pdctl` 0–3, `pdsta`, `pdcap`, `pdreq`, `pdinf`, `detct` — HARDWARE.md
   "CDC verb protocol".
 
 ## Known limits on this unit

@@ -200,6 +200,7 @@ placement. CI runs them on every push.
 | [docs/HARDWARE.md](docs/HARDWARE.md) | board reference, memory map, peripherals, protocols, calibration |
 | [docs/FIRMWARE.md](docs/FIRMWARE.md) | firmware internals and the boot-path rules |
 | [docs/QUIRKS.md](docs/QUIRKS.md) | measured GD32F150 misbehavior |
+| [docs/CHARGER_PROTOCOLS.md](docs/CHARGER_PROTOCOLS.md) | charger detection and PD sniffing: each protocol, what the meter can learn, tools |
 
 ## License
 
