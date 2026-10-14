@@ -100,9 +100,11 @@ features.
 - **Next steps** (see also the open items in QUIRKS.md):
   - Bench-test a power cut mid-session (torn-slot fallback), the K2-hold
     reset, and D± readings against a known device/charger.
-  - Bench-verify the PD sniffer (`pd.py sniff` + `pdcap.py`) with a phone
-    on OUT and a PD charger on IN; check the RX FIFO keeps up (`pdsta` err
-    0xE5) and what cable orientations pass through.
+  - PD sniffer (bench-verified with an Apple charger + Pixel/Moto): the
+    residual misses are occasional GoodCRCs and bad-CRC packets inside the
+    charger's SOP' cable-probe bursts; untested with other chargers, an
+    e-marked cable, or a flipped OUT cable. A boot-time FUSB302 reset (the
+    chip keeps its last config across an MCU reboot) is still open.
   - Bench-verify the positive QC and AFC paths of `tools/detect.py`
     (`qcdet` class 2, the `afctr 0x08` probe, `qctrg` after the detecting
     entry) against the QC/AFC charger. Verified so far: a PC host port (all
