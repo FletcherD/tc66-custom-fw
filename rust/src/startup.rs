@@ -27,7 +27,7 @@ __pre_init:
        — 0x20002000 known bad, predicate unknown — so we ship the proven
        one), but the app needs the extra 448 B of stack (see stack-gate).
        Safe here: Reset loads MSP then bl's us with nothing yet stacked.
-       KEEP IN SYNC with STACK_TOP in tools/stack_gate.py. */
+       KEEP IN SYNC with STACK_TOP in tools/dev/stack_gate.py. */
     ldr     r0, =0x20001000
     msr     msp, r0
     ldr     r0, =0x08002c00         @ VTOR = our vector table

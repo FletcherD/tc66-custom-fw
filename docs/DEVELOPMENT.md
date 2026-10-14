@@ -59,13 +59,13 @@ features.
   (`getva` decrypts a live packet over the air).
 - **Watchdog: done.** FWDGT (~13 s) armed at boot and fed from the main
   loop and the SRAM flasher; a hung loop reboots the meter instead of
-  playing dead. Bench-verified (`tools/wdgtest.py`).
+  playing dead. Bench-verified (`tools/dev/wdgtest.py`).
 - **Fast-flash placement: done.** Hot path pinned below the GD32's 32 KB
   zero-wait flash boundary (`rust/fast.x` + `make fast-gate`): query 0.2 ms,
-  rawva 0.55 ms, getva 2.2 ms round-trip (were 4.5/9/49; `tools/verbtime.py`); powerz sustains
+  rawva 0.55 ms, getva 2.2 ms round-trip (were 4.5/9/49; `tools/dev/verbtime.py`); powerz sustains
   >5000 reads/s. The TFT pixel engine is fast too (full redraw ~30 ms,
-  `tools/uitime.py`). Profile-guided via the on-device 250 Hz PC sampler
-  (`pcprf` verb + `tools/pcprofile.py` — the chip's DWT is a stub).
+  `tools/dev/uitime.py`). Profile-guided via the on-device 250 Hz PC sampler
+  (`pcprf` verb + `tools/dev/pcprofile.py` — the chip's DWT is a stub).
 - **USB architecture: interrupt-serviced, bench-verified.** The device
   leads with its **POWER-Z KM003C emulation — the priority protocol**: the
   mainline Linux `powerz` hwmon driver binds it, `sensors` just works, and
@@ -121,18 +121,18 @@ features.
   - **M4 extensions:** bench-test FCP/SCP against a Huawei charger (put
     `fcp` back into `DEV_FEATURES` — it is out of the dev build for space)
     (`fcprd` reg 0x21, n 3 first — read-only — then `fcptr`; scope D− and compare
-    with `tools/accp_decode.py`); an SCP voltage raise (VSET 0xb8/b9 + a
+    with `tools/dev/accp_decode.py`); an SCP voltage raise (VSET 0xb8/b9 + a
     fed watchdog — the stock SCP block only sets 5.00 V / 5 A). Also: a QC3.0 min-voltage clamp, and
     bench-verifying PD event capture through the KM003C PdPacket attribute.
   - The QUIRKS.md open questions (the unexplained mechanisms behind §1
     NAK/APB stalls and §2 event loss — both absorbed in firmware) and the
     optional stock-firmware Tier 2 comparison.
   - PD info screen (build 148): parser verified by the host replay
-    (tools/host_check) and live — `pd.py info` matched `pdcap.py` across a
+    (tools/dev/host_check) and live — `pd.py info` matched `pdcap.py` across a
     re-plug and a hard-reset renegotiation (offers incl. 20 V 4.7 A,
     contract, Apple cable e-marker, CC1 Rp 3.0 A). Still to do: the K2
     short press on the real button, and a look at the screen with
-    `tools/tftgrab.py`. Also open: the CDC verb latency shift that came with
+    `tools/dev/tftgrab.py`. Also open: the CDC verb latency shift that came with
     the layout change (FIRMWARE.md "Fast-flash placement").
   - Charger detection screen (build 154): on-device result matched
     `tools/detect.py` line by line on the Apple charger (D± tied 1.51 V,

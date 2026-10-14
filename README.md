@@ -205,6 +205,6 @@ placement. CI runs them on every push.
 ## License
 
 MIT; see [LICENSE](LICENSE). The bundled font
-`tools/font/inb.otf` (Inconsolata LGC Bold) is under the SIL Open Font
-License; see [tools/font/OFL.txt](tools/font/OFL.txt). TC66 and RuiDeng are
+`tools/dev/font/inb.otf` (Inconsolata LGC Bold) is under the SIL Open Font
+License; see [tools/dev/font/OFL.txt](tools/dev/font/OFL.txt). TC66 and RuiDeng are
 trademarks of their owners.

@@ -8,7 +8,7 @@ slip into an idle window. Meter must already be in the bootloader (hold K1, cold
 Do NOT open the meter port from anything else while this runs.
 """
 import sys, os, time
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../lib"))
 from tc66lib import find_bootloader, expect
 
 def main():

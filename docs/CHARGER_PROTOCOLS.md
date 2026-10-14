@@ -125,7 +125,7 @@ device on the other port).
   Request → Accept → PS_RDY (+ GoodCRCs). Then vendor messages (VDMs), e.g.
   Discover Identity. Hard Reset is an ordered set (no message id) that
   makes both ends start over (the source cycles VBUS).
-- **Information available** (decoded by `tools/pd_decode.py`; layouts from
+- **Information available** (decoded by `tools/lib/pd_decode.py`; layouts from
   the USB PD R3.2 V1.2 spec, PD 2.0 V1.3 for the older VDOs):
 
   | Message | Fields |
@@ -267,15 +267,15 @@ sink attach).
   steps (`pdseq.py arm wait:6 ask:srccapext wait:1 status`).
 - `tools/pdcap.py` (sudo) — live KM003C capture with decoding; `--save
   FILE` keeps the raw packets, `--replay FILE` re-decodes them offline (no
-  sudo). `tools/pd_spec.py` — the spec's field layouts as named constants
+  sudo). `tools/lib/pd_spec.py` — the spec's field layouts as named constants
   (bit fields with units, byte offsets, enum values, per spec table);
-  `tools/pd_decode.py` — the decoders built on them (vendor names from the
-  system `usb.ids`); `tools/pd_decode_test.py` — regression vectors (bench
+  `tools/lib/pd_decode.py` — the decoders built on them (vendor names from the
+  system `usb.ids`); `tools/dev/pd_decode_test.py` — regression vectors (bench
   frames + vectors built from named fields; run after changing either);
-  `tools/pdlog_check.py` — scores a capture per hard reset (missed messages
+  `tools/dev/pdlog_check.py` — scores a capture per hard reset (missed messages
   via GoodCRC pairing and message-id gaps).
-- `tools/qc.py` — QC triggers; `tools/accp_decode.py` — AFC/FCP/SCP scope
-  capture decoder; `tools/fusb_intn.py`, `tools/gpio_cc_sweep.py` — FUSB302
+- `tools/qc.py` — QC triggers; `tools/dev/accp_decode.py` — AFC/FCP/SCP scope
+  capture decoder; `tools/dev/fusb_intn.py`, `tools/dev/gpio_cc_sweep.py` — FUSB302
   INT_N and CC wiring checks.
 - Verbs: `qcdet`, `qctrg`, `qc3ct`, `afctr`, `qcoff`, `fcprd`/`fcptr`/`scptr`
   (`fcp`), `pdctl` 0–3, `pdsta`, `pdcap`, `pdreq`, `pdinf`, `detct`, `pdsnd`

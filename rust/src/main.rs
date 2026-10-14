@@ -818,7 +818,7 @@ fn toggle_rotation() {
 /// dev verb: dump the TIMER5-veneer PC-profiler ring (markers.rs
 /// MK_PCPRF_BASE): u32 LE total-sample counter + 128 u32 LE PCs. The ISR
 /// keeps writing during the copy — the host drops the newest few entries
-/// per poll to stay consistent (tools/pcprofile.py).
+/// per poll to stay consistent (tools/dev/pcprofile.py).
 #[cfg(feature = "pcprf")]
 #[inline(never)]
 fn do_pcprf() {

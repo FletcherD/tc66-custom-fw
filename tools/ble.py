@@ -102,7 +102,7 @@ def decode(raw):
 
 
 async def rxtest(a):
-    sys.path.insert(0, __file__.rsplit("/", 1)[0])
+    sys.path.insert(0, __file__.rsplit("/", 1)[0] + "/lib")
     import serial
     from tc66lib import meter_candidates
     s = serial.Serial(meter_candidates()[0], 115200, timeout=2)
@@ -121,7 +121,7 @@ async def rxtest(a):
 
 
 def open_usb():
-    sys.path.insert(0, __file__.rsplit("/", 1)[0])
+    sys.path.insert(0, __file__.rsplit("/", 1)[0] + "/lib")
     import serial
     from tc66lib import meter_candidates
     s = serial.Serial(meter_candidates()[0], 115200, timeout=3)

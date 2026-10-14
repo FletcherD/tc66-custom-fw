@@ -11,7 +11,7 @@ Manufacturer_Info, Battery_Capabilities, Country_Info/Codes,
 Extended_Control, EPR_Source/Sink_Capabilities, Vendor_Defined_Extended),
 reassembling chunked extended messages.
 
-Field layouts are the named constants of tools/pd_spec.py, taken from the
+Field layouts are the named constants of tools/lib/pd_spec.py, taken from the
 USB PD specification, Revision 3.2 Version 1.2 (usb.org document library,
 free download — table numbers in the comments refer to it) and Revision
 2.0 Version 1.3 for the PD 2.0 VDOs (cable / AMA VDOs differ from 3.x);

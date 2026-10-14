@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Regression vectors for tools/pd_decode.py: real frames from bench sniffs
+"""Regression vectors for tools/lib/pd_decode.py: real frames from bench sniffs
 (Apple 96 W charger, Apple e-marked cable, Pixel/Moto — kept as captured)
-and synthetic frames built from the named fields of tools/pd_spec.py
+and synthetic frames built from the named fields of tools/lib/pd_spec.py
 (incl. the spec's own examples). The captured values are also rebuilt from
 named fields, which cross-checks pd_spec against real traffic. Each case
 checks that the expected substrings appear in the decoded output; also
 round-trips a PdPacket through pdcap.py's --replay path.
 
-    python3 tools/pd_decode_test.py        (-v prints every decode)
+    python3 tools/dev/pd_decode_test.py        (-v prints every decode)
 """
 import os
 import struct
@@ -16,10 +16,11 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+TOOLS = os.path.dirname(HERE)
+sys.path.insert(0, os.path.join(TOOLS, "lib"))
 from pd_decode import Decoder  # noqa: E402
 from pd_spec import *  # noqa: E402,F403 — the spec's named fields and values
-import pdcap  # noqa: E402
+import km003c  # noqa: E402
 
 
 def hdr(typ, nobj=0, src=True, dfp=True, rev=REV_2_0, mid=0, ext=False, cable=None):
@@ -276,12 +277,12 @@ def run(verbose):
         fails += 1
     # pdcap.py --replay round trip: one PdPacket with a connect event and the Apple Source_Cap frame
     wire = CASES[0][2]
-    pkt = bytes(pdcap.PRE_LEN) + bytes([pdcap.EV_CONNECTION, 10, 0, 0, 0, pdcap.EV_CONNECT]) + \
-        bytes([pack((pdcap.EV_WRAPPED, 1), (pdcap.EV_WRAPPED_SIZE, len(wire) + pdcap.EV_WRAPPED_SIZE_BIAS))]) + \
+    pkt = bytes(km003c.PRE_LEN) + bytes([km003c.EV_CONNECTION, 10, 0, 0, 0, km003c.EV_CONNECT]) + \
+        bytes([pack((km003c.EV_WRAPPED, 1), (km003c.EV_WRAPPED_SIZE, len(wire) + km003c.EV_WRAPPED_SIZE_BIAS))]) + \
         struct.pack("<IB", 11, 0) + wire
     with tempfile.NamedTemporaryFile("w", suffix=".hex", delete=False) as f:
         f.write(pkt.hex() + "\n")
-    r = subprocess.run([sys.executable, os.path.join(HERE, "pdcap.py"), "--replay", f.name],
+    r = subprocess.run([sys.executable, os.path.join(TOOLS, "pdcap.py"), "--replay", f.name],
                        capture_output=True, text=True)
     os.unlink(f.name)
     ok = "CONNECT" in r.stdout and "PDO 4: fixed 20.00 V 4.70 A" in r.stdout

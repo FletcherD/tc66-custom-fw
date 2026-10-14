@@ -18,7 +18,7 @@ If it fails mid-stream the app region is partially written; recover by holding K
 cold-booting into the bootloader, and re-flashing a known-good image over the bootloader.
 """
 import sys, os, time
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../lib"))
 from tc66lib import meter_candidates, expect, _safe_close
 import serial
 

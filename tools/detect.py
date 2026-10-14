@@ -37,14 +37,14 @@ import struct
 import sys
 import time
 
-sys.path.insert(0, __file__.rsplit("/", 1)[0])
+sys.path.insert(0, __file__.rsplit("/", 1)[0] + "/lib")
 import serial  # noqa: E402
 from tc66lib import meter_candidates  # noqa: E402
-from pd import (decode_pdo, PDSTA_LEN, PDSTA_STATE, PDSTA_CC, PDSTA_CAPS, PDSTA_STATUS0,  # noqa: E402
+from pd_engine import (decode_pdo, PDSTA_LEN, PDSTA_STATE, PDSTA_CC, PDSTA_CAPS, PDSTA_STATUS0,  # noqa: E402
                 PDSTA_REV, ST_WAIT_ATTACH, ST_LISTEN, ST_CONTRACT, STATUS0_ACTIVITY, STATUS0_BC_LVL,
                 ENGINE_REVS, PDCAP_LEN, parse_caps)
 from pd_spec import get  # noqa: E402
-from rawva import rawva  # noqa: E402
+from rawva_proto import rawva  # noqa: E402
 
 QC_CLASS = {0: "no D+/D- short (not a dedicated charger)",
             1: "dedicated charger (BC1.2 DCP), no QC",

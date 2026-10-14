@@ -132,7 +132,7 @@ pub const MK_BT_LINES: usize = MK_BT_BASE + 12;
 /* PC-profiler ring (the TIMER5_DAC entry veneer in ina.rs — address is
  * hardcoded in its asm): +0 = total-samples counter, +4..+0x204 = 128-entry
  * ring of interrupted-context PCs, one per 4 ms tick. Read over CDC with
- * the `pcprf` verb (tools/pcprofile.py); the chip's DWT PCSR is a stub. */
+ * the `pcprf` verb (tools/dev/pcprofile.py); the chip's DWT PCSR is a stub. */
 pub const MK_PCPRF_BASE: usize = 0x2000_1100;
 pub const PCPRF_RING: usize = 128;
 

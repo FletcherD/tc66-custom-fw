@@ -3,7 +3,7 @@
 //! beta = 3450, on the bottom of an 11.5k divider:
 //!   R = avg * 11500 / (4095 - avg);  T = 1/(1/298.15 + ln(R/10000)/3450)
 //! Evaluated in fixed point (ln via a Q24 log2). Pure integer code with no
-//! crate deps: tools/ntc_check compiles this file on the host and proves it
+//! crate deps: tools/dev/host_check compiles this file on the host and proves it
 //! bit-identical to the stock f32 form over every sum16.
 
 const LN2_Q30: i64 = 744_261_118; /* ln 2 * 2^30 */

@@ -15,14 +15,14 @@
 
 DANGER: a QC trigger RAISES THE OUT-PORT VOLTAGE. Nothing downstream.
 Voltage-raising commands refuse targets above --max-v and ask for
-confirmation unless --yes (tools/trigger_guard.py).
+confirmation unless --yes (tools/lib/trigger_guard.py).
 Only works with a QC2.0-capable charger on IN (non-PD; a PD source ignores
 D+/D-). PA13/PA14 are SWDIO/SWCLK — SWD is dead until `qc.py off`.
 """
 import sys
 import time
 
-sys.path.insert(0, __file__.rsplit("/", 1)[0])
+sys.path.insert(0, __file__.rsplit("/", 1)[0] + "/lib")
 import serial  # noqa: E402
 from tc66lib import meter_candidates  # noqa: E402
 import trigger_guard  # noqa: E402

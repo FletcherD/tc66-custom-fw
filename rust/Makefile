@@ -31,12 +31,12 @@ print('init-gate ok: data/bss init bounded to %s..%s' % (hex(min(syms.values()))
 # silent boot-path stack overflow (hardfault before the D+ pull-up = invisible
 # dead board, K1 recovery); this catches that class at build time.
 stack-gate: build
-	@python3 ../tools/stack_gate.py $(ELF)
+	@python3 ../tools/dev/stack_gate.py $(ELF)
 
 # Hot path must sit below 0x08008000 (zero-wait flash — QUIRKS §4); fast.x
 # places it, this proves it and reports the region budget.
 fast-gate: build
-	@python3 ../tools/fast_gate.py $(ELF)
+	@python3 ../tools/dev/fast_gate.py $(ELF)
 
 tc66fw.bin: build flasher-gate init-gate stack-gate fast-gate
 	arm-none-eabi-objcopy -O binary $(ELF) tc66fw.bin
@@ -53,7 +53,7 @@ tc66fw.pad.bin: tc66fw.bin
 open('tc66fw.pad.bin','wb').write(d + b'\x00' * (51840 - len(d)))"
 
 flash: tc66fw.pad.bin
-	python3 ../tools/app_update.py tc66fw.pad.bin
+	python3 ../tools/dev/app_update.py tc66fw.pad.bin
 
 # Release image: the product feature set, AES-encrypted for the stock
 # bootloader (the format the vendor's own firmware images use). Recursive so
@@ -73,16 +73,16 @@ gates: host-check
 # Host-side proofs of the pure modules: src/ntc.rs bit-identical to the
 # stock f32 temperature model over all inputs, src/aes256.rs vs FIPS-197 and
 # the RustCrypto aes crate, src/pdinfo.rs replaying a PD negotiation, every
-# pdinfo/detect screen line vs tools/host_check/text.golden (own dir:
+# pdinfo/detect screen line vs tools/dev/host_check/text.golden (own dir:
 # rust/.cargo's thumb target must not apply)
 host-check:
-	cd ../tools/host_check && cargo run -q --release
+	cd ../tools/dev/host_check && cargo run -q --release
 
 # Bootloader recovery path (AES image; hold K1 while plugging in first)
 tc66fw.enc.bin: tc66fw.bin
-	python3 ../tools/encrypt.py tc66fw.bin tc66fw.enc.bin
+	python3 ../tools/dev/encrypt.py tc66fw.bin tc66fw.enc.bin
 recover: tc66fw.enc.bin
-	python3 ../tools/flash_image.py tc66fw.enc.bin
+	python3 ../tools/dev/flash_image.py tc66fw.enc.bin
 
 # The .flasher section erases app flash while running from SRAM: prove it never
 # references app flash (literal pools) and makes no PC-relative calls out of the

@@ -1,6 +1,6 @@
 //! Compact AES-256 encryption (getva's ECB cipher): S-box table, word-wise
 //! MixColumns, key schedule expanded at compile time. Pure code with no crate
-//! deps: tools/host_check compiles this file on the host and checks it
+//! deps: tools/dev/host_check compiles this file on the host and checks it
 //! against the RustCrypto `aes` crate and the FIPS-197 vector.
 //!
 //! State layout: four little-endian u32 columns, byte r of column c (bits

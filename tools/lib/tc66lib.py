@@ -5,12 +5,9 @@ capture/flash script. Canonical implementations live here.
 
     from tc66lib import find_bootloader, expect, wait_for_bootloader, V118
 
-Subdir scripts can locate this module with:
-    import sys, os
-    _R = os.path.abspath(os.path.dirname(__file__))
-    while _R != "/" and not os.path.exists(os.path.join(_R, "tc66lib.py")):
-        _R = os.path.dirname(_R)
-    sys.path.insert(0, _R)
+Scripts put this directory (tools/lib) on sys.path first, e.g. from tools/:
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+(from tools/dev/: "../lib").
 """
 import glob, os, re, subprocess, sys, time
 import serial
@@ -91,6 +88,17 @@ def meter_candidates():
         if rp not in skip and rp not in cands:
             cands.append(rp)
     return cands
+
+
+def open_meter():
+    """Open the first meter candidate (app mode, 115200, 1.5 s timeout);
+    exits when none is found."""
+    ports = meter_candidates()
+    if not ports:
+        sys.exit("no meter found")
+    s = serial.Serial(ports[0], 115200, timeout=1.5)
+    s.reset_input_buffer()
+    return s
 
 
 def find_bootloader(baud=115200):

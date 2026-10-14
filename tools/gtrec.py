@@ -17,7 +17,7 @@ import struct
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 import serial  # noqa: E402
 from tc66lib import meter_candidates  # noqa: E402
 

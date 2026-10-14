@@ -15,12 +15,12 @@ charger detection screen on the same grid (K2 runs tools/detect.py's
 sequence on the device as a main-loop-stepped state machine, ≤5 V,
 refuses with a load/sink on the other port, ends PD off; `detct` verb +
 `detect.py --device`; both screens' strings are ids into text.rs's packed
-table, every line + color pinned by tools/host_check/text.golden —
+table, every line + color pinned by tools/dev/host_check/text.golden —
 `-- --bless` after an intended change) —
 with no-change screen-off after `idle_off_s` (default 15 s); keys.rs polls K1/K2 — K1 next screen, K2
 held 1 s resets energy, K2 short press = next page (detection: a run on the last page), any press wakes; `keyrd`/`uiscr` dev verbs), the
 FWDGT watchdog (wdg.rs, ~13 s, fed per loop pass + inside the flasher —
-bench-verified with tools/wdgtest.py; `rstrd` reads the reset cause), the
+bench-verified with tools/dev/wdgtest.py; `rstrd` reads the reset cause), the
 BLE link (bt.rs: DX-BT24-M on USART1 at 9600 — its power-on default, it
 ignores TTM provisioning — RX DMA ring + TX DMA, always-on dispatch of
 `bgetva`/`bquery`/`brawva`/`bnextp`/`blastp`/`brotat`/`bcfgrd`/`bcfgwr`;
@@ -33,11 +33,11 @@ charger and device negotiating through the meter, either orientation, incl.
 SOP'/SOP'' cable e-marker traffic, attach/detach, bad-CRC and hard-reset
 events; `pdctl 2` while sniffing re-triggers the negotiation; read with
 tools/pdcap.py under sudo — decodes all PD message types incl. identities,
-extended caps/status, chunk reassembly via tools/pd_decode.py (layouts are
-the named fields of tools/pd_spec.py, from the USB PD R3.2 spec; the
-firmware's are rust/src/pdspec.rs + pdsta.rs — use them, not raw shifts; regression vectors in tools/pd_decode_test.py;
+extended caps/status, chunk reassembly via tools/lib/pd_decode.py (layouts are
+the named fields of tools/lib/pd_spec.py, from the USB PD R3.2 spec; the
+firmware's are rust/src/pdspec.rs + pdsta.rs — use them, not raw shifts; regression vectors in tools/dev/pd_decode_test.py;
 `--save`/`--replay` for offline re-decoding; tools/pdseq.py runs a capture
-around a sequence of pd.py steps); tools/pdlog_check.py scores a capture.
+around a sequence of pd.py steps); tools/dev/pdlog_check.py scores a capture.
 The sink also captures the source's cable probe at attach (listen-only, no
 AUTO_CRC, until the first caps — FIRMWARE.md "Cable-listen phase"), and in
 `dev-pd` builds asks the source for PD 3.x info (`pdsnd` + `pd.py ask`; the
@@ -46,7 +46,7 @@ bench-verified
 with an Apple charger + Pixel/Moto; this unit's OUT-port CC2 contact is
 near-open, so sink attach / hard reset only work with the line on CC1 —
 a board fault, not firmware: both CC nodes are unloaded at DC and no GPIO
-or ADC pin touches CC, per `gpiot` + tools/gpio_cc_sweep.py). The PD engine wakes on the FUSB302's
+or ADC pin touches CC, per `gpiot` + tools/dev/gpio_cc_sweep.py). The PD engine wakes on the FUSB302's
 INT_N (PA15, read as a GPIO) and runs the BMC slicer at Slice 0x58; I²C is
 400 kHz; qc.rs: Quick Charge 2.0 D+/D− — `qctrg`/`qcoff` (entry detects QC first; `qcdet` probe)
 + tools/qc.py, bench-verified 5/9/12 V, plus QC3.0 `qc3ct` and Samsung AFC
@@ -62,14 +62,14 @@ compatibility**. The sampler runs from the TIMER5 interrupt (250 Hz,
 interleaved INA226 reads — ina.rs), immune to main-loop blocking. The hot
 path is pinned below the GD32's 32 KB zero-wait flash boundary
 (`rust/fast.x` + `make fast-gate` — docs/FIRMWARE.md "Fast-flash placement";
-query 0.37 / rawva 0.76 / getva 2.5 ms — tools/verbtime.py, up from 0.24/0.55/2.2 by a pure layout shift, see FIRMWARE.md; the TFT pixel engine too — full
-redraw ~30 ms, tools/uitime.py). Slow-region cost is per cold fetch and
+query 0.37 / rawva 0.76 / getva 2.5 ms — tools/dev/verbtime.py, up from 0.24/0.55/2.2 by a pure layout shift, see FIRMWARE.md; the TFT pixel engine too — full
+redraw ~30 ms, tools/dev/uitime.py). Slow-region cost is per cold fetch and
 layout-sensitive: anything with a polling loop belongs in fast flash
 (`#[link_section = ".fasttext.<name>"]` on our fns, fast.x patterns for
 other crates/modules; fast-gate fails on any overflow — no silent spill), and
 per-pass `service()` calls keep their idle check `#[inline(always)]` in
 the fast main loop (pass ~20 µs). Profile with the on-device PC
-sampler (`pcprf` verb + tools/pcprofile.py; the DWT is a stub — never
+sampler (`pcprf` verb + tools/dev/pcprofile.py; the DWT is a stub — never
 trust PCSR). For lossless host streaming use the plaintext `rawva` verb
 (window seq for dedup; tools/rawva.py); getva also carries the seq at
 pac3+4. The build is a pinned nightly (rust-toolchain.toml: build-std core
@@ -79,11 +79,11 @@ pac3+4. The build is a pinned nightly (rust-toolchain.toml: build-std core
 tests of the energy ring, M4 extensions (Huawei FCP/SCP: `fcptr`/`fcprd`/`scptr` verbs, `fcp`
 feature — currently out of DEV_FEATURES for space —
 framing + reply decoding matched to the stock captures (fcp.csv/scp.csv,
-tools/accp_decode.py) but never run against an FCP/SCP charger; an SCP
+tools/dev/accp_decode.py) but never run against an FCP/SCP charger; an SCP
 voltage raise (VSET 0xb8/b9 + watchdog) is not implemented — stock SCP is
 5 V/5 A; docs/AFC_DECODE_NOTES.md),
-the open docs/QUIRKS.md investigations, richer M3 screens. Fonts are generated by tools/mkfont.py; display verification
-uses the bench webcam (see the memory notes), or `tools/tftgrab.py grab`
+the open docs/QUIRKS.md investigations, richer M3 screens. Fonts are generated by tools/dev/mkfont.py; display verification
+uses the bench webcam (see the memory notes), or `tools/dev/tftgrab.py grab`
 (`tftrd` frame-memory readback, `dev-tft` builds: `make flash FEATURES=dev-tft`;
 `--screen N` selects a screen first; bench-verified on all five screens). docs/DEVELOPMENT.md has the
 detailed status/roadmap; README.md is the PUBLIC user-facing page (install,
@@ -108,7 +108,7 @@ probe, `fcprd`, PD caps) or on-device (screen 5 / `detct`). Flash is nearly
 full (build 161: release ~1.7 KB spare, dev ~1.5 KB): `DEV_FEATURES` =
 `pcprf dev-pd`. **Version**: just BUILD_ID (no semver),
 shown on the ~2 s boot splash (ui.rs `SPLASH`) and by the `versn` verb.
-Host trigger tools (pd.py/qc.py) go through tools/trigger_guard.py
+Host trigger tools (pd.py/qc.py) go through tools/lib/trigger_guard.py
 (default --max-v 9, confirmation unless --yes).
 
 **The escape hatch**: the boot grace window (first ~10 s serve only
@@ -149,8 +149,8 @@ Then verify over serial: `query` → `firm`; `getva` → 192-B encrypted packet
 each flash and read it back at marker 0x20001060 to prove the new image runs.
 The board is on the bench hub (port **b3** as of 2026-10-13 — it moves; check
 `hub_power.py status`) — power-cycle it with the `usb-hub-power` skill when
-needed. Host tools live in `tools/`. K1 can be driven hands-free by the Pico
-debugprobe (tools/k1boot.py) when the probe is plugged in.
+needed. Host tools: `tools/` = user-facing scripts, `tools/dev/` = dev/bench tools and gates, `tools/lib/` = shared modules only (tools/README.md). K1 can be driven hands-free by the Pico
+debugprobe (tools/dev/k1boot.py) when the probe is plugged in.
 
 ## Hard rules
 

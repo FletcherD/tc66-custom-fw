@@ -7,7 +7,7 @@ publish = false
 # rust/src/aes256.rs against reference implementations; rust/src/pdinfo.rs
 # against a replayed PD negotiation; every pdinfo/detect screen line against
 # text.golden).
-# Run: cargo run --release --manifest-path tools/host_check/Cargo.toml
+# Run: cargo run --release --manifest-path tools/dev/host_check/Cargo.toml
 # (`-- --bless` rewrites text.golden after an intended screen text change)
 [dependencies]
 libm = "=0.2.16"

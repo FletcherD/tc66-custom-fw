@@ -17,9 +17,9 @@ import os
 import struct
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 from tqdm import tqdm  # noqa: E402
-from i2cread import open_meter  # noqa: E402
+from tc66lib import open_meter  # noqa: E402
 
 SIZE = 0x8000
 CHUNK = 32

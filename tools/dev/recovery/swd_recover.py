@@ -23,7 +23,7 @@ BUF, MSP, APP_BASE, BATCH = 0x20001200, 0x20001e00, 0x08002c00, 256
 ERASE_OK, PROG_OK = 0xE5A5EDED, 0x0D09EEEE
 HALT_V, RESUME_V = 0xA05F0003, 0xA05F0001
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(os.path.dirname(HERE))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))  # repo root
 
 
 class OCD:

@@ -48,15 +48,15 @@ Two paths:
 
 ### 1. Bootloader path (needs K1)
 1. Hold **K1** while plugging in USB → the board enumerates as a CDC serial device in bootloader mode.
-2. Encrypt the raw app: `tools/encrypt.py app.bin app.enc.bin` (AES-256-ECB, image key baked in; pads to 51840 B).
-3. `tools/flash_image.py app.enc.bin` (or the user-facing `tools/tc66flash.py flash`) — sends `query`→`boot`, `update`→`uprdy`, then 810 × 64-byte chunks (the bootloader decrypts + writes each), then the board restarts.
+2. Encrypt the raw app: `tools/dev/encrypt.py app.bin app.enc.bin` (AES-256-ECB, image key baked in; pads to 51840 B).
+3. `tools/dev/flash_image.py app.enc.bin` (or the user-facing `tools/tc66flash.py flash`) — sends `query`→`boot`, `update`→`uprdy`, then 810 × 64-byte chunks (the bootloader decrypts + writes each), then the board restarts.
 
 This is the **recovery path** and the way to flash the very first app. Always works.
 
 ### 2. App self-update path (`updat`, no K1)
 While our app is running, later builds flash over USB with no button press
 (`make flash` does this):
-1. `tools/app_update.py app.bin` — sends `updat`; the app copies a small flasher into SRAM and streams **plaintext** 64-byte chunks to it; the flasher programs them and resets into the new app.
+1. `tools/dev/app_update.py app.bin` — sends `updat`; the app copies a small flasher into SRAM and streams **plaintext** 64-byte chunks to it; the flasher programs them and resets into the new app.
 
 The self-flasher runs from SRAM (because it erases the whole app region) and reuses
 the bootloader's flash routines, which are always resident:
@@ -150,14 +150,14 @@ Verbs:
 | `versn` | `OK`+ASCII `<build>` | ours: firmware version, e.g. `OK144` (BUILD_ID) |
 | `eeprd` | `OK`+data / `ER`+code | ours: `eeprd <addr u16 LE> <len 1..=32>` read-only EEPROM read (ER 0x0F bad args, 0x21 out of range, 0x22 bus) — tools/tc66flash.py `backup-eeprom`, tools/eedump.py |
 | `rawva` | 46 B plaintext | ours: getva fields + window seq, no AES — use for streaming (tools/rawva.py) |
-| `pcprf` | 516 B plaintext | our dev verb: PC-profiler ring dump (u32 counter + 128 u32 PCs; FIRMWARE.md "PC profiler", tools/pcprofile.py) |
-| `i2crd` | `OK`+data / `ER`+diag | our dev verb: `i2crd <addr7> <wlen 0..=2> <w0> <w1> <rlen 0..=32>` raw I²C write-then-read; ER + stage + 3 status bytes (tools/i2cread.py) |
-| `adcrd` | `OK`+u32 / `ER`+stage | our dev verb: `adcrd <ch>` ADC sum-of-16 (tools/adcread.py) |
-| `gpiot` | `OK`+old cfg / `ER`+code | our dev verb: `gpiot <port 0/1/2=A/B/F> <pin> <cfg>` sets one GPIO (cfg = CTL mode bits 1:0 \| PUD<<2 \| OCTL<<4; 0x80 = read only) and returns the previous cfg byte for restoring; refuses PA3/PA9/PA11/PA12/PB6/PB7 (ER 0x10) — tools/gpio_cc_sweep.py |
+| `pcprf` | 516 B plaintext | our dev verb: PC-profiler ring dump (u32 counter + 128 u32 PCs; FIRMWARE.md "PC profiler", tools/dev/pcprofile.py) |
+| `i2crd` | `OK`+data / `ER`+diag | our dev verb: `i2crd <addr7> <wlen 0..=2> <w0> <w1> <rlen 0..=32>` raw I²C write-then-read; ER + stage + 3 status bytes (tools/dev/i2cread.py) |
+| `adcrd` | `OK`+u32 / `ER`+stage | our dev verb: `adcrd <ch>` ADC sum-of-16 (tools/dev/adcread.py) |
+| `gpiot` | `OK`+old cfg / `ER`+code | our dev verb: `gpiot <port 0/1/2=A/B/F> <pin> <cfg>` sets one GPIO (cfg = CTL mode bits 1:0 \| PUD<<2 \| OCTL<<4; 0x80 = read only) and returns the previous cfg byte for restoring; refuses PA3/PA9/PA11/PA12/PB6/PB7 (ER 0x10) — tools/dev/gpio_cc_sweep.py |
 | `gpird` | `OK`+3×u16 LE | our dev verb: GPIOA/GPIOB/GPIOF input registers (configures PA15 as input + pull-up first — FUSB302 INT_N) |
 | `clkrd` | `OK`+RCU_CTL+RCU_CFG0 (u32 LE ×2) | our dev verb: clock-tree peek (verified: AHB/APB1/APB2 all /1 = 48 MHz) |
 | `keyrd` | `OK`+raw+held (2 bytes, bit0 = K1, bit1 = K2) | our dev verb: raw PF0/PF1 levels (1 = released) + debounced pressed mask (keys.rs) |
-| `rstrd` | `OK`+u32 LE | our dev verb: RCU_RSTSCK captured at boot (bit 29 = watchdog reset, 28 = software) (wdg.rs, tools/wdgtest.py) |
+| `rstrd` | `OK`+u32 LE | our dev verb: RCU_RSTSCK captured at boot (bit 29 = watchdog reset, 28 = software) (wdg.rs, tools/dev/wdgtest.py) |
 | `wdtst` | `OK`, then the meter reboots in ~13 s | our dev verb: hang the main loop to prove the watchdog bites |
 | `idlrd` | `OK`+4×u32 LE | our dev verb: screen-idle state — idle_secs, flags (bit0 tft alive, bit1 screen off), key-wake count, last screen_off result (1 = ok) |
 | `uiscr` | `OK`+screen / `ER`+stage | our dev verb: `uiscr <n>` select screen n (no arg = next, like K1) and redraw to completion |
@@ -167,10 +167,10 @@ Verbs:
 | `btget` | `OK`+bytes | our dev verb: drain up to 32 raw bytes received from the module (raw mode) |
 | `btsta` | `OK`+7×u32 LE | our dev verb: USART1 STAT/CTL0/BAUD, DMA CH4CTL/CNT (RX ring), CH3CTL/CNT (TX) |
 | `btspy` | `OK`+3×u32 LE | our dev verb: `btspy <port 0=A,1=B> <pin>` sample a pin for 1 s → transitions, low samples, total samples |
-| `tftfl` | `OK` / `ER`+stage | our dev verb: TFT test pattern (no args) or solid fill (RGB565 LE u16); ER stages in tft.rs (tools/tft.py) |
-| `tftbl` | `OK` / `ER`+stage | our dev verb: backlight PWM compare, LE u16 0..=999 (tools/tft.py) |
-| `tftui` | `OK` / `ER`+stage | our dev verb: force a main-screen refresh (tools/tft.py) |
-| `tftrd` | `OK`+MADCTL+SSA+n B+status / `ER`+stage | our dev verb: `tftrd <cmd> <dummy bits> <n u16 LE> [x0 y0 x1 y1]` panel readback — sends `cmd` (after a CASET/RASET window in screen coords, if given), clocks `dummy` bits, reads n bytes over the bidirectional SDA; SSA = scroll start address (0 = no scroll); trailing status 0 or the stage of the post-read panel reset + re-init (tft.rs, tools/tftgrab.py) |
+| `tftfl` | `OK` / `ER`+stage | our dev verb: TFT test pattern (no args) or solid fill (RGB565 LE u16); ER stages in tft.rs (tools/dev/tft.py) |
+| `tftbl` | `OK` / `ER`+stage | our dev verb: backlight PWM compare, LE u16 0..=999 (tools/dev/tft.py) |
+| `tftui` | `OK` / `ER`+stage | our dev verb: force a main-screen refresh (tools/dev/tft.py) |
+| `tftrd` | `OK`+MADCTL+SSA+n B+status / `ER`+stage | our dev verb: `tftrd <cmd> <dummy bits> <n u16 LE> [x0 y0 x1 y1]` panel readback — sends `cmd` (after a CASET/RASET window in screen coords, if given), clocks `dummy` bits, reads n bytes over the bidirectional SDA; SSA = scroll start address (0 = no scroll); trailing status 0 or the stage of the post-read panel reset + re-init (tft.rs, tools/dev/tftgrab.py) |
 | `pdctl` | `OK` / `ER`+stage | our trigger verb: PD sink engine off (0) / arm (1) / hard-reset (2 — while sniffing: makes the pair renegotiate; on this unit only when the locked CC is CC1 — its OUT-port CC2 contact is near-open, FIRMWARE.md "Sniffer") / listen-only sniffer (3) (pd.rs, tools/pd.py) |
 | `pdsta` | `OK`+22 B | our trigger verb: PD engine state (layout: `pd::status`; while sniffing — state 7 — byte 3 = a sink is attached; byte 20 flags tx_pend/cable-listen/asked, byte 21 the register of the last failed I²C transaction) |
 | `pdcap` | `OK`+n+n×4 B | our trigger verb: received source PDOs (LE u32 each) |
@@ -227,7 +227,7 @@ bytes 0..60, stored LE in 60..64 (upper two bytes 0).
 To stream samples losslessly: poll at ≥2× the window rate (25 Hz is plenty),
 keep a reply only when the sequence advances, and treat a sequence jump as a
 missed window. **Prefer `rawva` for this** — same live fields, plaintext, no
-AES: ~0.55 ms round-trip vs ~2.2 ms for `getva` (`tools/verbtime.py`). Reply layout in `rust/src/getva.rs` (46 B: `"raw1"`,
+AES: ~0.55 ms round-trip vs ~2.2 ms for `getva` (`tools/dev/verbtime.py`). Reply layout in `rust/src/getva.rs` (46 B: `"raw1"`,
 ten LE u32 fields, CRC16/MODBUS tail); client + deduping stream generator in
 `tools/rawva.py`. Verified on the bench: 700 polls/s costs the sampler nothing
 (the sampler runs from a timer interrupt; see FIRMWARE.md), zero missed windows.
@@ -376,7 +376,7 @@ separate `temp sign` field (offset 88) marks sub-zero.
 
 Ours evaluates it per window in fixed point (ntc.rs: Q24 log2, integer
 only), bit-identical to the f32 form over every sum16 — `make host-check`
-(tools/host_check) proves it exhaustively. (Stock: units with
+(tools/dev/host_check) proves it exhaustively. (Stock: units with
 a config-page serial ≤ 0x144 use a linear map of the internal die sensor, ch16,
 instead; this unit's serial is 55050.)
 
@@ -396,7 +396,7 @@ instead; this unit's serial is 55050.)
   ~1.5–2.3 V with nothing on the data lines (analog inputs, no pulls) —
   verify against a real device/charger. (The internal die sensor is a poor
   cross-check — the MCU self-heats to ambient +~15 °C within minutes.)
-- Full `tools/adcread.py --scan` (2026-10-13, dev build, IN fed): ch0 NTC
+- Full `tools/dev/adcread.py --scan` (2026-10-13, dev build, IN fed): ch0 NTC
   1.48 V (≈27 °C); D+ 0.04 V / D− 0.03 V; ch2–ch8 are the digital pins'
   levels, all accounted for (PA2 BLE TX, PA3 TFT RST, PA4 DC, PA6 = stock's
   BLE provisioning toggle and PB0 BLE RX all ≈3.3 V; PA5 SCK 0 V; PA7 MOSI
@@ -454,7 +454,7 @@ FIRMWARE.md "USB-PD sink". **INT_N = PA15** (open-drain, active-low; needs
 the GPIO's internal pull-up, as stock configures it) — bench-verified: an
 unmasked I_COMP_CHNG pulls PA15 low, reading Interrupt or setting
 Control0.INT_MASK releases it, no other GPIOA/B/F pin moves
-(`tools/fusb_intn.py` repeats the test). pd.rs reads it
+(`tools/dev/fusb_intn.py` repeats the test). pd.rs reads it
 as a GPIO to wake the PD engine. Slice (0x05) sets the BMC receiver's slicer threshold SDAC[5:0] +
 hysteresis (reset 0x60); our engine uses 0x58 in both modes (bench-swept, FIRMWARE.md
 "Sniffer"). Unused options worth knowing: Control1 ENSOP1DB/ENSOP2DB receive SOP'/SOP''

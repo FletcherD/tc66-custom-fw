@@ -25,8 +25,8 @@ import struct
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from i2cread import open_meter  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../lib"))
+from tc66lib import open_meter  # noqa: E402
 
 W, H = 160, 80
 MADCTL_ROT0 = 0x68  # screen x maps to a rising GRAM line (tft.rs SCROLL_RISING)

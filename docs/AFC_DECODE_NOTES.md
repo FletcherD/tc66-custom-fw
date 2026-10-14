@@ -49,7 +49,7 @@ AFC keeps its bench-verified `afc_start`/`afc_byte_bits`/`proto_send_word`.
 
 **Ground truth: `fcp.csv` / `scp.csv`** (repo root, gitignored): the stock
 firmware running modes 2/3 with an FCP charger attached, 100 kS/s (10 µs per
-sample), ch1 = D−, ch2 = D+. Decode with `uv run tools/accp_decode.py fcp.csv`
+sample), ch1 = D−, ch2 = D+. Decode with `uv run tools/dev/accp_decode.py fcp.csv`
 (prints each frame with parity / CRC / SYNC-rule checks). That charger
 answered vendor `0x04 = a2`, `0x21 = 02` (two raised voltages), `0x31 = 5a`
 (9.0 V), ACKed the 9 V write, and NACKed (`03`) every SCP packet.

@@ -8,7 +8,7 @@
 //! Source: USB PD specification Revision 3.2 Version 1.2 (usb.org document
 //! library); table numbers refer to it. Revision 2.0 V1.3 differs only in
 //! VDO layouts we read through fields common to both. The host-side
-//! counterpart (all tables) is tools/pd_spec.py.
+//! counterpart (all tables) is tools/lib/pd_spec.py.
 
 #[derive(Clone, Copy)]
 pub struct F {

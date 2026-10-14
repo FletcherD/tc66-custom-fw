@@ -13,7 +13,7 @@
 //! Unlike the old blob (fixed EP1/EP3 @ hard-coded PMA addresses), this flasher
 //! takes the bulk endpoint index as an argument and reads the endpoint's buffer
 //! locations from the BTABLE at runtime, so it works with whatever layout
-//! stm32-usbd allocated. Protocol is unchanged (tools/app_update.py):
+//! stm32-usbd allocated. Protocol is unchanged (tools/dev/app_update.py):
 //! erase -> "uprdy" -> 810 x (recv 64 B -> program -> "OK") -> AIRCR reset.
 
 use crate::markers::{mk, MK_STAGE, STAGE_UPDAT};

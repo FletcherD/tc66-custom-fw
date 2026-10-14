@@ -16,7 +16,6 @@ Needs passwordless sudo for pdcap.py (USB vendor interface).
 import argparse
 import os
 import subprocess
-import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))

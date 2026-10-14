@@ -392,7 +392,7 @@ fn adc_burst() {
  * tick body runs, grab the interrupted context's PC from the hardware
  * exception frame (sp[6]: r0,r1,r2,r3,r12,lr,PC,xPSR) into a 128-entry
  * SRAM ring at PC_RING (markers.rs: counter word + ring, 0x2000_1100 —
- * read out over CDC via the `pcprf` verb, tools/pcprofile.py). The chip's
+ * read out over CDC via the `pcprf` verb, tools/dev/pcprofile.py). The chip's
  * DWT is a stub (PCSR reads 0xFFFFFFFF, CYCCNT never counts), so this is
  * the only PC sampling this hardware gets. Samples thread mode (and
  * attributes USBD_LP time to the interrupted thread PC on tail-chains);

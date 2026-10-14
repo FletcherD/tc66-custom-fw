@@ -8,7 +8,7 @@
 """
 import sys
 
-sys.path.insert(0, __file__.rsplit("/", 1)[0])
+sys.path.insert(0, __file__.rsplit("/", 1)[0] + "/../lib")
 import serial  # noqa: E402
 from tc66lib import meter_candidates  # noqa: E402
 

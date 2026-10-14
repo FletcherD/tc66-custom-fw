@@ -11,7 +11,7 @@ RCU_RSTSCK bits: 26 POR, 27 NRST pin, 28 software (AIRCR), 29 FWDGT,
 import sys
 import time
 
-sys.path.insert(0, __file__.rsplit("/", 1)[0])
+sys.path.insert(0, __file__.rsplit("/", 1)[0] + "/../lib")
 import serial  # noqa: E402
 from tc66lib import meter_candidates  # noqa: E402
 

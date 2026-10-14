@@ -6,29 +6,29 @@
 //!   random blocks under the meter's getva key vs the RustCrypto `aes` crate.
 //! - pdinfo.rs: the PD parser + screen text replayed over a negotiation
 //!   (Source_Cap, Request, PS_RDY, PPS, Reject, cable identity, hard reset);
-//!   the frames' meaning cross-checked with tools/pd_decode.py.
+//!   the frames' meaning cross-checked with tools/lib/pd_decode.py.
 //! - pdinfo.rs + detect.rs: every screen line kind (text + color) over a
 //!   scripted set of states, compared with text.golden (textdump.rs;
 //!   `cargo run --release -- --bless` rewrites it after an intended change).
 
-#[path = "../../../rust/src/ntc.rs"]
+#[path = "../../../../rust/src/ntc.rs"]
 mod ntc;
 #[allow(dead_code)]
-#[path = "../../../rust/src/aes256.rs"]
+#[path = "../../../../rust/src/aes256.rs"]
 mod aes256;
-#[path = "../../../rust/src/text.rs"]
+#[path = "../../../../rust/src/text.rs"]
 mod text;
-#[path = "../../../rust/src/pdinfo.rs"]
+#[path = "../../../../rust/src/pdinfo.rs"]
 mod pdinfo;
 #[allow(dead_code)]
-#[path = "../../../rust/src/pdspec.rs"]
+#[path = "../../../../rust/src/pdspec.rs"]
 mod pdspec;
 #[allow(dead_code)]
-#[path = "../../../rust/src/pdsta.rs"]
+#[path = "../../../../rust/src/pdsta.rs"]
 mod pdsta;
 
 #[allow(dead_code)]
-#[path = "../../../rust/src/detect.rs"]
+#[path = "../../../../rust/src/detect.rs"]
 mod detect;
 mod sim;
 mod textdump;

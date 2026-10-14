@@ -50,7 +50,7 @@ def main():
             return syms[i][2]
         return f"?{pc:#010x}"
 
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../lib"))
     import serial
     import tc66lib as t
     s = serial.Serial(t.meter_candidates()[0], 115200, timeout=2)
