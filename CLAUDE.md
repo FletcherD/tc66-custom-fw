@@ -28,7 +28,10 @@ SOP'/SOP'' cable e-marker traffic, attach/detach, bad-CRC and hard-reset
 events; `pdctl 2` while sniffing re-triggers the negotiation; read with
 tools/pdcap.py under sudo — decodes PDOs/Requests/VDMs/cable identity via
 tools/pd_decode.py; tools/pdlog_check.py scores a capture; bench-verified
-with an Apple charger + Pixel/Moto). The PD engine wakes on the FUSB302's
+with an Apple charger + Pixel/Moto; this unit's OUT-port CC2 contact is
+near-open, so sink attach / hard reset only work with the line on CC1 —
+a board fault, not firmware: both CC nodes are unloaded at DC and no GPIO
+or ADC pin touches CC, per `gpiot` + tools/gpio_cc_sweep.py). The PD engine wakes on the FUSB302's
 INT_N (PA15, read as a GPIO) and runs the BMC slicer at Slice 0x58; I²C is
 400 kHz; qc.rs: Quick Charge 2.0 D+/D− — `qctrg`/`qcoff` (entry detects QC first; `qcdet` probe)
 + tools/qc.py, bench-verified 5/9/12 V, plus QC3.0 `qc3ct` and Samsung AFC

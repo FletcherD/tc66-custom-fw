@@ -128,15 +128,16 @@ features.
     NAK/APB stalls and §2 event loss — both absorbed in firmware) and the
     optional stock-firmware Tier 2 comparison.
   - PD info screen (build 148): parser verified by the host replay
-    (tools/host_check) and live on the bench only in its idle states —
-    auto-sniff on entry, boot-restore without sniffing, sink/source/Rp
-    detection, page wrap via `pdinf`. Still to do: compare against
-    `pdcap.py` across live renegotiations (on this bench `pd.py hardreset`
-    stopped re-triggering the charger ↔ Pixel pair — HARDSENT fires, VBUS
-    and the contract stay; also on the unmodified build 146), a visual check
-    of the screen and the scroll bar, and the K2 short press on the real
-    button. Also open: the CDC verb latency shift that came with the layout
-    change (FIRMWARE.md "Fast-flash placement").
+    (tools/host_check) and live — `pd.py info` matched `pdcap.py` across a
+    re-plug and a hard-reset renegotiation (offers incl. 20 V 4.7 A,
+    contract, Apple cable e-marker, CC1 Rp 3.0 A). Still to do: the K2
+    short press on the real button, and a look at the screen with
+    `tools/tftgrab.py`. Also open: the CDC verb latency shift that came with
+    the layout change (FIRMWARE.md "Fast-flash placement").
+  - This unit's CC2: the OUT receptacle's CC2 contact barely connects (the
+    charger's Rp reaches the FUSB302 as 1.6 V open, ~0 on 5.1 kΩ; sink
+    attach and hard reset fail on CC2, CC1 is fine). Measure continuity OUT
+    B5 ↔ IN B5 and reflow if open (FIRMWARE.md "Sniffer").
   - On-device settings menu / group switch on the buttons.
 
 ## Layout
