@@ -589,9 +589,13 @@ past the ~10 s keepalive deadline).
   MDAC ceiling (> ~34 kΩ to ground), and the NO PD / POWER switches don't
   change the CC readings. No MCU GPIO moves either CC pin
   (`tools/gpio_cc_sweep.py`: every allowed pin out-low/out-high/pull-down/
-  pull-up, build 150), and no ADC channel sees CC. A series element between
-  the FUSB302's CC2 pin and the connector (invisible to these DC tests) or a
-  chip-level CC2 TX issue remain open. (A ~1.18 V weak level once seen on
+  pull-up, build 150), and no ADC channel sees CC. **Likely cause: this
+  unit's OUT-port CC2 contact barely connects** — same charger and cable,
+  meter end flipped: on CC1 the charger shows a healthy 3 A Rp (> 2.69 V
+  open, 1.55 V on 5.1 kΩ) and the sink contracts at once; on CC2 the
+  FUSB302 sees 1.6 V open that collapses to ~0 on 5.1 kΩ and the sink never
+  attaches (bench 2026-10-14). A cold joint on the OUT receptacle's B5 is
+  suspected — continuity OUT B5 ↔ IN B5 not yet measured. (A ~1.18 V weak level once seen on
   CC2 with nothing on the other port came from the charger — it vanished
   with the charger unplugged and collapsed under 5.1 kΩ: the charger had
   stopped presenting a proper Rp, so our sink got no VBUS then.) **Slice**: arming (sink and sniff) sets the
