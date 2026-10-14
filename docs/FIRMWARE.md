@@ -487,7 +487,10 @@ Related subtleties, all load-bearing:
   `pdscr::enter(det)` picks the line source; `triggers`): tools/detect.py
   on the device, never above 5 V. K2 short press starts a run when there
   are no results or the last page is shown, else pages (the result list
-  ends with `K2: run again`); ignored while running. `detct\x01` starts a
+  ends with `K2: run again`); ignored while running. While a run is going
+  only the head line (`detecting: QC` …) is shown; the result lines
+  (summary, VBUS/load, divider, QC class, AFC, FCP, Rp + PD rev, PDOs) appear
+  when it finishes. `detct\x01` starts a
   run from the host, `detct` returns the lines (tools/detect.py --device).
   The run is a state machine stepped from the main loop (`detect::service`,
   inline idle check; one step when its tick deadline is due), so the

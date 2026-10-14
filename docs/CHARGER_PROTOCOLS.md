@@ -196,7 +196,8 @@ device on the other port).
 The meter runs the same sequence as `tools/detect.py` itself: K1 to the
 detection screen (after the PD info screen), K2 short press to start (on
 the last results page K2 runs again; earlier pages: K2 pages). Steps, each
-driven from the main loop with progress on screen (~9.5 s total, longest
+driven from the main loop, the current step shown on screen and the results
+when it's done (~9.5 s total, longest
 single block ~0.14 s): D± dividers → QC (`qcdet` logic) → AFC 5 V probe →
 FCP (only in `fcp` builds) → Type-C Rp + PD offer from a 5 V contract.
 Never above 5 V. Refuses (with the reason on screen, ER code over USB) if a

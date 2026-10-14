@@ -319,7 +319,6 @@ pub fn k2() {
 const L_HEAD: u8 = 0;
 const L_FOUND: u8 = 1;
 const L_VBUS: u8 = 2;
-const L_DPM: u8 = 3;
 const L_DIV: u8 = 4;
 const L_QC: u8 = 5;
 const L_AFC: u8 = 6;
@@ -339,13 +338,12 @@ fn layout(out: &mut [u8; 18]) -> usize {
         }
     };
     push(L_HEAD);
-    if s.refused == 0 {
-        if s.ran && s.step == S_IDLE {
-            push(L_FOUND);
-        }
+    /* results only once the run is over: while it runs, the head line says
+     * which step is going */
+    if s.refused == 0 && s.ran && s.step == S_IDLE {
+        push(L_FOUND);
         if s.done & D_PASSIVE != 0 {
             push(L_VBUS);
-            push(L_DPM);
             push(L_DIV);
         }
         if s.done & D_QC != 0 {
@@ -468,13 +466,6 @@ pub fn line(i: usize, out: &mut [u8; COLS]) -> u16 {
             w.s(b"mA");
             pdinfo::C_YELLOW
         }
-        L_DPM => {
-            w.s(b"D+ ");
-            w.volts(s.dp_mv as u32, 0);
-            w.s(b"  D- ");
-            w.volts(s.dm_mv as u32, 0);
-            pdinfo::C_BLUE
-        }
         L_DIV => match divider(s.dp_mv, s.dm_mv) {
             0 => {
                 w.s(b"no D+/D- divider");
@@ -500,15 +491,10 @@ pub fn line(i: usize, out: &mut [u8; COLS]) -> u16 {
                 pdinfo::C_GREY
             } else {
                 w.s(match s.qc[0] {
-                    0 => b"no DCP " as &[u8],
-                    1 => b"DCP    ",
-                    _ => b"QC     ",
+                    0 => b"no D+/D- short" as &[u8],
+                    1 => b"DCP, no QC",
+                    _ => b"QC (HVDCP)",
                 });
-                w.s(b"D- ");
-                w.uint(s.qc[2] as u32, 0);
-                w.ch(b'>');
-                w.uint(s.qc[3] as u32, 0);
-                w.s(b"mV");
                 if s.qc[0] == 2 {
                     pdinfo::C_GREEN
                 } else {
