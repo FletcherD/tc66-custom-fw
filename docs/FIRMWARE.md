@@ -583,14 +583,18 @@ past the ~10 s keepalive deadline).
   build 148): with the cables oriented so the sniffer locks on CC2,
   receiving and CC measurement work, but the same register sequence
   (TXCC2 + RST_PD + SEND_HARD_RESET) never reaches the charger — VBUS stays
-  up. The meter's own CC2 node carries a pull-down: with nothing on the
-  other port and the FUSB302's pulls off, CC2 sits at ~1.13-1.19 V (CC1 in
-  the other orientation floats > 2.69 V as an unloaded Rp should), and our
-  sink's Rd on top never gets VBUS from the charger. Receiving on CC2 works
-  (a full negotiation + e-marker decoded). No MCU GPIO moves either CC pin
+  up. Receiving on CC2 works (a full negotiation + e-marker decoded). Both
+  CC nodes are unloaded at DC: with nothing attached, the FUSB302's own Rp
+  current (80/180/330 µA, Switches0 PU_EN + HOST_CUR) drives each to the
+  MDAC ceiling (> ~34 kΩ to ground), and the NO PD / POWER switches don't
+  change the CC readings. No MCU GPIO moves either CC pin
   (`tools/gpio_cc_sweep.py`: every allowed pin out-low/out-high/pull-down/
-  pull-up, build 150), and no ADC channel sees CC. Board-level cause
-  suspected (NO PD switch wiring?) — not traced. **Slice**: arming (sink and sniff) sets the
+  pull-up, build 150), and no ADC channel sees CC. A series element between
+  the FUSB302's CC2 pin and the connector (invisible to these DC tests) or a
+  chip-level CC2 TX issue remain open. (A ~1.18 V weak level once seen on
+  CC2 with nothing on the other port came from the charger — it vanished
+  with the charger unplugged and collapsed under 5.1 kΩ: the charger had
+  stopped presenting a proper Rp, so our sink got no VBUS then.) **Slice**: arming (sink and sniff) sets the
   BMC slicer to `SLICE` = 0x58 (SDAC 0x18, reset 0x20; 85 mV hysteresis)
   — bench-swept with `pd.py hardreset` re-triggers: at the reset value the
   Apple charger's first VDM to a Moto drawing 2.8 A at 9 V was lost every
