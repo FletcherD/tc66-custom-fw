@@ -299,7 +299,8 @@ Related subtleties, all load-bearing:
 
 ## Measurement (M1)
 
-- `i2c.rs`: polled I2C0 master (PB6/PB7 AF1, 100 kHz, the F1-style IP's AN2824
+- `i2c.rs`: polled I2C0 master (PB6/PB7 AF1, 400 kHz fast mode — INA226, BL24C256 and FUSB302 all
+  rate ≥ 400 kHz; the F1-style IP's AN2824
   receive sequences), bounded waits with stage+STAT0/STAT1 error snapshots,
   SRESET + reconfigure per transaction (stateless, self-healing). Three
   hard-won robustness rules (a stuck-busy bus once froze the whole system): every transaction **waits for its STOP to finish** before
@@ -531,10 +532,12 @@ past the ~10 s keepalive deadline).
   the capture's CONNECT/DISCONNECT (`pdsta` byte 3 = sink attached while
   sniffing). Capture events of ours beside KM003C's 0x21/0x22: 0x30 = RX
   FIFO went full (`pdsta` err 0xE5 too), 0x31 = RX FIFO resync (a non-SOP
-  token flushed the queue). Bench (Apple charger, Pixel + Moto on OUT,
-  100 kHz I²C): every negotiation captured complete; Source_Cap retry storms
-  lose some retries; Apple's first VDM to the Moto (id5) is never captured
-  although the Moto GoodCRCs it — unexplained. `rx_capture` is shared with the sink's
+  token flushed the queue). Bench (Apple charger, Pixel + Moto on OUT):
+  every negotiation captured complete; at 400 kHz I²C Source_Cap retry
+  storms come through whole (76 of 82 messages with all 4 copies, vs 33 of
+  41 at 100 kHz), no FIFO-full/resync events. Apple's first VDM to the Moto
+  (id5) is never captured although the Moto GoodCRCs it (5 sessions, either
+  bus speed) — not a drain problem; unexplained (reception/CRC?). `rx_capture` is shared with the sink's
   `rx_frame`.
 - Host tool: `tools/pd.py` (`arm/off/hardreset/sniff/status/caps/req/watch`, decodes
   PDOs and the 20-B `pdsta` reply — field layout in `pd::status`).

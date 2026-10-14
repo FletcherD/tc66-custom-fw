@@ -4,7 +4,7 @@
 //!
 //! Every bus access runs inside `ina::pause` (the sampler ISR owns the bus
 //! otherwise), and each pause is kept to one short transaction (a 32-B page
-//! write is ~3 ms at 100 kHz — under one 4 ms sampler tick). The ~5 ms
+//! write is under 1 ms at 400 kHz — well under one 4 ms sampler tick). The ~5 ms
 //! internal write cycle that follows runs with the bus RELEASED: the chip
 //! just NACKs its own address until done, so the sampler keeps reading the
 //! INA226 meanwhile. Completion is detected by ACK polling (an address-only

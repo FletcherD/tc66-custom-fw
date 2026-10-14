@@ -82,13 +82,15 @@ fn setup(i2c: &pac::i2c0::RegisterBlock) {
     gpiob.pud().modify(|_, w| w.pud6().floating().pud7().floating());
     gpiob.ctl().modify(|_, w| w.ctl6().alternate().ctl7().alternate());
 
-    /* full reset then 100 kHz standard mode from PCLK1 = 48 MHz
-     * (i2cclk = 48, clkc = 48 MHz / (2 * 100 kHz) = 240, risetime = 48 + 1) */
+    /* full reset then 400 kHz fast mode from PCLK1 = 48 MHz (i2cclk = 48,
+     * duty Tlow/Thigh = 2: clkc = 48 MHz / (3 * 400 kHz) = 40; risetime =
+     * 300 ns * 48 MHz + 1 = 15). INA226, BL24C256 and FUSB302 all rate
+     * >= 400 kHz. */
     i2c.ctl0().write(|w| w.sreset().set_bit());
     i2c.ctl0().write(|w| w.sreset().clear_bit());
     i2c.ctl1().write(|w| unsafe { w.i2cclk().bits(48) });
-    i2c.ckcfg().write(|w| w.clkc().bits(240));
-    i2c.rt().write(|w| w.risetime().bits(49));
+    i2c.ckcfg().write(|w| w.fast().fast().clkc().bits(40));
+    i2c.rt().write(|w| w.risetime().bits(15));
     i2c.ctl0().write(|w| w.i2cen().set_bit());
 }
 

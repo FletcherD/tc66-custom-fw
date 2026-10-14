@@ -16,8 +16,8 @@
 //! `start()` reprograms TIMER5 to a 4 ms update interrupt and unmasks its
 //! NVIC line (one of the two IRQs this firmware enables — the other is
 //! USBD_LP, same priority, so neither ever preempts the other; everything
-//! else stays masked and polled). Each tick the ISR performs ONE I2C read (~0.5 ms at
-//! 100 kHz, ~12% of a tick) in the interleaved repeating pattern
+//! else stays masked and polled). Each tick the ISR performs ONE I2C read (~0.15 ms at
+//! 400 kHz) in the interleaved repeating pattern
 //!   shunt, shunt, bus  (x8  ->  24 ticks = 16 shunt + 8 bus per window)
 //! which preserves the EXACT sum depths the EEPROM calibration bakes in
 //! (16 shunt / 8 bus) while keeping both values evenly fresh: the newest

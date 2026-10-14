@@ -253,7 +253,7 @@ ten LE u32 fields, CRC16/MODBUS tail); client + deduping stream generator in
 - External power monitor: a genuine **TI INA226** (verified on hardware: manuf ID
   reg 0xFE = 0x5449 "TI", die ID reg 0xFF = 0x2260), 7-bit I²C address **0x4A**.
   The stock firmware bit-bangs SCL = PB6 / SDA = PB7; **hardware I²C0 on the same
-  pins (AF1, 100 kHz) works** — the custom firmware uses it (rust/src/i2c.rs).
+  pins (AF1, 400 kHz fast mode) works** — the custom firmware uses it (rust/src/i2c.rs).
 - EEPROM (BL24C256, 32 KB) at 7-bit address **0x50** (0xA0 in 8-bit form) on
   the same bus, **2-byte addressing, 64-B pages, ~5 ms write cycle** — per-unit
   calibration, settings, energy ring, datalog (layout below; no serial number —
