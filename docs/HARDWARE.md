@@ -166,7 +166,7 @@ Verbs:
 | `tftfl` | `OK` / `ER`+stage | our dev verb: TFT test pattern (no args) or solid fill (RGB565 LE u16); ER stages in tft.rs (tools/tft.py) |
 | `tftbl` | `OK` / `ER`+stage | our dev verb: backlight PWM compare, LE u16 0..=999 (tools/tft.py) |
 | `tftui` | `OK` / `ER`+stage | our dev verb: force a main-screen refresh (tools/tft.py) |
-| `pdctl` | `OK` / `ER`+stage | our trigger verb: PD sink engine off (0) / arm (1) / hard-reset (2) / listen-only sniffer (3) (pd.rs, tools/pd.py) |
+| `pdctl` | `OK` / `ER`+stage | our trigger verb: PD sink engine off (0) / arm (1) / hard-reset (2 — while sniffing: makes the pair renegotiate) / listen-only sniffer (3) (pd.rs, tools/pd.py) |
 | `pdsta` | `OK`+20 B | our trigger verb: PD engine state (layout: `pd::status`) |
 | `pdcap` | `OK`+n+n×4 B | our trigger verb: received source PDOs (LE u32 each) |
 | `pdreq` | `OK` / `ER` | our trigger verb: `pdreq <n> [mv u16][ma u16]` — request source PDO n (1-based; fixed, or PPS APDO with a setpoint) — **raises OUT voltage** |
@@ -443,7 +443,11 @@ FIRMWARE.md "USB-PD sink". **INT_N = PA15** (open-drain, active-low; needs
 the GPIO's internal pull-up, as stock configures it) — bench-verified: an
 unmasked I_COMP_CHNG pulls PA15 low, reading Interrupt or setting
 Control0.INT_MASK releases it, no other GPIOA/B/F pin moves. pd.rs reads it
-as a GPIO to wake the PD engine. **The chip's VBUS pin is not wired to VBUS**:
+as a GPIO to wake the PD engine. Unused FUSB302 options worth knowing: Slice (0x05) sets the BMC receiver's
+slicer threshold SDAC[5:0] + hysteresis (reset 0x60) — a lever for packets
+that fail CRC at our tap; Control1 ENSOP1DB/ENSOP2DB receive SOP'/SOP''
+debug packets; Control2 TOGGLE runs autonomous DRP/SRC/SNK toggling.
+**The chip's VBUS pin is not wired to VBUS**:
 Status0.VBUSOK stays 0 with 5 V present, so MEAS_VBUS is useless — measure
 CC only.
 The chip shares the INA226/EEPROM I²C bus — all access inside `ina::pause`.

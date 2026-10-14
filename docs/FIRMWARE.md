@@ -531,8 +531,18 @@ past the ~10 s keepalive deadline).
   set = the source's Rp alone. Two agreeing polls without BMC activity emit
   the capture's CONNECT/DISCONNECT (`pdsta` byte 3 = sink attached while
   sniffing). Capture events of ours beside KM003C's 0x21/0x22: 0x30 = RX
-  FIFO went full (`pdsta` err 0xE5 too), 0x31 = RX FIFO resync (a non-SOP
-  token flushed the queue). Bench (Apple charger, Pixel + Moto on OUT):
+  FIFO went full (`pdsta` err 0xE5 too), 0x31 = RX FIFO resync (an unknown
+  token flushed the queue), 0x32 = a packet failed its CRC (I_CRC_CHK
+  unmasked while sniffing; Status0.CRC_CHK = 0 — the FIFO only ever holds
+  good packets, so bad ones can be counted, not captured), 0x33 = hard reset
+  on the wire. Sniffing also enables SOP'/SOP'' reception (Control1
+  ENSOP1/2, kept by `rx_flush`): cable (e-marker) traffic lands in the
+  capture with the KM003C `sop` byte 1/2. **`pdctl 2` while sniffing** sends a
+  third-party Hard Reset on the locked CC — the charger cycles VBUS and
+  renegotiates with the device on OUT (a re-plug without unplugging). The
+  FUSB302 transmitter only drives after a PD-logic reset (RST_PD) with TXCC
+  set — without it HARDSENT fires but nothing reaches the wire; TXCC is
+  dropped again (with RST_PD) on HARDSENT. Bench (Apple charger, Pixel + Moto on OUT):
   every negotiation captured complete; at 400 kHz I²C Source_Cap retry
   storms come through whole (76 of 82 messages with all 4 copies, vs 33 of
   41 at 100 kHz), no FIFO-full/resync events. Apple's first VDM to the Moto

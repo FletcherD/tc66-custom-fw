@@ -31,13 +31,16 @@ CTL = {1: "GoodCRC", 3: "Accept", 4: "Reject", 5: "Ping", 6: "PS_RDY",
 DAT = {1: "Source_Cap", 2: "Request", 3: "BIST", 4: "Sink_Cap", 15: "Vendor"}
 
 
-def decode_pd(wire):
+def decode_pd(wire, sop=0):
     if len(wire) < 2:
         return "runt"
     hdr = wire[0] | (wire[1] << 8)
     nobj = (hdr >> 12) & 7
     typ = hdr & 0x1F
-    role = "SRC" if hdr & (1 << 8) else "SNK"
+    if sop:  # SOP'/SOP'': bit 8 is Cable Plug
+        role = "CABLE" if hdr & (1 << 8) else "PORT"
+    else:
+        role = "SRC" if hdr & (1 << 8) else "SNK"
     rev = {0: "1.0", 1: "2.0", 2: "3.0"}.get((hdr >> 6) & 3, "?")
     name = (DAT if nobj else CTL).get(typ & 0x0F if nobj else typ, "type%d" % typ)
     objs = ["%08x" % (int.from_bytes(wire[2 + 4 * i:6 + 4 * i], "little")) for i in range(nobj)]
@@ -65,7 +68,9 @@ def parse_pdpacket(payload):
             ets = payload[i + 1] | (payload[i + 2] << 8) | (payload[i + 3] << 16)
             print("  [%8d ms] %s" % (ets, {0x21: "*** CONNECT ***", 0x22: "*** DISCONNECT ***",
                                             0x30: "!!! RX FIFO full: frames may be lost !!!",
-                                            0x31: "!!! RX FIFO resync: queued frames flushed !!!"}.get(code, "event %02x" % code)))
+                                            0x31: "!!! RX FIFO resync: queued frames flushed !!!",
+                                            0x32: "!!! bad-CRC packet (not captured) !!!",
+                                            0x33: "*** HARD RESET ***"}.get(code, "event %02x" % code)))
             i += 6
         elif b0 & 0x80:  # wrapped PD message
             wire_len = (b0 & 0x3F) - 5
@@ -73,7 +78,8 @@ def parse_pdpacket(payload):
                 break
             ets = int.from_bytes(payload[i + 1:i + 5], "little")
             wire = payload[i + 6:i + 6 + wire_len]
-            print("  [%8d ms] %s" % (ets, decode_pd(wire)))
+            sop = {0: "", 1: "SOP' ", 2: "SOP'' "}.get(payload[i + 5], "sop%d " % payload[i + 5])
+            print("  [%8d ms] %s%s" % (ets, sop, decode_pd(wire, payload[i + 5])))
             i += 6 + wire_len
         else:
             break

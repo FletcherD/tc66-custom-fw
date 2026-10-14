@@ -69,13 +69,15 @@ const C0_TX_FLUSH: u8 = 0x40; /* INT_MASK (0x20) clear: INT_N live */
  * edges (start/end of every frame on the wire) in both modes; the sink
  * also on GoodCRC-sent (a frame received), TX done/failed and resets. */
 const MASK_ACTIVITY_ONLY: u8 = 0xBF;
+const MASK_SNIFF: u8 = 0xAF; /* ACTIVITY + CRC_CHK (each packet checked) */
 const MASKA_SINK: u8 = 0xE0; /* RETRYFAIL HARDSENT TXSENT SOFTRST HARDRST */
-const MASKA_SNIFF: u8 = 0xFE; /* HARDRST */
+const MASKA_SNIFF: u8 = 0xF6; /* HARDSENT HARDRST */
 const MASKB_SINK: u8 = 0x00; /* GCRCSENT */
 const MASKB_SNIFF: u8 = 0x01;
 /* backup poll while attached/sniffing (ticks): timeouts, detach, CC sweep */
 const BACKUP_POLL: u32 = 12;
 const C1_RX_FLUSH: u8 = 0x04;
+const C1_ENSOP12: u8 = 0x03; /* also receive SOP' / SOP'' (cable traffic) */
 /* Control3: AUTO_RETRY + N_RETRIES=3 */
 const C3_RETRIES: u8 = 0x07;
 /* Reset */
@@ -89,6 +91,8 @@ const IA_HARDRST: u8 = 0x01;
 /* Status0 / Status1 (VBUSOK is Status0 bit7, reported raw via pdsta) */
 const S0_ACTIVITY: u8 = 0x40;
 const S0_COMP: u8 = 0x20; /* CC above the MDAC threshold */
+const S0_CRC_CHK: u8 = 0x10; /* last received packet's CRC was good */
+const IR_CRC_CHK: u8 = 0x10; /* Interrupt: a packet's CRC was checked */
 const S0_BC_LVL: u8 = 0x03;
 const S1_RX_EMPTY: u8 = 0x20;
 const S1_RX_FULL: u8 = 0x10;
@@ -140,6 +144,8 @@ const SNIFF_OPEN_MDAC: u8 = 0x3F;
  * RX FIFO resync (a non-SOP token: the queued frames were flushed) */
 const CAP_RX_FULL: u8 = 0x30;
 const CAP_RX_RESYNC: u8 = 0x31;
+const CAP_BAD_CRC: u8 = 0x32; /* sniff: a packet arrived with a bad CRC */
+const CAP_HARD_RESET: u8 = 0x33; /* sniff: hard reset on the wire */
 /* verb arg errors: 0x0D bad/missing PPS setpoint, 0x0E unsupported PDO kind */
 
 pub struct Pd {
@@ -278,13 +284,14 @@ fn cap_push(bytes: &[u8]) {
     CAP.head.store(h.wrapping_add(1), Ordering::Release);
 }
 
-/// Capture one PD wire message (header + data objects) as a wrapped event.
-fn cap_msg(hdr: u16, objs: &[u8]) {
+/// Capture one PD wire message (header + data objects) as a wrapped event;
+/// `sop` 0 = SOP, 1 = SOP', 2 = SOP''.
+fn cap_msg(hdr: u16, objs: &[u8], sop: u8) {
     let wire = 2 + objs.len();
     let mut e = [0u8; CAP_SLOT_LEN];
     e[0] = 0x80 | (wire as u8 + 5); /* size_flag: low 6 bits = N+5 */
     e[1..5].copy_from_slice(&now_ms().to_le_bytes());
-    e[5] = 0; /* SOP */
+    e[5] = sop;
     e[6..8].copy_from_slice(&hdr.to_le_bytes());
     e[8..8 + objs.len()].copy_from_slice(objs);
     cap_push(&e[..6 + wire]);
@@ -373,7 +380,7 @@ fn arm_as(state: u8) -> Result<(), u8> {
     wr(R_POWER, 0x0F)?;
     wr(R_CONTROL3, C3_RETRIES)?;
     let sniff = state == ST_SNIFF;
-    wr(R_MASK, MASK_ACTIVITY_ONLY)?;
+    wr(R_MASK, if sniff { MASK_SNIFF } else { MASK_ACTIVITY_ONLY })?;
     wr(R_MASKA, if sniff { MASKA_SNIFF } else { MASKA_SINK })?;
     wr(R_MASKB, if sniff { MASKB_SNIFF } else { MASKB_SINK })?;
     wr(R_CONTROL0, C0_TX_FLUSH)?;
@@ -496,13 +503,33 @@ pub fn request(idx: u8, mv: u16, ma: u16) -> Result<(), u8> {
     }
 }
 
-/// `pdctl 2`: send a PD Hard Reset (Control3 SEND_HARD_RESET). The source
+/// `pdctl 2`: send a PD Hard Reset (Control3 SEND_HARD_RESET); while
+/// sniffing, a third-party one that makes the pair renegotiate. The source
 /// drops VBUS, forgets the negotiated contract AND spec rev, and restarts
 /// from Source_Capabilities at its highest rev — also the way to unpark a
 /// source stuck at rev 2.0 from an earlier failed exchange.
 #[inline(never)]
 pub fn hard_reset() -> Result<(), u8> {
     let p = pd();
+    if p.state == ST_SNIFF {
+        /* a third party may send Hard Reset (an ordered set — no message
+         * id): both ends reset, the source cycles VBUS and renegotiates with
+         * the sink — a re-plug without unplugging. TX driver on the locked
+         * CC only until I_HARDSENT (sniff_poll turns it off again). */
+        let txcc = match p.cc {
+            1 => 0x01,
+            2 => 0x02,
+            _ => return Err(0x0F),
+        };
+        wr(R_SWITCHES1, sw1_rev(REV20) | txcc)?;
+        /* the transmitter only drives after a PD-logic reset with TXCC set
+         * (bench: without it HARDSENT fires but nothing reaches the wire) */
+        wr(R_RESET, RST_PD)?;
+        wr(R_CONTROL3, C3_RETRIES | 0x40)?; /* SEND_HARD_RESET, self-clearing */
+        p.tx_pend = true;
+        p.req_tick = ina::ticks();
+        return Ok(());
+    }
     if p.state < ST_LISTEN {
         return Err(0x0F);
     }
@@ -737,7 +764,7 @@ fn sniff_poll(p: &mut Pd) -> Result<(), u8> {
         wr(R_SWITCHES0, if cc1 { SW0_MEAS_CC1 } else { SW0_MEAS_CC2 })?;
         wr(R_SWITCHES1, sw1_rev(REV20))?; /* no AUTO_CRC, no TXCC */
         wr(R_MEASURE, SNIFF_OPEN_MDAC)?;
-        wr(R_CONTROL1, C1_RX_FLUSH)?;
+        rx_flush(p)?;
         wr(R_RESET, RST_PD)?;
         p.sink = false;
         p.detach = 0;
@@ -753,10 +780,25 @@ fn sniff_poll(p: &mut Pd) -> Result<(), u8> {
     }
     let mut st = [0u8; 7];
     rd(R_STATUS0A, &mut st)?;
-    let (inta, s0, s1) = (st[2], st[4], st[5]);
+    let (inta, s0, s1, irq) = (st[2], st[4], st[5], st[6]);
     p.events |= inta;
     p.status0 = s0;
     p.status1 = s1;
+    /* a packet was CRC-checked and failed (the FIFO only ever gets good
+     * ones). Coalesced checks between polls report only the last packet. */
+    if irq & IR_CRC_CHK != 0 && s0 & S0_CRC_CHK == 0 {
+        cap_conn(CAP_BAD_CRC);
+    }
+    /* our own hard reset (hard_reset) went out: transmitter off again */
+    if p.tx_pend && (inta & IA_HARDSENT != 0 || ina::ticks().wrapping_sub(p.req_tick) > 25) {
+        p.tx_pend = false;
+        wr(R_SWITCHES1, sw1_rev(REV20))?;
+        rx_flush(p)?;
+        wr(R_RESET, RST_PD)?;
+        if inta & IA_HARDSENT != 0 {
+            cap_conn(CAP_HARD_RESET);
+        }
+    }
     if s0 & S0_ACTIVITY == 0 {
         let loaded = s0 & S0_COMP == 0;
         if loaded != p.sink {
@@ -779,7 +821,8 @@ fn sniff_poll(p: &mut Pd) -> Result<(), u8> {
     }
     p.rx_full = full;
     if inta & IA_HARDRST != 0 {
-        wr(R_CONTROL1, C1_RX_FLUSH)?;
+        cap_conn(CAP_HARD_RESET);
+        rx_flush(p)?;
         wr(R_RESET, RST_PD)?;
         return Ok(());
     }
@@ -801,25 +844,37 @@ fn rx_ready() -> Result<bool, u8> {
     Ok(s[0] & S1_RX_EMPTY == 0)
 }
 
+/// Flush the RX FIFO, keeping SOP'/SOP'' reception on while sniffing.
+fn rx_flush(p: &Pd) -> Result<(), u8> {
+    let ensop = if p.state == ST_SNIFF { C1_ENSOP12 } else { 0 };
+    wr(R_CONTROL1, C1_RX_FLUSH | ensop)
+}
+
 /// Read one RX FIFO frame (token, header, objects, CRC) into the capture
-/// ring and the pdsta counters. Returns (header, objects + CRC); a non-SOP
-/// token flushes the FIFO (resync) and returns header 0.
-fn rx_capture(p: &mut Pd) -> Result<(u16, [u8; 32]), u8> {
+/// ring and the pdsta counters. Returns (header, SOP kind, objects + CRC);
+/// an unknown token flushes the FIFO (resync) and returns header 0.
+fn rx_capture(p: &mut Pd) -> Result<(u16, u8, [u8; 32]), u8> {
     let mut head = [0u8; 3];
     let mut body = [0u8; 32]; /* 7·4 objects + 4 CRC max */
     rd(R_FIFOS, &mut head)?;
-    if head[0] & 0xE0 != 0xE0 {
-        wr(R_CONTROL1, C1_RX_FLUSH)?;
-        cap_conn(CAP_RX_RESYNC);
-        return Ok((0, body));
-    }
+    /* token class (Table 42): 111 SOP, 110 SOP', 101 SOP'' */
+    let sop = match head[0] >> 5 {
+        7 => 0,
+        6 => 1,
+        5 => 2,
+        _ => {
+            rx_flush(p)?;
+            cap_conn(CAP_RX_RESYNC);
+            return Ok((0, 0, body));
+        }
+    };
     let hdr = u16::from_le_bytes([head[1], head[2]]);
     let nobj = ((hdr >> 12) & 7) as usize;
     rd(R_FIFOS, &mut body[..4 * nobj + 4])?;
     p.rx_msgs = p.rx_msgs.wrapping_add(1);
     p.rx_hdr = [hdr, p.rx_hdr[0], p.rx_hdr[1]];
-    cap_msg(hdr, &body[..4 * nobj]); /* KM003C PD capture */
-    Ok((hdr, body))
+    cap_msg(hdr, &body[..4 * nobj], sop); /* KM003C PD capture */
+    Ok((hdr, sop, body))
 }
 
 /// One poll while attached: status burst, event handling, RX drain,
@@ -913,9 +968,9 @@ fn active_poll(p: &mut Pd, now: u32) -> Result<(), u8> {
 /// 4 CRC bytes — CRC already checked by hardware).
 #[inline(never)]
 fn rx_frame(p: &mut Pd, now: u32) -> Result<(), u8> {
-    let (hdr, body) = rx_capture(p)?;
-    if hdr == 0 {
-        return Ok(()); /* not SOP (or FIFO skew): flushed */
+    let (hdr, sop, body) = rx_capture(p)?;
+    if hdr == 0 || sop != 0 {
+        return Ok(()); /* FIFO skew (flushed) or not for us */
     }
     let nobj = ((hdr >> 12) & 7) as usize;
     let mtype = (hdr & 0x1F) as u8; /* 5-bit in rev 3.0; bit 4 is 0 in 2.0 */
@@ -1041,6 +1096,6 @@ fn send_frame(p: &mut Pd, mtype: u8, nobj: u8, objs: &[u8]) -> Result<(), u8> {
     buf[tail..tail + 4].copy_from_slice(&[TK_JAM_CRC, TK_EOP, TK_TXOFF, TK_TXON]);
     wr_buf(&buf[..tail + 4])?;
     p.tx_pend = true;
-    cap_msg(hdr, objs); /* KM003C PD capture (our TX) */
+    cap_msg(hdr, objs, 0); /* KM003C PD capture (our TX) */
     Ok(())
 }
