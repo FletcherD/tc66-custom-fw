@@ -548,7 +548,13 @@ past the ~10 s keepalive deadline).
   Apple charger's first VDM to a Moto drawing 2.8 A at 9 V was lost every
   time (never even CRC-checked), SDAC 0x10-0x1C caught it 16/16, 0x08 and
   ≥ 0x28 lost other frames. `tools/pdlog_check.py` summarizes a capture per
-  hard reset (missed messages / GoodCRCs via message-id pairing). Bench (Apple charger, Pixel + Moto on OUT):
+  hard reset (missed messages / GoodCRCs via message-id pairing, plus
+  per-sender id gaps for a message lost together with its GoodCRC).
+  **Orientation-independent**: with the charger on OUT and the phone on IN,
+  detection, sniffing, attach events and hard-reset re-triggers all work
+  (FUSB302 and D± sit on the pass-through lines); only the current is
+  direction-blind — the published I is |I| (`unsigned_abs` in ina.rs), so a
+  reversed setup still reads (and accumulates energy) as positive. Bench (Apple charger, Pixel + Moto on OUT):
   every negotiation captured complete; at 400 kHz I²C Source_Cap retry
   storms come through whole (76 of 82 messages with all 4 copies, vs 33 of
   41 at 100 kHz), no FIFO-full/resync events. Apple's first VDM to the Moto

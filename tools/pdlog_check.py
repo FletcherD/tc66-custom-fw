@@ -5,7 +5,9 @@ segment count SOP / SOP' frames and bad-CRC events, and pair every SOP
 message with the other side's GoodCRC of the same message id (within 8 ms).
 `ack without msg` = a message the sniffer missed; `msg without ack` = a
 missed GoodCRC (or an unanswered message). Unanswered Source_Caps (retries)
-are not counted.
+are not counted. `id gaps` = skipped message ids per sender (each side
+numbers its non-GoodCRC messages consecutively, from 0 after a hard reset)
+— catches a message lost together with its GoodCRC.
 
     pdlog_check.py capture.txt
 """
@@ -45,8 +47,17 @@ def main():
                 used.add(hit[0])
             elif name != "Source_Cap":
                 unacked += 1
+        gaps = 0
+        for role in ("SRC", "SNK"):
+            ids = [k for _, r, k, _ in msgs if r == role]
+            prev = -1  # ids restart at 0 after the hard reset
+            for k in ids:
+                if k != prev:  # a repeat is a retry
+                    gaps += (k - prev - 1) % 8
+                prev = k
         print(f"reset @{t0} ms: SOP {len(sop)}, SOP' {n_sopp}, bad-CRC {len(bad)}; "
-              f"msg without ack {unacked}, ack without msg {len(acks) - len(used)}")
+              f"msg without ack {unacked}, ack without msg {len(acks) - len(used)}, "
+              f"id gaps {gaps}")
 
 
 if __name__ == "__main__":
