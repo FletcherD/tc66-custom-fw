@@ -185,7 +185,7 @@ The product protocol (powerz, `query getva rawva updat cfgrd cfgwr gtrec
 eeprd versn rotat`, BLE verbs) is never gated. `triggers` = the PD/QC/AFC
 trigger and detection verbs. The dev groups (HARDWARE.md "CDC verb
 protocol"): `fcp` (untested FCP/SCP `fcptr`/`fcprd`/`scptr`, ~2.1 KB),
-`dev-board` (`i2crd adcrd gpird clkrd keyrd rstrd wdtst idlrd`), `dev-bt` (BLE
+`dev-board` (`i2crd adcrd gpird gpiot clkrd keyrd rstrd wdtst idlrd`), `dev-bt` (BLE
 bring-up), `dev-tft` (display bring-up); `dev-verbs` = all four, which no
 longer fits the image together with everything else — `DEV_FEATURES`
 carries only the groups in current use (`make gates` compile-checks all of

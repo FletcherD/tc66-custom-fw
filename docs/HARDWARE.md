@@ -153,6 +153,7 @@ Verbs:
 | `pcprf` | 516 B plaintext | our dev verb: PC-profiler ring dump (u32 counter + 128 u32 PCs; FIRMWARE.md "PC profiler", tools/pcprofile.py) |
 | `i2crd` | `OK`+data / `ER`+diag | our dev verb: `i2crd <addr7> <wlen 0..=2> <w0> <w1> <rlen 0..=32>` raw I²C write-then-read; ER + stage + 3 status bytes (tools/i2cread.py) |
 | `adcrd` | `OK`+u32 / `ER`+stage | our dev verb: `adcrd <ch>` ADC sum-of-16 (tools/adcread.py) |
+| `gpiot` | `OK`+old cfg / `ER`+code | our dev verb: `gpiot <port 0/1/2=A/B/F> <pin> <cfg>` sets one GPIO (cfg = CTL mode bits 1:0 \| PUD<<2 \| OCTL<<4; 0x80 = read only) and returns the previous cfg byte for restoring; refuses PA3/PA9/PA11/PA12/PB6/PB7 (ER 0x10) — tools/gpio_cc_sweep.py |
 | `gpird` | `OK`+3×u16 LE | our dev verb: GPIOA/GPIOB/GPIOF input registers (configures PA15 as input + pull-up first — FUSB302 INT_N) |
 | `clkrd` | `OK`+RCU_CTL+RCU_CFG0 (u32 LE ×2) | our dev verb: clock-tree peek (verified: AHB/APB1/APB2 all /1 = 48 MHz) |
 | `keyrd` | `OK`+raw+held (2 bytes, bit0 = K1, bit1 = K2) | our dev verb: raw PF0/PF1 levels (1 = released) + debounced pressed mask (keys.rs) |
@@ -188,8 +189,8 @@ unchanged. Verbs are grouped by cargo feature (docs/DEVELOPMENT.md "Feature
 sets"): the product verbs above (`getva query rotat gtrec cfgrd cfgwr updat
 versn eeprd rawva`) are always served; the trigger verbs (`pdctl pdsta pdcap
 pdinf pdreq qctrg qc3ct qcdet afctr qcoff`) need `triggers` (in release builds);
-the dev verbs need their group — `dev-board` (`i2crd adcrd gpird clkrd
-keyrd rstrd wdtst idlrd`), `dev-tft` (`uiscr tftfl tftbl tftui tftrd`), `dev-bt`
+the dev verbs need their group — `dev-board` (`i2crd adcrd gpird gpiot
+clkrd keyrd rstrd wdtst idlrd`), `dev-tft` (`uiscr tftfl tftbl tftui tftrd`), `dev-bt`
 (`btini btcmd btget btrun btsta btspy`), `fcp` (the untested
 `fcptr`/`fcprd`/`scptr`) — and `pcprf` its own feature; dev builds carry the
 Makefile's `DEV_FEATURES` subset.

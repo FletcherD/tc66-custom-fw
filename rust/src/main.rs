@@ -89,7 +89,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 149;
+const BUILD_ID: u32 = 150;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -504,6 +504,9 @@ fn on_packet(buf: &[u8]) {
     } else if match5(buf, b"gpird") {
         #[cfg(feature = "dev-board")]
         do_gpird();
+    } else if match5(buf, b"gpiot") {
+        #[cfg(feature = "dev-board")]
+        do_gpiot(buf);
     } else if match5(buf, b"clkrd") {
         #[cfg(feature = "dev-board")]
         do_clkrd();
@@ -1124,6 +1127,44 @@ fn do_gpird() {
     r[4..6].copy_from_slice(&(gpiob.istat().read().bits() as u16).to_le_bytes());
     r[6..8].copy_from_slice(&(gpiof.istat().read().bits() as u16).to_le_bytes());
     write_all(&r);
+}
+
+/// dev verb: gpiot <port> <pin> <cfg> -> "OK" + the pin's previous cfg.
+/// port 0/1/2 = GPIOA/B/F; cfg = CTL mode (bits 1:0: 0 in, 1 out, 2 AF,
+/// 3 analog) | PUD << 2 (0 none, 1 up, 2 down) | OCTL << 4; cfg 0x80 = read
+/// only. Writing the returned byte back restores the pin. Refuses PA9/PA11/
+/// PA12 (USB), PA3 (TFT reset) and PB6/PB7 (I2C) with ER 0x10.
+#[cfg(feature = "dev-board")]
+#[inline(never)]
+fn do_gpiot(buf: &[u8]) {
+    let (Some(&port), Some(&pin), Some(&cfg)) = (buf.get(5), buf.get(6), buf.get(7)) else {
+        return write_all(b"ER\x0f");
+    };
+    let base: usize = match port {
+        0 => 0x4800_0000,
+        1 => 0x4800_0400,
+        2 => 0x4800_1400,
+        _ => return write_all(b"ER\x0f"),
+    };
+    if pin > 15 || matches!((port, pin), (0, 3) | (0, 9) | (0, 11) | (0, 12) | (1, 6) | (1, 7)) {
+        return write_all(b"ER\x10");
+    }
+    let (ctl, pud, octl) = (base as *mut u32, (base + 0x0C) as *mut u32, (base + 0x14) as *mut u32);
+    let s2 = 2 * pin as u32;
+    let old = cortex_m::interrupt::free(|_| unsafe {
+        let c = core::ptr::read_volatile(ctl);
+        let u = core::ptr::read_volatile(pud);
+        let o = core::ptr::read_volatile(octl);
+        let old = ((c >> s2) & 3) | ((u >> s2) & 3) << 2 | ((o >> pin) & 1) << 4;
+        if cfg != 0x80 {
+            let bit = 1u32 << pin;
+            core::ptr::write_volatile(octl, if cfg & 0x10 != 0 { o | bit } else { o & !bit });
+            core::ptr::write_volatile(pud, (u & !(3 << s2)) | ((cfg as u32 >> 2) & 3) << s2);
+            core::ptr::write_volatile(ctl, (c & !(3 << s2)) | (cfg as u32 & 3) << s2);
+        }
+        old as u8
+    });
+    write_all(&[b'O', b'K', old]);
 }
 
 #[cfg(feature = "dev-board")]

@@ -583,7 +583,14 @@ past the ~10 s keepalive deadline).
   build 148): with the cables oriented so the sniffer locks on CC2,
   receiving and CC measurement work, but the same register sequence
   (TXCC2 + RST_PD + SEND_HARD_RESET) never reaches the charger — VBUS stays
-  up; cause unknown (CC2 TX path/routing?). **Slice**: arming (sink and sniff) sets the
+  up. The meter's own CC2 node carries a pull-down: with nothing on the
+  other port and the FUSB302's pulls off, CC2 sits at ~1.13-1.19 V (CC1 in
+  the other orientation floats > 2.69 V as an unloaded Rp should), and our
+  sink's Rd on top never gets VBUS from the charger. Receiving on CC2 works
+  (a full negotiation + e-marker decoded). No MCU GPIO moves either CC pin
+  (`tools/gpio_cc_sweep.py`: every allowed pin out-low/out-high/pull-down/
+  pull-up, build 150), and no ADC channel sees CC. Board-level cause
+  suspected (NO PD switch wiring?) — not traced. **Slice**: arming (sink and sniff) sets the
   BMC slicer to `SLICE` = 0x58 (SDAC 0x18, reset 0x20; 85 mV hysteresis)
   — bench-swept with `pd.py hardreset` re-triggers: at the reset value the
   Apple charger's first VDM to a Moto drawing 2.8 A at 9 V was lost every
