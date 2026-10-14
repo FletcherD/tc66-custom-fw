@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "tc66-fw"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "aes",
  "cortex-m",

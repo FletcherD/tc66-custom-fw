@@ -156,7 +156,7 @@ tools/              tc66flash.py (user flasher: release images, back to
                     stack_gate.py, fast_gate.py (build gates), mkfont.py
                     (font/: Inconsolata LGC Bold, SIL OFL)
 .github/workflows/  ci.yml (build + all gates, both feature sets, every
-                    push), release.yml (tag vX.Y.Z -> encrypted image release)
+                    push), release.yml (tag v<BUILD_ID> -> encrypted image release)
 openocd.cfg         non-halting SRAM reads via a Pico debugprobe (CMSIS-DAP)
 ```
 
@@ -182,11 +182,12 @@ them). Disabled verbs match and silently do nothing.
 
 ## Versioning
 
-`rust/Cargo.toml` `version` is the semver; `BUILD_ID` in `rust/src/main.rs`
-is bumped on every flashed build. Both are shown on the boot splash
-(`v0.1.0` / `b130`) and returned by the `versn` verb (`OK0.1.0+130`).
-Releasing: bump the Cargo version, commit, push a tag `v<version>` — the
-release workflow refuses a tag that does not match.
+The version is `BUILD_ID` in `rust/src/main.rs`, bumped on every flashed
+build (there is no semver; Cargo.toml carries no `version`). It is shown on
+the boot splash (`v144`) and returned by the `versn` verb (`OK144`).
+Releases are whichever builds get tagged, so their numbers are not
+consecutive. Releasing: commit, push a tag `v<BUILD_ID>` — the release
+workflow refuses a tag that does not match.
 
 ## Quick start
 

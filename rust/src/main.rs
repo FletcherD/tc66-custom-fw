@@ -81,7 +81,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 143;
+const BUILD_ID: u32 = 144;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -805,7 +805,7 @@ fn do_eeprd(buf: &[u8]) {
     }
 }
 
-/// versn -> "OK" + ASCII "<semver>+<build>", e.g. "OK0.1.0+128"
+/// versn -> "OK" + ASCII BUILD_ID, e.g. "OK144"
 #[inline(never)]
 fn do_versn() {
     let mut reply = [0u8; 32];
@@ -814,16 +814,9 @@ fn do_versn() {
     write_all(reply.get(..2 + n).unwrap_or(&reply));
 }
 
-/// "<semver>+<BUILD_ID>" (Cargo.toml version) into `out`; returns its length
+/// BUILD_ID (the release version) as ASCII decimal into `out`; returns its length
 pub fn version_str(out: &mut [u8]) -> usize {
-    let v = env!("CARGO_PKG_VERSION").as_bytes();
     let mut n = 0;
-    for &b in v.iter().chain(b"+".iter()) {
-        if let Some(d) = out.get_mut(n) {
-            *d = b;
-            n += 1;
-        }
-    }
     let mut digits = [0u8; 10];
     let mut k = 0;
     let mut id = BUILD_ID;

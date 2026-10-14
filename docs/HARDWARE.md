@@ -147,7 +147,7 @@ Verbs:
 | `cfgrd` | `OK`+total+start+n+n×14 B+CRC16 | ours: `cfgrd [start]` (ASCII decimal, default 0) — one page of ≤13 settings from index start: id u8, value/min/max u32 LE, flags u8 (bit0 read-only); CRC16/MODBUS over all preceding bytes; page until start + n == total (tools/cfg.py). BLE: `bcfgrd [start]` |
 | `cfgwr` | `OK` / `ER`+code | ours: `cfgwr <id> <value>` ASCII decimal; ER 0x0F bad args, 0x10 unknown id, 0x11 out of range, 0x12 read-only; applies at once, EEPROM write ~2 s after the last change |
 | `updat` | `uprdy`, then per-chunk `OK` | our app self-update |
-| `versn` | `OK`+ASCII `<semver>+<build>` | ours: firmware version, e.g. `OK0.1.0+130` (Cargo version + BUILD_ID) |
+| `versn` | `OK`+ASCII `<build>` | ours: firmware version, e.g. `OK144` (BUILD_ID) |
 | `eeprd` | `OK`+data / `ER`+code | ours: `eeprd <addr u16 LE> <len 1..=32>` read-only EEPROM read (ER 0x0F bad args, 0x21 out of range, 0x22 bus) — tools/tc66flash.py `backup-eeprom`, tools/eedump.py |
 | `rawva` | 46 B plaintext | ours: getva fields + window seq, no AES — use for streaming (tools/rawva.py) |
 | `pcprf` | 516 B plaintext | our dev verb: PC-profiler ring dump (u32 counter + 128 u32 PCs; FIRMWARE.md "PC profiler", tools/pcprofile.py) |

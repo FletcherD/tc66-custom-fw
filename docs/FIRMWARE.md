@@ -440,7 +440,7 @@ Related subtleties, all load-bearing:
   pass made characters visibly fill in one by one.) TFT init + first frame run at boot **before `pa9_high`**
   via `ui::flush()` — the init's ~400 ms of delays must not stall USB
   enumeration, and the blocking pump there is required. The first ~2 s
-  show a splash (`TC66` / `v<semver>` / `b<build>`, white — `ui::draw`
+  show a splash (`TC66` / `v<build>`, white — `ui::draw`
   counts down `SPLASH` per draw call) before the saved screen. A failed job
   disables the always-on refresh for that boot (`tft_alive`), keeping a
   wedged SPI/DMA from slowing the loop; the dev verbs can still retry.

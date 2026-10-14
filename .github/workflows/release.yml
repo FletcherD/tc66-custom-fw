@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag vX.Y.Z (matching rust/Cargo.toml's version) to build the release
+# Push a tag v<BUILD_ID> (matching rust/src/main.rs) to build the release
 # feature set, encrypt it for the stock bootloader, and publish it as a
 # GitHub release. Flash it with tools/tc66flash.py (see README).
 on:
@@ -18,10 +18,10 @@ jobs:
         working-directory: rust
     steps:
       - uses: actions/checkout@v5
-      - name: Tag must match Cargo.toml version
+      - name: Tag must match BUILD_ID
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          test "${GITHUB_REF_NAME}" = "v${version}" || { echo "tag ${GITHUB_REF_NAME} != v${version}"; exit 1; }
+          build=$(sed -n 's/^const BUILD_ID: u32 = \([0-9]*\);/\1/p' src/main.rs)
+          test "${GITHUB_REF_NAME}" = "v${build}" || { echo "tag ${GITHUB_REF_NAME} != v${build}"; exit 1; }
       - name: Install binutils + python deps
         run: sudo apt-get update && sudo apt-get install -y binutils-arm-none-eabi python3-cryptography
       - name: Install the pinned toolchain (rust/rust-toolchain.toml)
@@ -36,10 +36,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          build=$(sed -n 's/^const BUILD_ID: u32 = \([0-9]*\);/\1/p' src/main.rs)
           sha=$(sha256sum "tc66fw-${GITHUB_REF_NAME}.enc.bin" | cut -d' ' -f1)
           cat > notes.md <<NOTES
-          Firmware ${GITHUB_REF_NAME} (build ${build}) for the RuiDeng TC66 / TC66C.
+          Firmware ${GITHUB_REF_NAME} for the RuiDeng TC66 / TC66C.
 
           Flash it through the meter's stock bootloader (hold K1 while plugging in):
 

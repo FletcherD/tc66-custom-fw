@@ -68,9 +68,9 @@ back to stock, recovery) — keep bench/agent details out of it.
 
 **Public repo + releases** (github.com/FletcherD/tc66-custom-fw, MIT): CI
 (`.github/workflows/ci.yml`) runs `make gates` — build + every gate on the
-dev AND release feature sets — on each push. Pushing a tag `vX.Y.Z` (must
-equal rust/Cargo.toml `version`) runs release.yml: `make release` →
-`tc66fw-vX.Y.Z.enc.bin` (encrypted, bootloader format) as the only release
+dev AND release feature sets — on each push. Pushing a tag `v<BUILD_ID>` (must
+equal rust/src/main.rs `BUILD_ID`) runs release.yml: `make release` →
+`tc66fw-v<BUILD_ID>.enc.bin` (encrypted, bootloader format) as the only release
 asset. Users flash it with the standalone `tools/tc66flash.py` (uv script:
 `flash` via K1 bootloader, `stock` downloads RuiDeng's V1.18 from their
 server — never redistribute vendor binaries, `backup-eeprom` via `eeprd`,
@@ -81,7 +81,7 @@ Makefile's `DEV_FEATURES` — dev verb groups `fcp`/`dev-board`/`dev-bt`/
 groups in current use) + `pcprf`; `make release` / `RELEASE=1` builds the
 defaults only. New debug verbs go behind a dev group (or a new one).
 Charger protocol detection at 5 V: `tools/detect.py` (`qcdet`, `afctr 0x08`
-probe, `fcprd`, PD caps). **Version**: Cargo semver + BUILD_ID,
+probe, `fcprd`, PD caps). **Version**: just BUILD_ID (no semver),
 shown on the ~2 s boot splash (ui.rs `SPLASH`) and by the `versn` verb.
 Host trigger tools (pd.py/qc.py) go through tools/trigger_guard.py
 (default --max-v 9, confirmation unless --yes).

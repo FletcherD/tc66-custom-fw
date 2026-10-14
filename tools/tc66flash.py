@@ -6,7 +6,7 @@
 """Flash, back up, and restore the RuiDeng TC66/TC66C — standalone, no Rust
 toolchain needed.
 
-  tc66flash.py flash tc66fw-vX.Y.Z.enc.bin   flash a release image (K1 bootloader)
+  tc66flash.py flash tc66fw-vN.enc.bin   flash a release image (K1 bootloader)
   tc66flash.py stock                         download RuiDeng's stock firmware
                                              and flash it (back to stock)
   tc66flash.py backup-eeprom [out.bin]       save the 32 KB EEPROM (calibration
@@ -198,7 +198,7 @@ def cmd_backup(a):
         sys.exit("no meter running the custom firmware found (the stock firmware "
                  "cannot read out its EEPROM — flash the custom firmware first; "
                  "it never writes the calibration)")
-    print(f"custom firmware {ver}")
+    print(f"custom firmware v{ver}")
     img = bytearray()
     with tqdm(total=EEPROM_SIZE, unit="B", unit_scale=True, desc="eeprom") as bar:
         for addr in range(0, EEPROM_SIZE, EEPROM_CHUNK):
@@ -225,7 +225,7 @@ def cmd_version(a):
     s, ver = open_custom()
     if s is not None:
         s.close()
-        print(f"custom firmware {ver}")
+        print(f"custom firmware v{ver}")
         return
     if find("boot"):
         print("bootloader (K1 mode) — ready to flash")

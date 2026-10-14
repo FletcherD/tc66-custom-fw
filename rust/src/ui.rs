@@ -5,8 +5,8 @@
 //!   2  temperature / D+ / D−
 //!   3  scrolling V/I plot   (plot.rs — full screen, no cells)
 //!
-//! The first ~2 s after boot show a splash instead: "TC66", the semver and
-//! the build id (white).
+//! The first ~2 s after boot show a splash instead: "TC66" and the version
+//! (= build id, white).
 //!
 //! Fixed layout of 8 monospace font cells per line (font.rs, 18x24). Cells
 //! are always fully overdrawn by the tft glyph engine, and only cells whose
@@ -143,18 +143,12 @@ pub fn draw(run_secs: u32) {
     if *splash > 0 {
         *splash -= 1;
         if *splash > 0 {
-            /* "  TC66" / "v<semver>" / "b<build>" */
+            /* "  TC66" / "v<build>" */
             lines[0][2..6].copy_from_slice(b"TC66");
             let mut v = [b' '; 16];
             let n = crate::version_str(&mut v);
-            let s = v.get(..n).unwrap_or(&[]);
-            let (semver, build) = s.split_at(s.iter().position(|&c| c == b'+').unwrap_or(0));
             lines[1][0] = b'v';
-            for (d, &c) in lines[1][1..].iter_mut().zip(semver) {
-                *d = c;
-            }
-            lines[2][0] = b'b';
-            for (d, &c) in lines[2][1..].iter_mut().zip(build.iter().skip(1)) {
+            for (d, &c) in lines[1][1..].iter_mut().zip(v.get(..n).unwrap_or(&[])) {
                 *d = c;
             }
             mark_dirty(&lines);

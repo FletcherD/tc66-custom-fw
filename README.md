@@ -79,17 +79,17 @@ You need [uv](https://docs.astral.sh/uv/getting-started/installation/)
 (it fetches Python and the dependencies itself) and a USB data cable to
 the meter.
 
-1. Download the latest `tc66fw-vX.Y.Z.enc.bin` from the
+1. Download the latest `tc66fw-vN.enc.bin` from the
    [Releases](../../releases) page. Also download the flasher,
    [`tools/tc66flash.py`](tools/tc66flash.py).
 2. Flash the image. The script walks you through putting the meter into
    its bootloader: unplug it, **hold K1** (the left button), plug it in,
    and release K1.
    ```
-   uv run tc66flash.py flash tc66fw-vX.Y.Z.enc.bin
+   uv run tc66flash.py flash tc66fw-vN.enc.bin
    ```
    Flashing takes about 10 s, and then the meter restarts. For about 2 s
-   the boot splash shows `TC66` with the version and build number.
+   the boot splash shows `TC66` with the version number.
 3. **Back up your EEPROM.** It holds your meter's factory calibration:
    ```
    uv run tc66flash.py backup-eeprom my-tc66-eeprom.bin
