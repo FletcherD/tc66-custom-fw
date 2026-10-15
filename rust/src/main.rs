@@ -47,6 +47,7 @@
 #![no_main]
 
 mod adc;
+mod adcq;
 mod aes256;
 mod board;
 mod bt;
@@ -62,6 +63,7 @@ mod getva;
 mod i2c;
 mod ina;
 mod keys;
+mod km003c_consts;
 mod markers;
 mod ntc;
 #[cfg(feature = "triggers")]
@@ -97,7 +99,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 178;
+const BUILD_ID: u32 = 180;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B

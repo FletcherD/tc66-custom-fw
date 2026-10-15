@@ -18,6 +18,12 @@ MEMORY
   HIRAM : ORIGIN = 0x20001C00, LENGTH = 0x400
 }
 
+/* The KM003C AdcQueue ring (adcq.rs, 256 x 8 B) reuses FLASHER_RAM: idle
+   except while updat runs the flasher there, and flasher::launch() masks
+   interrupts before copying it in. Not a section — nothing is linked or
+   zeroed here; adcq.rs only touches it between its own head/tail. */
+__adcq_ring = ORIGIN(FLASHER_RAM);
+ASSERT(LENGTH(FLASHER_RAM) >= 256 * 8, "FLASHER_RAM too small for the AdcQueue ring");
 /* = 0x20000e40, the known-good initial SP (cortex-m-rt "set-sp" loads it). */
 _stack_start = ORIGIN(RAM) + LENGTH(RAM);
 

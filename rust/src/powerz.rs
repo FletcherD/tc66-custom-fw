@@ -23,10 +23,20 @@ const CMD_DISCONNECT: u8 = 0x03;
 const RSP_ACCEPT: u8 = 0x05;
 const RSP_REJECT: u8 = 0x06;
 const CMD_GET_DATA: u8 = 0x0C;
+const CMD_START_GRAPH: u8 = 0x0E;
+const CMD_STOP_GRAPH: u8 = 0x0F;
 const CMD_ENABLE_PD_MONITOR: u8 = 0x10;
 const CMD_DISABLE_PD_MONITOR: u8 = 0x11;
+const RSP_NOT_READABLE: u8 = 0x27;
 const RSP_PUT_DATA: u8 = 0x41;
+const CMD_MEMORY_READ: u8 = 0x44;
+const CMD_STREAMING_AUTH: u8 = 0x4C;
 const ATT_ADC: u16 = 0x0001;
+const ATT_ADC_QUEUE: u16 = 0x0002; /* KM003C AdcQueue (StartGraph stream) */
+/* AdcQueue wire record: seq, marker, Vbus uV, Ibus uA, CC1, CC2, D+, D- */
+const AQ_RECORD: usize = 20;
+/* a vendor session (Connect) ends after this long without a command */
+const SESSION_IDLE_US: u32 = 2_000_000;
 const ATT_PD: u16 = 0x0010; /* KM003C PdPacket (PD capture) */
 const ATT_PD_TRACE: u16 = 0x0020; /* KM003C PD state trace */
 const EXT_NEXT: u32 = 1 << 15; /* extended header: another logical packet follows */
@@ -53,10 +63,24 @@ pub struct PowerZ<'a, B: UsbBus> {
      * the IN endpoint takes it */
     pending: [u8; 4],
     pending_len: usize,
-    /* pending PD_REPLY length (PD capture / trace / ADC+PD); 0 = none —
-     * sent in 64-B packets, pd_sent bytes of it so far */
+    /* pending PD_REPLY length (PD capture / trace / ADC+PD / session
+     * replies); 0 = none — sent in 64-B packets, pd_sent bytes of it so
+     * far; pd_split ends one transfer early (MemoryRead confirmation, then
+     * its data as a second transfer) */
     pd_pending: usize,
     pd_sent: usize,
+    pd_split: usize,
+    /* AdcQueue reply in flight: aq_pre header bytes in PD_REPLY, then
+     * aq_n records from ring index aq_first, built per 64-B packet;
+     * aq_len total, aq_sent so far (0/0 = none) */
+    aq_len: usize,
+    aq_sent: usize,
+    aq_pre: usize,
+    aq_first: u32,
+    /* a host sent Connect (km003c-rs, Mtools — never the kernel driver):
+     * stop pre-arming the ADC reply and answer every request on demand,
+     * so no stale packet sits between a request and its reply */
+    session: bool,
 }
 
 /* The pre-built PutData(ADC) reply lives in a static, NOT in the struct:
@@ -96,6 +120,16 @@ static REPLY: RacyCell<[u8; ADC_REPLY_LEN]> =
 static PD_REPLY: RacyCell<[u8; COMBINED_MAX]> =
     RacyCell(core::cell::UnsafeCell::new([0; COMBINED_MAX]));
 
+/// Fill PD_REPLY's PutData main header for a `len`-byte reply.
+fn put_data_header(tid: u8, len: usize) {
+    let reply = unsafe { &mut *PD_REPLY.0.get() };
+    let words = ((len - 4 + 3) / 4) as u16; /* everything after the main header */
+    reply[0] = RSP_PUT_DATA;
+    reply[1] = tid;
+    reply[2] = words as u8;
+    reply[3] = (words >> 8) as u8;
+}
+
 fn ext_header(att: u16, next: bool, size: usize) -> [u8; 4] {
     (att as u32 | if next { EXT_NEXT } else { 0 } | (size as u32) << 22).to_le_bytes()
 }
@@ -124,6 +158,12 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
             pending_len: 0,
             pd_pending: 0,
             pd_sent: 0,
+            pd_split: 0,
+            aq_len: 0,
+            aq_sent: 0,
+            aq_pre: 0,
+            aq_first: 0,
+            session: false,
         }
     }
 
@@ -133,7 +173,10 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
     fn flush(&mut self) -> bool {
         while self.pd_sent < self.pd_pending {
             let r = unsafe { &*PD_REPLY.0.get() };
-            let end = (self.pd_sent + 64).min(self.pd_pending);
+            let mut end = (self.pd_sent + 64).min(self.pd_pending);
+            if self.pd_split > self.pd_sent {
+                end = end.min(self.pd_split);
+            }
             match self.ep_in.write(&r[self.pd_sent..end]) {
                 Ok(_) => self.pd_sent = end,
                 Err(_) => return false,
@@ -141,6 +184,18 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
         }
         self.pd_pending = 0;
         self.pd_sent = 0;
+        self.pd_split = 0;
+        while self.aq_sent < self.aq_len {
+            let mut pkt = [0u8; 64];
+            let n = (self.aq_len - self.aq_sent).min(64);
+            self.aq_fill(&mut pkt[..n]);
+            match self.ep_in.write(&pkt[..n]) {
+                Ok(_) => self.aq_sent += n,
+                Err(_) => return false,
+            }
+        }
+        self.aq_len = 0;
+        self.aq_sent = 0;
         if self.pending_len == 0 {
             return true;
         }
@@ -189,7 +244,10 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
     /// replies) — a stale "armed" latch left the endpoint chronically empty
     /// and 54% of host reads timing out. Do not reintroduce a skip flag.
     pub fn arm(&mut self) {
-        if !self.flush() {
+        if self.session && crate::adcq::idle_us() > SESSION_IDLE_US {
+            self.session = false; /* host went away without Disconnect */
+        }
+        if !self.flush() || self.session {
             return;
         }
         let reply = unsafe { &*REPLY.0.get() };
@@ -211,13 +269,66 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
         let cmd = buf[0] & 0x7F;
         let tid = buf[1];
         let attr = (buf[2] as u16 | (buf[3] as u16) << 8) >> 1;
+        crate::adcq::host_seen();
         match cmd {
             CMD_GET_DATA if attr == ATT_PD => self.build_pd(tid, false),
             CMD_GET_DATA if attr == ATT_ADC | ATT_PD => self.build_pd(tid, true),
             CMD_GET_DATA if attr == ATT_PD_TRACE => self.build_trace(tid),
-            CMD_GET_DATA if attr & ATT_ADC != 0 => {} /* pre-armed reply serves it */
-            CMD_CONNECT | CMD_DISCONNECT | CMD_DISABLE_PD_MONITOR => {
+            CMD_GET_DATA if attr == ATT_ADC_QUEUE => self.build_aq(tid, false),
+            CMD_GET_DATA if attr == ATT_ADC | ATT_ADC_QUEUE => self.build_aq(tid, true),
+            /* outside a session the pre-armed reply serves it */
+            CMD_GET_DATA if attr & ATT_ADC != 0 => {
+                if self.session && !self.busy() {
+                    let r = unsafe { &mut *PD_REPLY.0.get() };
+                    r[..ADC_REPLY_LEN].copy_from_slice(unsafe { &*REPLY.0.get() });
+                    self.send_built(tid, ADC_REPLY_LEN);
+                }
+            }
+            CMD_CONNECT => {
+                self.session = true;
                 self.queue(&[RSP_ACCEPT, tid, 0, 0]);
+            }
+            CMD_DISCONNECT => {
+                self.session = false;
+                crate::adcq::request(crate::adcq::OFF);
+                self.queue(&[RSP_ACCEPT, tid, 0, 0]);
+            }
+            CMD_DISABLE_PD_MONITOR => {
+                self.queue(&[RSP_ACCEPT, tid, 0, 0]);
+            }
+            CMD_START_GRAPH if attr < 4 => {
+                crate::adcq::request(attr as u8 + 1);
+                self.queue(&[RSP_ACCEPT, tid, 0, 0]);
+            }
+            CMD_STOP_GRAPH if crate::adcq::requested() != crate::adcq::OFF => {
+                crate::adcq::request(crate::adcq::OFF);
+                self.queue(&[RSP_ACCEPT, tid, 0, 0]);
+            }
+            /* StreamingAuth: any credential gets level 1 (result word
+             * 0x0203, response id 0); the payload is echoed, not
+             * re-encrypted (km003c-rs never checks it; Mtools would) */
+            CMD_STREAMING_AUTH if buf[2..4] == [0x00, 0x02] && !self.busy() => {
+                let r = unsafe { &mut *PD_REPLY.0.get() };
+                r[..4].copy_from_slice(&[CMD_STREAMING_AUTH, 0, 0x03, 0x02]);
+                r[4..36].copy_from_slice(&buf[4..36]);
+                self.send_raw(36, 0);
+            }
+            /* MemoryRead: only the HardwareID block, matched by its fixed
+             * request ciphertext (km003c_consts.rs) — confirmation, then the
+             * encrypted block as a second transfer */
+            CMD_MEMORY_READ
+                if buf[2..4] == [0x01, 0x01]
+                    && buf[4..20] == crate::km003c_consts::HWID_REQ_BLOCK0
+                    && !self.busy() =>
+            {
+                let r = unsafe { &mut *PD_REPLY.0.get() };
+                r[..4].copy_from_slice(&[CMD_MEMORY_READ | 0x80, tid, 0x01, 0x01]);
+                r[4..20].copy_from_slice(&crate::km003c_consts::HWID_CONFIRM);
+                r[20..36].copy_from_slice(&crate::km003c_consts::HWID_DATA);
+                self.send_raw(36, 20);
+            }
+            CMD_MEMORY_READ => {
+                self.queue(&[RSP_NOT_READABLE, tid, 0, 0]);
             }
             CMD_ENABLE_PD_MONITOR => {
                 PD_MONITOR_REQ.store(true, core::sync::atomic::Ordering::Relaxed);
@@ -233,15 +344,101 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
     /// filled here). A reply still being sent is never overwritten — its
     /// events are already drained from the ring; the host gets it instead.
     fn send_built(&mut self, tid: u8, len: usize) {
-        let reply = unsafe { &mut *PD_REPLY.0.get() };
-        let words = ((len - 4 + 3) / 4) as u16; /* everything after the main header */
-        reply[0] = RSP_PUT_DATA;
-        reply[1] = tid;
-        reply[2] = words as u8;
-        reply[3] = (words >> 8) as u8;
+        put_data_header(tid, len);
+        self.send_raw(len, 0);
+    }
+
+    /// Queue `len` bytes of PD_REPLY as they are, ending the first transfer
+    /// after `split` bytes when nonzero.
+    fn send_raw(&mut self, len: usize, split: usize) {
         self.pd_pending = len;
         self.pd_sent = 0;
+        self.pd_split = split;
         self.flush();
+    }
+
+    /// A multi-packet reply is still in flight (PD_REPLY is in use).
+    fn busy(&self) -> bool {
+        self.pd_pending > 0 || self.aq_len > 0
+    }
+
+    /// GetData(AdcQueue), after the current ADC payload as a chained logical
+    /// packet when `with_adc` (0x0003). Up to `adcq::MAX_TAKE` records, never
+    /// a count that would make the transfer a multiple of 64 B (it would
+    /// need a zero-length packet to end). Nothing buffered: a bare PutData
+    /// header (the real device's empty reply), or the ADC packet alone.
+    fn build_aq(&mut self, tid: u8, with_adc: bool) {
+        if self.busy() {
+            return;
+        }
+        let reply = unsafe { &mut *PD_REPLY.0.get() };
+        let mut pre = 4;
+        if with_adc {
+            let adc = unsafe { &*REPLY.0.get() };
+            reply[8..ADC_REPLY_LEN].copy_from_slice(&adc[8..]);
+            pre = ADC_REPLY_LEN;
+        }
+        let (first, mut n) = crate::adcq::take(crate::adcq::MAX_TAKE);
+        if (pre + 4 + AQ_RECORD * n as usize) % 64 == 0 {
+            crate::adcq::untake(1);
+            n -= 1;
+        }
+        if with_adc {
+            reply[4..8].copy_from_slice(&ext_header(ATT_ADC, n > 0, ADC_PAYLOAD_LEN));
+        }
+        if n == 0 {
+            if with_adc {
+                self.send_built(tid, ADC_REPLY_LEN);
+            } else {
+                self.queue(&[RSP_PUT_DATA, tid, 0, 0]);
+            }
+            return;
+        }
+        /* chunk = record count, size = bytes per record */
+        let ext = ATT_ADC_QUEUE as u32 | n << 16 | (AQ_RECORD as u32) << 22;
+        reply[pre..pre + 4].copy_from_slice(&ext.to_le_bytes());
+        self.aq_pre = pre + 4;
+        self.aq_first = first;
+        self.aq_len = self.aq_pre + AQ_RECORD * n as usize;
+        self.aq_sent = 0;
+        put_data_header(tid, self.aq_len);
+        self.flush();
+    }
+
+    /// Bytes `aq_sent..aq_sent + out.len()` of the AdcQueue reply: the
+    /// header from PD_REPLY, then records expanded from the ring.
+    fn aq_fill(&self, out: &mut [u8]) {
+        let reply = unsafe { &*PD_REPLY.0.get() };
+        let adc = unsafe { &*REPLY.0.get() };
+        let mut p = self.aq_sent;
+        let mut o = 0;
+        while o < out.len() {
+            if p < self.aq_pre {
+                out[o] = reply[p];
+                o += 1;
+                p += 1;
+                continue;
+            }
+            let k = (p - self.aq_pre) / AQ_RECORD;
+            let f = (p - self.aq_pre) % AQ_RECORD;
+            let (s, seq) = crate::adcq::get(self.aq_first.wrapping_add(k as u32));
+            let mut rec = [0u8; AQ_RECORD];
+            rec[0..2].copy_from_slice(&seq.to_le_bytes());
+            rec[4..8].copy_from_slice(&s.v_uv.to_le_bytes());
+            rec[8..12].copy_from_slice(&s.i_ua.to_le_bytes());
+            /* CC1, CC2, D+, D- from the ADC payload (0.1 mV): kept at 2
+             * samples/s, 1 mV at the faster rates (the KM003C's units) */
+            let div = if crate::adcq::active() == 1 { 1 } else { 10 };
+            for c in 0..4 {
+                let a = 8 + 26 + 2 * c;
+                let v = u16::from_le_bytes([adc[a], adc[a + 1]]) / div;
+                rec[12 + 2 * c..14 + 2 * c].copy_from_slice(&v.to_le_bytes());
+            }
+            let take = (AQ_RECORD - f).min(out.len() - o);
+            out[o..o + take].copy_from_slice(&rec[f..f + take]);
+            o += take;
+            p += take;
+        }
     }
 
     /// Build a PutData(ATT_PD) reply from the pd.rs capture ring — after the
@@ -303,6 +500,11 @@ impl<B: UsbBus> UsbClass<B> for PowerZ<'_, B> {
         self.pending_len = 0;
         self.pd_pending = 0;
         self.pd_sent = 0;
+        self.pd_split = 0;
+        self.aq_len = 0;
+        self.aq_sent = 0;
+        self.session = false;
+        crate::adcq::request(crate::adcq::OFF);
     }
 
     fn endpoint_out(&mut self, addr: EndpointAddress) {
@@ -316,7 +518,7 @@ impl<B: UsbBus> UsbClass<B> for PowerZ<'_, B> {
     }
 
     fn endpoint_in_complete(&mut self, addr: EndpointAddress) {
-        if addr == self.ep_in.address() && self.flush() {
+        if addr == self.ep_in.address() && self.flush() && !self.session {
             /* no command response queued — re-arm the ADC reply right
              * here, before the host's next request can start NAKing (this
              * callback is best-effort: see arm() on why the per-pass

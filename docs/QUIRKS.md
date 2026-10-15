@@ -164,6 +164,10 @@ the first seconds after boot, not ISR load or APB stalls. Likely
 layout-sensitive (§2's event loss on slow paths is the obvious suspect for a
 lost EP0 IN-complete). Tooling: `tools/dev/enumtrial.py N` (reboot loop,
 kernel failure count per boot, hub kick when the host gives up).
+Host resets of a running meter show the same signature occasionally: 1 of 8
+USBDEVFS_RESETs (build 179) took 5.8 s (one 5 s control timeout, then OK),
+which is also why km003c-rs's start-up "Resetting device..." sometimes
+takes ~7 s and once looped (kernel re-resets every ~8 s for ~30 s).
 
 ## 5. Not silicon, but adjacent (documented elsewhere, listed for map)
 

@@ -25,7 +25,9 @@ the ina.rs module doc.
 | `startup.rs` | `__pre_init` (cpsid/VTOR/NVIC-clear), asm `DefaultHandler` + `HardFault` SRAM capture, panic handler |
 | `board.rs` | 48 MHz clock bring-up, PA9 D+ soft-connect choreography |
 | `usb_bus.rs` | stm32-usbd `UsbPeripheral` impl for the GD32 USBD |
-| `flasher.rs` | `updat` self-flasher (`.flasher` section, runs from SRAM) |
+| `flasher.rs` | `updat` self-flasher (`.flasher` section, runs from SRAM; `launch()` masks interrupts before copying it in — FLASHER_RAM is shared with the AdcQueue ring) |
+| `adcq.rs` | KM003C AdcQueue stream state: requested/active mode, 256-record ring in FLASHER_RAM (TIMER5 pushes, USBD_LP takes), host-idle clock (HARDWARE.md "AdcQueue streaming") |
+| `km003c_consts.rs` | generated (tools/dev/km003c_consts.py): the precomputed MemoryRead HardwareID exchange |
 | `i2c.rs` | polled I2C0 master (INA226 + EEPROM + FUSB302 bus), `i2crd` dev verb backend, bus-unstick recovery |
 | `pd.rs` | (`triggers` feature) FUSB302 USB-PD sink engine (M4): attach/orientation, source-caps collection, voltage trigger, KM003C PD capture ring; `pdctl`/`pdsta`/`pdcap`/`pdreq` verb backends |
 | `pdspec.rs` | (`triggers`) USB PD field layouts as named constants (`F { shift, width, unit }` + `const fn` get/val/put; header, PDO, RDO, VDM, ID header, cable VDO) — per spec table; host counterpart tools/lib/pd_spec.py. Use these, not raw shifts |
@@ -35,7 +37,7 @@ the ina.rs module doc.
 | `detect.rs` | (`triggers`) on-device charger protocol detection (screen 5, `detct` verb): main-loop-stepped state machine over qc.rs/pd.rs + its result text; host-checked by tools/dev/host_check |
 | `text.rs` | (`triggers`) the screens' text: line writer `W` (22 columns, bounded) + `TEXT`, every pdinfo/detect screen string packed length-prefixed at compile time and written by u8 id (`w.t(VBUS)`) — see "Screen text" |
 | `qc.rs` | (`triggers` feature) D+/D− charge triggers (M4): PA13/PA14 + PB4/PB5 level synthesis — QC2.0 `qctrg`, QC3.0 `qc3ct`, Samsung AFC `afctr` (closed-loop D− serial), Huawei FCP/SCP `fcptr`/`fcprd`/`scptr` (dev-verbs only, untested), `qcoff` |
-| `ina.rs` | the measurement subsystem: TIMER5 2.24 ms sampler ISR (shunt + bus INA226 read per tick; `ticks()` 4 ms time base), EEPROM calibration, D± conversion, published-measurement state (`Meas`/`snapshot()`), `pause()` bus rule, `inaxp` dev verb backend (`experiment`) |
+| `ina.rs` | the measurement subsystem: TIMER5 sampler ISR (shunt + bus INA226 read per tick; 2.24 ms, or the AdcQueue modes' 1 ms / 2.5 ms — `apply_mode`; `ticks()` 4 ms time base), EEPROM calibration, D± conversion, published-measurement state (`Meas`/`snapshot()`), `pause()` bus rule, `inaxp` dev verb backend (`experiment`) |
 | `ntc.rs` | NTC temperature from the ADC sum16: the stock beta model in fixed point (no float in the image); host-checked by tools/dev/host_check |
 | `adc.rs` | polled on-chip ADC (stock channel map: ch0 PA0 NTC, ch1 PA1 D+, ch9 PB1 D−, ch17 internal Vrefint; puts those three pins in analog mode), `adcrd` dev verb backend |
 | `getva.rs` | real `getva` packet builder (template + CRC16/MODBUS + AES-256-ECB) |

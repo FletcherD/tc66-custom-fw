@@ -165,6 +165,9 @@ extern "C" {
 pub fn launch(bulk_ep: u32) -> ! {
     mk(MK_STAGE, STAGE_UPDAT);
     unsafe {
+        /* interrupts off BEFORE the copy: the TIMER5 ISR's AdcQueue ring
+         * (adcq.rs) shares FLASHER_RAM and must not write over the copy */
+        core::arch::asm!("cpsid i");
         let mut src = core::ptr::addr_of!(__siflasher) as *const u32;
         let mut dst = core::ptr::addr_of_mut!(__sflasher) as *mut u32;
         let end = core::ptr::addr_of!(__eflasher) as usize;
@@ -173,7 +176,7 @@ pub fn launch(bulk_ep: u32) -> ! {
             src = src.add(1);
             dst = dst.add(1);
         }
-        core::arch::asm!("dsb", "isb", "cpsid i");
+        core::arch::asm!("dsb", "isb");
         /* force an indirect (blx reg) call to the SRAM address */
         let f: extern "C" fn(u32) -> ! = flasher_main;
         let f = core::ptr::read_volatile(&f);

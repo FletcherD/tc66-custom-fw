@@ -98,14 +98,22 @@ const REG_CONFIG: u8 = 0x00;
 const REG_SHUNT: u8 = 0x01;
 const REG_BUS: u8 = 0x02;
 
-/// Sampler tick period, us: the 2.2 ms shunt+bus cycle at CONFIG 0x4127
-/// + 1.8% so the timer never outpaces the chip's oscillator.
+/// Normal sampler tick period, us: the 2.2 ms shunt+bus cycle at CONFIG
+/// 0x4127 + 1.8% so the timer never outpaces the chip's oscillator.
 const TICK_US: u32 = 2240;
-/// Default shunt+bus pairs per published window (43 x 2.24 ms = 96.3 ms);
-/// the `window_ms` setting overrides it via `set_window_ms`.
-const WINDOW_DEFAULT: u32 = 43;
-/// Ticks between window-independent ADC bursts (~96 ms).
-const ADC_TICKS: u8 = 43;
+/// AdcQueue 1000 samples/s: shunt 588 us + bus 332 us (a 920 us pair) on a
+/// 1 ms tick, one pair per sample.
+const CONFIG_FAST: u16 = 0x409F;
+const TICK_FAST_US: u32 = 1000;
+/// AdcQueue 2/10/50 samples/s: the normal conversions on a 2.5 ms tick, so
+/// a sample period is a whole number of ticks (200/40/8 pairs averaged).
+const CONFIG_NORMAL: u16 = 0x4127;
+const TICK_GRAPH_US: u32 = 2500;
+/// Default published window (`window_ms` setting overrides via
+/// `set_window_ms`).
+const WINDOW_DEFAULT_MS: u32 = 96;
+/// Window-independent ADC-burst cadence (temp/D±).
+const ADC_PERIOD_US: u32 = 96_000;
 /// Ticks to sit out I2C after a stuck-bus failure (~200 ms).
 const BACKOFF_TICKS: u8 = 90;
 
@@ -161,7 +169,11 @@ fn load_cal() -> Option<Cal> {
 /// per the calibration model). Load-bearing: the chip returns 0 for bus
 /// voltage until (re)configured.
 fn configure() -> bool {
-    i2c::transact(INA_ADDR, &[REG_CONFIG, 0x41, 0x27], &mut []).is_ok()
+    write_config(CONFIG_NORMAL)
+}
+
+fn write_config(cfg: u16) -> bool {
+    i2c::transact(INA_ADDR, &[REG_CONFIG, (cfg >> 8) as u8, cfg as u8], &mut []).is_ok()
 }
 
 /// Calibrated V from a sum of `n` bus raws. The EEPROM constants bake in the
@@ -273,9 +285,19 @@ static SEC_US: AtomicU32 = AtomicU32::new(0);
 /// Seconds completed by the ISR (the `avg_*` fields hold the latest one's
 /// averages once cal is loaded); the main loop's energy cadence.
 static SECS: AtomicU32 = AtomicU32::new(0);
-/// Shunt+bus pairs per window (thread writes via `set_window_ms`, ISR
-/// reads); 0 = `WINDOW_DEFAULT` (zero-init keeps it in .bss).
-static WINDOW_PAIRS: AtomicU32 = AtomicU32::new(0);
+/// Window length in ms (thread writes via `set_window_ms`, ISR reads);
+/// 0 = `WINDOW_DEFAULT_MS` (zero-init keeps it in .bss).
+static WINDOW_MS: AtomicU32 = AtomicU32::new(0);
+/// Current tick period in us (ISR writes on an AdcQueue mode change);
+/// 0 = `TICK_US`.
+static TICK_NOW_US: AtomicU32 = AtomicU32::new(0);
+
+fn tick_us() -> u32 {
+    match TICK_NOW_US.load(Ordering::Relaxed) {
+        0 => TICK_US,
+        t => t,
+    }
+}
 
 /// Write-once cal publication: thread fills CAL, then Release-stores
 /// CAL_READY = true; the ISR Acquire-loads the flag before touching CAL.
@@ -346,11 +368,11 @@ pub fn snapshot_avg_vi() -> (u32, u32) {
     })
 }
 
-/// `window_ms` setting: published-window length, rounded to whole ticks
-/// (at least one). Takes effect from the window in progress.
+/// `window_ms` setting: published-window length (rounded to whole ticks
+/// of whatever tick period is running, at least one). Takes effect from the
+/// window in progress.
 pub fn set_window_ms(ms: u32) {
-    let pairs = ((ms * 1000 + TICK_US / 2) / TICK_US).max(1);
-    WINDOW_PAIRS.store(pairs, Ordering::Relaxed);
+    WINDOW_MS.store(ms, Ordering::Relaxed);
 }
 
 /// Run `f` with the sampler IRQ masked (NVIC line only — dsb+isb ensure no
@@ -406,6 +428,8 @@ pub fn start(rcu: &pac::Rcu, tim: &pac::Timer5) {
     tim.psc().write(|w| w.psc().bits(47)); /* 48 MHz -> 1 MHz */
     tim.car().write(|w| w.car().bits((TICK_US - 1) as u16));
     tim.swevg().write(|w| w.upg().set_bit()); /* latch PSC/CAR now */
+    /* the AdcQueue ring (FLASHER_RAM) and stream state start empty */
+    crate::adcq::begin(crate::adcq::OFF);
     tim.intf().write(|w| w); /* the UPG above set UPIF: write-0-to-clear */
     tim.dmainten().modify(|_, w| w.upie().set_bit());
     tim.ctl0().modify(|_, w| w.cen().enabled());
@@ -518,7 +542,9 @@ core::arch::global_asm!(
 extern "C" fn timer5_body() {
     let tim = unsafe { &*pac::Timer5::ptr() };
     tim.intf().write(|w| w); /* clear UPIF (write-0-to-clear) */
-    let rem = TICK_REM.load(Ordering::Relaxed) + TICK_US;
+    let tick = tick_us();
+    crate::adcq::tick(tick);
+    let rem = TICK_REM.load(Ordering::Relaxed) + tick;
     if rem >= 4000 {
         TICK_REM.store(rem - 4000, Ordering::Relaxed);
         TICKS.fetch_add(1, Ordering::Relaxed);
@@ -527,7 +553,7 @@ extern "C" fn timer5_body() {
     }
     let n = mk_get(MK_SMP_IRQS).wrapping_add(1);
     mk(MK_SMP_IRQS, n);
-    let mut sec = SEC_US.load(Ordering::Relaxed) + TICK_US;
+    let mut sec = SEC_US.load(Ordering::Relaxed) + tick;
     let new_second = sec >= 1_000_000;
     if new_second {
         sec -= 1_000_000;
@@ -538,7 +564,7 @@ extern "C" fn timer5_body() {
          * again; SAMPLER is ISR-exclusive after start(). */
         let cal = unsafe { &*CAL.0.get() };
         let s = unsafe { &mut *SAMPLER.0.get() };
-        s.tick(cal, n);
+        s.tick(cal, n, tick);
         if new_second {
             mk(MK_SMP_STATE, (n << 8) | 0x50); /* 1 s drain */
             s.drain_second(cal);
@@ -557,7 +583,12 @@ extern "C" fn timer5_body() {
 struct Sampler {
     step: u32,   /* pairs summed in the current window */
     backoff: u8, /* ticks left to skip I2C after a bus-busy failure */
-    adc_step: u8, /* ticks since the last ADC-burst request */
+    mode: u8,    /* AdcQueue rate running (adcq::OFF = normal sampling) */
+    adc_us: u32, /* time since the last ADC-burst request */
+    /* AdcQueue sample in progress: sums of `g_n` pairs */
+    g_bus: u32,
+    g_shunt: u32,
+    g_n: u32,
     bus_sum: u32,
     shunt_sum: u32,
     /* 1 s raw accumulators for the averaged powerz values */
@@ -572,7 +603,11 @@ impl Sampler {
         Sampler {
             step: 0,
             backoff: 0,
-            adc_step: 0,
+            mode: crate::adcq::OFF,
+            adc_us: 0,
+            g_bus: 0,
+            g_shunt: 0,
+            g_n: 0,
             bus_sum: 0,
             shunt_sum: 0,
             sec_bus_sum: 0,
@@ -588,14 +623,48 @@ impl Sampler {
         self.shunt_sum = 0;
     }
 
-    /// One tick: read shunt + bus; publish V/I at window end; request the
-    /// ADC burst every `ADC_TICKS`.
+    /// AdcQueue rate change requested: INA226 CONFIG + tick period for it,
+    /// restart the window and the sample in progress. This tick does no
+    /// reads, so the next one sees a whole conversion at the new setting.
+    /// A failed CONFIG write retries next tick.
+    fn apply_mode(&mut self, rate: u8) {
+        let fast = rate == crate::adcq::FAST;
+        let tick = if fast {
+            TICK_FAST_US
+        } else if rate == crate::adcq::OFF {
+            TICK_US
+        } else {
+            TICK_GRAPH_US
+        };
+        if !write_config(if fast { CONFIG_FAST } else { CONFIG_NORMAL }) {
+            mk(MK_I2CERR, mk_get(MK_I2CERR) + 1);
+            return;
+        }
+        let tim = unsafe { &*pac::Timer5::ptr() };
+        tim.car().write(|w| w.car().bits((tick - 1) as u16));
+        tim.cnt().write(|w| w.cnt().bits(0));
+        TICK_NOW_US.store(tick, Ordering::Relaxed);
+        self.reset_window();
+        self.g_bus = 0;
+        self.g_shunt = 0;
+        self.g_n = 0;
+        self.mode = rate;
+        crate::adcq::begin(rate);
+    }
+
+    /// One tick: read shunt + bus; publish V/I at window end; feed the
+    /// AdcQueue when streaming; request the ADC burst every ~96 ms.
     /// I2C failure: count it, restart the window, keep ticking.
-    fn tick(&mut self, cal: &Cal, n: u32) {
-        self.adc_step += 1;
-        if self.adc_step >= ADC_TICKS {
-            self.adc_step = 0;
+    fn tick(&mut self, cal: &Cal, n: u32, tick: u32) {
+        self.adc_us += tick;
+        if self.adc_us >= ADC_PERIOD_US {
+            self.adc_us = 0;
             ADC_REQ.store(true, Ordering::Release);
+        }
+        let req = crate::adcq::requested();
+        if req != self.mode {
+            self.apply_mode(req);
+            return;
         }
         if self.backoff > 0 {
             /* bus recently stuck busy: sit out — even the fast-fail busy
@@ -635,12 +704,29 @@ impl Sampler {
                 let m = unsafe { &mut *PUBLISHED.0.get() };
                 m.inst_v_1e4 = iv;
                 m.inst_i_1e5 = ii;
+                if self.mode != crate::adcq::OFF {
+                    self.g_bus += bus as u32;
+                    self.g_shunt += biased as u32;
+                    self.g_n += 1;
+                    let period = crate::adcq::seq_step(self.mode) * 1000;
+                    if self.g_n * tick >= period {
+                        let gn = self.g_n as u64;
+                        crate::adcq::push(crate::adcq::Sample {
+                            v_uv: cal_v(cal, self.g_bus as u64, gn) as i32 * 100,
+                            i_ua: cal_i(cal, self.g_shunt as u64, gn) * 10,
+                        });
+                        self.g_bus = 0;
+                        self.g_shunt = 0;
+                        self.g_n = 0;
+                    }
+                }
                 self.step += 1;
                 /* >= : a shortened window_ms ends the one in progress now */
-                let window = match WINDOW_PAIRS.load(Ordering::Relaxed) {
-                    0 => WINDOW_DEFAULT,
-                    w => w,
+                let ms = match WINDOW_MS.load(Ordering::Relaxed) {
+                    0 => WINDOW_DEFAULT_MS,
+                    m => m,
                 };
+                let window = ((ms * 1000 + tick / 2) / tick).max(1);
                 if self.step >= window {
                     mk(MK_SMP_STATE, (n << 8) | 0x40); /* window publish */
                     let v = cal_v(cal, self.bus_sum as u64, self.step as u64);

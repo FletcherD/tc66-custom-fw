@@ -39,6 +39,11 @@ else, including the stock firmware.
 - **Linux `sensors` support.** The meter identifies itself as a ChargerLAB
   POWER-Z KM003C, so the mainline Linux `powerz` hwmon driver binds to it.
   `sensors` then shows live V/I. It handles over 5000 reads/s.
+- **High-rate streaming.** The KM003C's graph mode (2/10/50/1000 samples
+  per second) works with the open-source
+  [km003c-rs](https://github.com/okhsunrog/km003c-rs) tools, e.g.
+  `adc_queue_simple -r 1000`. ChargerLAB's own Windows software is not
+  supported.
 - **Works with existing tools.** The stock USB serial protocol is
   supported: the encrypted `getva` packet, `gtrec` datalog download, and
   `rotat`. There is also a faster plaintext `rawva` command for streaming.

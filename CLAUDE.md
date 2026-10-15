@@ -58,8 +58,10 @@ on DMA ch2, pumped by ui::service from the main loop — no display
 interrupt); the first frame draws pre-enumeration, so the screen is live
 from power-on. USB is ISR-serviced and the device is a composite that
 emulates a POWER-Z KM003C (mainline Linux `powerz` hwmon binds it; ADC,
-PdPacket, ADC+PD chained, empty PD trace, Enable-/DisablePdMonitor — the
-rest Rejects; docs/HARDWARE.md "powerz vendor protocol",
+PdPacket, ADC+PD chained, empty PD trace, Enable-/DisablePdMonitor, and
+AdcQueue streaming for km003c-rs (StartGraph 2/10/50/1000 SPS, MemoryRead
+HardwareID, StreamingAuth; adcq.rs ring in FLASHER_RAM; ~/km003c-rs is a
+built checkout — `adc_queue_simple -r 1000`) — the rest Rejects; docs/HARDWARE.md "powerz vendor protocol",
 tools/dev/km003c_check.py) —
 **powerz comms are the priority path; getva/CDC exists for
 compatibility**. The sampler runs from the TIMER5 interrupt (2.24 ms, a shunt +
@@ -109,8 +111,9 @@ Makefile's `DEV_FEATURES` — dev verb groups `fcp`/`dev-board`/`dev-bt`/
 groups in current use) + `pcprf`; `make release` / `RELEASE=1` builds the
 defaults only. New debug verbs go behind a dev group (or a new one).
 Charger protocol detection at 5 V: `tools/detect.py` (`qcdet`, `afctr 0x08`
-probe, `fcprd`, PD caps) or on-device (screen 5 / `detct`). Flash is nearly
-full (build 164: release ~3.7 KB spare, dev ~3.5 KB;
+probe, `fcprd`, PD caps) or on-device (screen 5 / `detct`). Flash is FULL
+(build 180: release ~320 B spare, dev ~160 B — the next feature needs room
+made deliberately, ask first;
 `tools/dev/inline_report.py` lists inlined-copy candidates for
 `#[inline(never)]` — FIRMWARE.md "Fast-flash placement"): `DEV_FEATURES` =
 `pcprf dev-pd`. **Version**: just BUILD_ID (no semver),
