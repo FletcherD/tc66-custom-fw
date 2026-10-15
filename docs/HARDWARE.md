@@ -156,14 +156,19 @@ adcqueue.md`, `authentication.md`). Session as the host runs it:
 - **StartGraph (0x0E)** rate index 0..3 = 2/10/50/1000 samples/s → Accept;
   **StopGraph (0x0F)** → Accept, or Reject when not streaming. A stream also
   stops on Disconnect, bus reset, or 2 s without a vendor command.
-- **GetData 0x0002** (and 0x0003 = ADC chained first): PutData + ext header
+- **GetData with 0x0002 in the mask**, plus any of ADC 0x0001 / PdPacket
+  0x0010 / PD trace 0x0020 (km003c-egui polls 0x0012, 0x0032 with its trace
+  view on): the logical packets chained in attribute order, empty ones
+  left out (km003c-rs only checks each returned part was requested). The
+  AdcQueue part: ext header
   `attr 2 | chunk = record count << 16 | size = 20 (bytes PER RECORD) << 22`
   + records `[seq u16][marker u16 = 0][Vbus µV i32][Ibus µA i32][CC1][CC2]
   [D+][D−]` (u16, 0.1 mV at 2 SPS, 1 mV otherwise; from the ADC payload, so
   D± ~96 ms fresh and CC only while the PD engine runs). `seq` is the
-  KM003C's 1 kHz device clock: steps 500/100/20/1. ≤48 records per reply,
-  never a count that makes the transfer a multiple of 64 B (it would need a
-  ZLP); nothing buffered → the bare 4-B `41 tid 00 00`.
+  KM003C's 1 kHz device clock: steps 500/100/20/1. ≤48 records per reply;
+  a reply that is a multiple of 64 B ends with a zero-length packet (hosts
+  delimit transfers by a short packet); nothing at all → the bare 4-B
+  `41 tid 00 00`.
 - **Sampling per rate** (ina.rs `apply_mode`, applied by the TIMER5 ISR at
   its next tick): 1000 SPS = CONFIG `0x409F` (shunt 588 µs + bus 332 µs) on a
   1 ms tick, one pair per record (~27% CPU in the ISR); 2/10/50 SPS = CONFIG
@@ -174,6 +179,9 @@ adcqueue.md`, `authentication.md`). Session as the host runs it:
   memory.x `__adcq_ring`) — 256 ms at 1000 SPS; a lagging host loses the
   oldest (visible as a seq gap). updat's flasher copy runs with interrupts
   masked so no record lands on it.
+- km003c-rs USB-resets the meter at start, which counts as an enumeration and
+  starts the PD sniffer (sniff-on-enumeration) — with no PD sink downstream a
+  charger on IN then cuts VBUS (and some only come back on a replug).
 - km003c-rs detaches the kernel drivers from interfaces 0–3 while it runs,
   so the CDC port (ttyACM) disappears and is not re-bound afterwards (host
   behaviour — rebind: `echo <port>:1.1 > /sys/bus/usb/drivers/cdc_acm/bind`;

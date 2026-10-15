@@ -54,6 +54,9 @@ const PD_REPLY_MAX: usize = 64;
  * packets; capped at 127 so the transfer always ends on a short packet
  * (no zero-length packet needed) */
 const COMBINED_MAX: usize = 127;
+/* AdcQueue replies: where the PdPacket / trace parts are staged in PD_REPLY
+ * (after the ≤56-B ADC + AdcQueue header part) */
+const SUFFIX: usize = 56;
 
 pub struct PowerZ<'a, B: UsbBus> {
     iface: InterfaceNumber,
@@ -76,7 +79,9 @@ pub struct PowerZ<'a, B: UsbBus> {
     aq_len: usize,
     aq_sent: usize,
     aq_pre: usize,
+    aq_rec_end: usize,
     aq_first: u32,
+    aq_zlp: bool,
     /* a host sent Connect (km003c-rs, Mtools — never the kernel driver):
      * stop pre-arming the ADC reply and answer every request on demand,
      * so no stale packet sits between a request and its reply */
@@ -162,7 +167,9 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
             aq_len: 0,
             aq_sent: 0,
             aq_pre: 0,
+            aq_rec_end: 0,
             aq_first: 0,
+            aq_zlp: false,
             session: false,
         }
     }
@@ -191,6 +198,12 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
             self.aq_fill(&mut pkt[..n]);
             match self.ep_in.write(&pkt[..n]) {
                 Ok(_) => self.aq_sent += n,
+                Err(_) => return false,
+            }
+        }
+        if self.aq_zlp {
+            match self.ep_in.write(&[]) {
+                Ok(_) => self.aq_zlp = false,
                 Err(_) => return false,
             }
         }
@@ -274,8 +287,12 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
             CMD_GET_DATA if attr == ATT_PD => self.build_pd(tid, false),
             CMD_GET_DATA if attr == ATT_ADC | ATT_PD => self.build_pd(tid, true),
             CMD_GET_DATA if attr == ATT_PD_TRACE => self.build_trace(tid),
-            CMD_GET_DATA if attr == ATT_ADC_QUEUE => self.build_aq(tid, false),
-            CMD_GET_DATA if attr == ATT_ADC | ATT_ADC_QUEUE => self.build_aq(tid, true),
+            CMD_GET_DATA
+                if attr & ATT_ADC_QUEUE != 0
+                    && attr & !(ATT_ADC | ATT_ADC_QUEUE | ATT_PD | ATT_PD_TRACE) == 0 =>
+            {
+                self.build_aq(tid, attr)
+            }
             /* outside a session the pre-armed reply serves it */
             CMD_GET_DATA if attr & ATT_ADC != 0 => {
                 if self.session && !self.busy() {
@@ -362,59 +379,74 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
         self.pd_pending > 0 || self.aq_len > 0
     }
 
-    /// GetData(AdcQueue), after the current ADC payload as a chained logical
-    /// packet when `with_adc` (0x0003). Up to `adcq::MAX_TAKE` records, never
-    /// a count that would make the transfer a multiple of 64 B (it would
-    /// need a zero-length packet to end). Nothing buffered: a bare PutData
-    /// header (the real device's empty reply), or the ADC packet alone.
-    fn build_aq(&mut self, tid: u8, with_adc: bool) {
+    /// GetData with AdcQueue in the mask (`attr`: AdcQueue plus any of ADC,
+    /// PdPacket, PD trace — km003c-rs's GUI asks for AdcQueue + PdPacket):
+    /// the logical packets in attribute order, ADC + the AdcQueue ext header
+    /// in PD_REPLY[..aq_pre], up to `adcq::MAX_TAKE` records expanded from
+    /// the ring, then PdPacket / trace from PD_REPLY[SUFFIX..]. Empty parts
+    /// are left out (km003c-rs only checks that each part was requested);
+    /// AdcQueue alone with nothing buffered is the bare 4-B header, the real
+    /// device's empty reply. A total that is a multiple of 64 B ends with a
+    /// zero-length packet.
+    fn build_aq(&mut self, tid: u8, attr: u16) {
         if self.busy() {
             return;
         }
         let reply = unsafe { &mut *PD_REPLY.0.get() };
+        let (first, n) = crate::adcq::take(crate::adcq::MAX_TAKE);
+        let mut suf = SUFFIX;
+        #[cfg(feature = "triggers")]
+        if attr & ATT_PD != 0 {
+            let payload = crate::pd::drain_pd_packet(&mut reply[SUFFIX + 4..COMBINED_MAX - 6]);
+            reply[SUFFIX..SUFFIX + 4]
+                .copy_from_slice(&ext_header(ATT_PD, attr & ATT_PD_TRACE != 0, payload));
+            suf += 4 + payload;
+        }
+        if attr & ATT_PD_TRACE != 0 {
+            reply[suf..suf + 4].copy_from_slice(&ext_header(ATT_PD_TRACE, false, 2));
+            reply[suf + 4] = 0;
+            reply[suf + 5] = 0;
+            suf += 6;
+        }
         let mut pre = 4;
-        if with_adc {
+        if attr & ATT_ADC != 0 {
             let adc = unsafe { &*REPLY.0.get() };
             reply[8..ADC_REPLY_LEN].copy_from_slice(&adc[8..]);
+            let more = n > 0 || suf > SUFFIX;
+            reply[4..8].copy_from_slice(&ext_header(ATT_ADC, more, ADC_PAYLOAD_LEN));
             pre = ADC_REPLY_LEN;
         }
-        let (first, mut n) = crate::adcq::take(crate::adcq::MAX_TAKE);
-        if (pre + 4 + AQ_RECORD * n as usize) % 64 == 0 {
-            crate::adcq::untake(1);
-            n -= 1;
+        if n > 0 {
+            /* chunk = record count, size = bytes per record */
+            let ext = ATT_ADC_QUEUE as u32
+                | ((suf > SUFFIX) as u32) << 15
+                | n << 16
+                | (AQ_RECORD as u32) << 22;
+            reply[pre..pre + 4].copy_from_slice(&ext.to_le_bytes());
+            pre += 4;
         }
-        if with_adc {
-            reply[4..8].copy_from_slice(&ext_header(ATT_ADC, n > 0, ADC_PAYLOAD_LEN));
-        }
-        if n == 0 {
-            if with_adc {
-                self.send_built(tid, ADC_REPLY_LEN);
-            } else {
-                self.queue(&[RSP_PUT_DATA, tid, 0, 0]);
-            }
-            return;
-        }
-        /* chunk = record count, size = bytes per record */
-        let ext = ATT_ADC_QUEUE as u32 | n << 16 | (AQ_RECORD as u32) << 22;
-        reply[pre..pre + 4].copy_from_slice(&ext.to_le_bytes());
-        self.aq_pre = pre + 4;
+        self.aq_pre = pre;
         self.aq_first = first;
-        self.aq_len = self.aq_pre + AQ_RECORD * n as usize;
+        self.aq_rec_end = pre + AQ_RECORD * n as usize;
+        self.aq_len = self.aq_rec_end + suf - SUFFIX;
+        self.aq_zlp = self.aq_len % 64 == 0;
         self.aq_sent = 0;
         put_data_header(tid, self.aq_len);
         self.flush();
     }
 
     /// Bytes `aq_sent..aq_sent + out.len()` of the AdcQueue reply: the
-    /// header from PD_REPLY, then records expanded from the ring.
+    /// header from PD_REPLY, records expanded from the ring, then the
+    /// PdPacket / trace suffix from PD_REPLY[SUFFIX..].
     fn aq_fill(&self, out: &mut [u8]) {
         let reply = unsafe { &*PD_REPLY.0.get() };
         let adc = unsafe { &*REPLY.0.get() };
         let mut p = self.aq_sent;
         let mut o = 0;
         while o < out.len() {
-            if p < self.aq_pre {
-                out[o] = reply[p];
+            if p < self.aq_pre || p >= self.aq_rec_end {
+                let q = if p < self.aq_pre { p } else { SUFFIX + p - self.aq_rec_end };
+                out[o] = reply[q];
                 o += 1;
                 p += 1;
                 continue;
@@ -503,6 +535,7 @@ impl<B: UsbBus> UsbClass<B> for PowerZ<'_, B> {
         self.pd_split = 0;
         self.aq_len = 0;
         self.aq_sent = 0;
+        self.aq_zlp = false;
         self.session = false;
         crate::adcq::request(crate::adcq::OFF);
     }

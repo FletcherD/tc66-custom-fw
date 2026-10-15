@@ -76,8 +76,9 @@ layout-sensitive: anything with a polling loop belongs in fast flash
 other crates/modules; fast-gate fails on any overflow — no silent spill), and
 per-pass `service()` calls keep their idle check `#[inline(always)]` in
 the fast main loop (pass ~20 µs). Profile with the on-device PC
-sampler (`pcprf` verb + tools/dev/pcprofile.py; the DWT is a stub — never
-trust PCSR). For lossless host streaming use the plaintext `rawva` verb
+sampler (`pcprf` feature + verb + tools/dev/pcprofile.py — not in
+`DEV_FEATURES` now for space, build `FEATURES=pcprf` with something else
+dropped; the DWT is a stub — never trust PCSR). For lossless host streaming use the plaintext `rawva` verb
 (window seq for dedup; tools/rawva.py); getva also carries the seq at
 pac3+4. The build is a pinned nightly (rust-toolchain.toml: build-std core
 + panic=immediate-abort — a panic hits UDF/HardFault, MK_PANIC is dead).
@@ -108,15 +109,15 @@ server — never redistribute vendor binaries, `backup-eeprom` via `eeprd`,
 AFC trigger + detection verbs); `make flash`/`make recover` add the
 Makefile's `DEV_FEATURES` — dev verb groups `fcp`/`dev-board`/`dev-bt`/
 `dev-tft`/`dev-pd`/`dev-ina` (`dev-verbs` = all; they no longer fit together, so carry only the
-groups in current use) + `pcprf`; `make release` / `RELEASE=1` builds the
+groups in current use) (+ `pcprf` when profiling); `make release` / `RELEASE=1` builds the
 defaults only. New debug verbs go behind a dev group (or a new one).
 Charger protocol detection at 5 V: `tools/detect.py` (`qcdet`, `afctr 0x08`
 probe, `fcprd`, PD caps) or on-device (screen 5 / `detct`). Flash is FULL
-(build 180: release ~320 B spare, dev ~160 B — the next feature needs room
+(build 182: release ~156 B spare, dev ~92 B — the next feature needs room
 made deliberately, ask first;
 `tools/dev/inline_report.py` lists inlined-copy candidates for
 `#[inline(never)]` — FIRMWARE.md "Fast-flash placement"): `DEV_FEATURES` =
-`pcprf dev-pd`. **Version**: just BUILD_ID (no semver),
+`dev-pd`. **Version**: just BUILD_ID (no semver),
 shown on the ~2 s boot splash (ui.rs `SPLASH`) and by the `versn` verb.
 Host trigger tools (pd.py/qc.py) go through tools/lib/trigger_guard.py
 (default --max-v 9, confirmation unless --yes).

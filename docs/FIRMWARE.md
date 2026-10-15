@@ -1008,8 +1008,9 @@ Cargo features (rust/Cargo.toml; DEVELOPMENT.md "Feature sets"): the
 default set is the release build — `triggers` (PD/QC/AFC verbs, the PD
 engine service, the powerz PD attribute). The dev loop (`make flash`) adds
 the Makefile's `DEV_FEATURES`: dev verb groups `fcp` / `dev-board` /
-`dev-bt` / `dev-tft` (`dev-verbs` = all, too big to fit together) and
-`pcprf` (the PC profiler + its verb); `grace` is opt-in.
+`dev-bt` / `dev-tft` / `dev-pd` / `dev-ina` (`dev-verbs` = all, too big to
+fit together; currently just `dev-pd`); `pcprf` (the PC profiler + its verb)
+is opt-in like `grace` — it no longer fits alongside the default dev set.
 Disabled verbs match and silently do nothing. The product protocol
 (query/getva/rawva/updat/cfgrd/cfgwr/gtrec/eeprd/versn/powerz) is never
 gated. CI (`.github/workflows/ci.yml`) runs `make gates` — every gate on
@@ -1091,7 +1092,7 @@ per-pass `service()` should follow the same split.
 
 The chip's DWT is a stub (PCSR reads 0xFFFFFFFF, CYCCNT never counts), so
 hardware PC sampling is unavailable. Instead the TIMER5_DAC entry veneer
-(ina.rs, cargo feature `pcprf`, in dev builds only) records the interrupted context's PC from the exception frame into a
+(ina.rs, cargo feature `pcprf`, opt-in: `make flash FEATURES=pcprf`, with something else dropped to fit) records the interrupted context's PC from the exception frame into a
 128-entry SRAM ring at 0x2000_1100 (markers.rs) at ~446 Hz (one per sampler tick); the `pcprf`
 verb dumps counter+ring over CDC and `tools/dev/pcprofile.py <elf> [secs]
 [--load getva:192]` polls, dedups, symbolizes, and histograms — no SWD, no

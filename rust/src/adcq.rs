@@ -128,11 +128,6 @@ pub fn take(max: u32) -> (u32, u32) {
     (t, n)
 }
 
-/// USBD_LP: hand back the last `n` samples of a `take` (read next time).
-pub fn untake(n: u32) {
-    TAIL.store(TAIL.load(Ordering::Relaxed).wrapping_sub(n), Ordering::Relaxed);
-}
-
 /// Sample `idx` (from `take`) and its sequence-counter value.
 pub fn get(idx: u32) -> (Sample, u16) {
     let s = unsafe { (*core::ptr::addr_of!(__adcq_ring))[(idx % RING_LEN) as usize] };
