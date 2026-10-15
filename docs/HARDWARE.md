@@ -317,6 +317,16 @@ ten LE u32 fields, CRC16/MODBUS tail); client + deduping stream generator in
   across VBUSCT 588 µs–8.244 ms (factory `offV` is fine at our 1.1 ms). The
   real load's fluctuation (~2.8 LSB rms at 1.1 ms, plus ~35 ms dips to 29 mA
   and 150 mA spikes) dwarfs the 0.67 LSB instrument noise.
+- **~1 kS/s is feasible on the sampler side** (bench, 2026-10-15, temporary
+  build): CONFIG `0x409F` (shunt 588 µs + bus 332 µs = 920 µs pair, measured
+  920.4 µs) with a 940 µs tick ran at 1065 Hz, with all KM003C checks passing,
+  no missed windows and clean enumeration. Costs: ~28% CPU in the ISR (getva
+  median 2.74 → 3.47 ms, query 0.42 → 0.70 ms); bus noise per sample 0.87 →
+  1.8 LSB (~2.2 mV rms); shunt 588 µs stays within ~0.1 LSB of the factory
+  zero (332 µs shifts it ~1.4 LSB ≈ 0.23 mA — would need a re-zero). Not
+  implemented: the KM003C StartGraph/AdcQueue streaming that would carry
+  the samples to a host. It needs a per-sample RAM queue between host polls,
+  and RAM is nearly full (stack headroom ~630 B, .hibss ends 0x20001FD4).
 - Bench note: powering the meter via its PC-comms port does NOT power the
   measurement path — bus voltage/shunt read 0 until the IN port is fed.
 
