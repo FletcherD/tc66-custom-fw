@@ -20,7 +20,9 @@ V / I change above this keeps the screen on; 0 disables that trigger, both
 0 = always time out), log_on (datalog recording), log_clear (write 1 =
 empty the datalog), plot_period_ms (plot column period; 160 columns span
 the screen), plot_v_full_mv / plot_i_full_ma (plot full scale = top edge;
-changing either restarts the plot).
+changing either restarts the plot), window_ms (V/I averaging window and
+publish period, 10..5000, default 96), ui_period_ms (screen refresh period,
+50..5000, default 500; digits change at most once per window_ms).
 
 Wire format (rust/src/cfg.rs):
   cfgrd [start]     -> "OK" + total u8 + start u8 + n u8 + n x (id u8,
@@ -61,6 +63,8 @@ NAMES = {
     30: "plot_period_ms",
     31: "plot_v_full_mv",
     32: "plot_i_full_ma",
+    33: "window_ms",
+    34: "ui_period_ms",
 }
 IDS = {v: k for k, v in NAMES.items()}
 

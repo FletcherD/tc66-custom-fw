@@ -324,13 +324,18 @@ Related subtleties, all load-bearing:
   enabled interrupts, alongside USBD_LP) is unmasked in `ina::start()`,
   called after the persistence boot (and after the grace window, when
   built). Each tick the ISR reads **shunt then bus** — ~98% of all
-  conversions. After `WINDOW` = 43 ticks (96.3 ms) it calibrates +
-  publishes V/I (~10.4 Hz windows, MK_WINDOWS++; `cal_v`/`cal_i` rescale
-  the n=43 sums to the EEPROM's 8/16 depths) and once per second (µs
-  accumulator) drains the 1 s powerz averages. **`ina::ticks()` stays a
+  conversions. After `window_ms` worth of ticks (setting id 33, 10–5000
+  ms, default 96 = 43 ticks; `ina::set_window_ms`, 0 in `WINDOW_PAIRS` =
+  the default) it calibrates + publishes V/I (MK_WINDOWS++; `cal_v`/`cal_i`
+  rescale the n-pair sums to the EEPROM's 8/16 depths); window length =
+  averaging depth AND publish period of every "latest V/I" consumer (getva/
+  rawva/BLE, screen digits, plot, idle detection). The temp/D± ADC burst
+  request is window-independent (every 43 ticks). Once per second (µs
+  accumulator, counted even before cal loads) it drains every sample of
+  that second into the powerz `avg_*` fields and bumps `ina::seconds()`. **`ina::ticks()` stays a
   4 ms time base** (the ISR advances it from a µs remainder) — every
-  timeout/cadence in pd.rs, detect.rs, cfg.rs, plot.rs, keys and the energy
-  integration counts in 4 ms units. I2C failures bump MK_I2CERR, snapshot into MK_SMP_I2CE
+  timeout/cadence in pd.rs, detect.rs, cfg.rs, plot.rs, keys and the UI
+  refresh counts in 4 ms units. I2C failures bump MK_I2CERR, snapshot into MK_SMP_I2CE
   and restart the window; cal loading runs from the main loop (first try in
   `start()`, retries every ~0.25 s via `ina::service()`) — the ISR idles
   until `CAL_READY`. **The INA226 config write (0x4127) before cal load is
@@ -358,16 +363,18 @@ Related subtleties, all load-bearing:
   `ina::pause(...)` (masks the TIMER5 NVIC line + dsb/isb), or a tick will
   SRESET the peripheral mid-transaction. A long pause only stretches the
   current window. The on-chip ADC is thread-only, no pause needed.
-- Main-loop cadences (1 Hz energy, 0.5 s UI refresh, cal retry) derive from
-  the ISR's public tick counter (`ina::ticks()`, mirrored at MK_SMP_IRQS):
+- Main-loop cadences (1 Hz idle/screen bookkeeping, UI refresh every
+  `ui_period_ms` (setting id 34, 50–5000, default 500; re-read once a
+  second), cal retry) derive from the ISR's 4 ms tick counter (`ina::ticks()`):
   time spent blocked (a slow reply, an EEPROM write, a trigger entry hold)
   is caught up from the delta instead of lost.
 - `adc.rs`: polled on-chip ADC — **enable IRC14M first** (the ADC's dedicated
   clock, off at reset; calibration hangs without it), ADCON set alone, CLB
   calibration, SWRCST software trigger, 239.5-cycle sampling. NTC uses the
   recovered stock β-model on ch0 (PA0); channels + model in HARDWARE.md.
-- Energy (persist.rs): 1 Hz integration in the main loop off the tick
-  counter (250 ticks = 1 s) into the ACTIVE group (setting `group`), only
+- Energy (persist.rs): 1 Hz integration in the main loop, once per
+  `ina::seconds()` step, of that second's FULL average (`snapshot_avg_vi`:
+  every sample, not a window; P = V̄·Ī) into the ACTIVE group (setting `group`), only
   while 10 µA < I < 6 A — so the run clock counts load time and an idle
   meter never wears the ring. Internally 1e-5 A·s / 1e-4 W·s; whole mAh/mWh
   go to the EEPROM energy ring every 10 s while changed (and at once on a

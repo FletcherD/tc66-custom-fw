@@ -26,9 +26,16 @@
 //! used instead of a sparse subset. ALERT is not wired, so the reads are
 //! not synchronized to conversion-ready; ISR entry jitter (a USBD_LP
 //! handler in progress) can rarely make one read repeat a conversion.
-//! After `WINDOW` ticks (~96 ms) the window's V/I are calibrated and
-//! published (~10.4 Hz); `cal_v`/`cal_i` rescale the sums to the depths
-//! the EEPROM constants bake in (8 bus / 16 shunt).
+//! After `window_ms` worth of ticks (setting, default 96 ms = 43 ticks;
+//! `set_window_ms`) the window's V/I are calibrated and published;
+//! `cal_v`/`cal_i` rescale the sums to the depths the EEPROM constants bake
+//! in (8 bus / 16 shunt). The window-end ADC burst (temp/D±) runs on its own
+//! fixed ~96 ms cadence, whatever the window.
+//!
+//! Once per second (a us accumulator, counted even before cal loads) the
+//! ISR folds every sample of that second into the powerz `avg_*` fields and
+//! bumps `seconds()`; the main loop integrates energy from those full-second
+//! averages, one per `seconds()` step.
 //!
 //! `ticks()` stays a 4 ms time base for the rest of the firmware (PD/detect
 //! timeouts, energy, keys, UI cadences): the ISR adds `TICK_US` to a
@@ -94,8 +101,11 @@ const REG_BUS: u8 = 0x02;
 /// Sampler tick period, us: the 2.2 ms shunt+bus cycle at CONFIG 0x4127
 /// + 1.8% so the timer never outpaces the chip's oscillator.
 const TICK_US: u32 = 2240;
-/// Shunt+bus pairs per published window (43 x 2.24 ms = 96.3 ms).
-const WINDOW: u8 = 43;
+/// Default shunt+bus pairs per published window (43 x 2.24 ms = 96.3 ms);
+/// the `window_ms` setting overrides it via `set_window_ms`.
+const WINDOW_DEFAULT: u32 = 43;
+/// Ticks between window-independent ADC bursts (~96 ms).
+const ADC_TICKS: u8 = 43;
 /// Ticks to sit out I2C after a stuck-bus failure (~200 ms).
 const BACKOFF_TICKS: u8 = 90;
 
@@ -258,6 +268,14 @@ static PUBLISHED: Racy<Meas> = Racy(core::cell::UnsafeCell::new(Meas {
 static TICKS: AtomicU32 = AtomicU32::new(0);
 /// ISR-only: us accumulated toward the next 4 ms `TICKS` step.
 static TICK_REM: AtomicU32 = AtomicU32::new(0);
+/// ISR-only: us into the current second.
+static SEC_US: AtomicU32 = AtomicU32::new(0);
+/// Seconds completed by the ISR (the `avg_*` fields hold the latest one's
+/// averages once cal is loaded); the main loop's energy cadence.
+static SECS: AtomicU32 = AtomicU32::new(0);
+/// Shunt+bus pairs per window (thread writes via `set_window_ms`, ISR
+/// reads); 0 = `WINDOW_DEFAULT` (zero-init keeps it in .bss).
+static WINDOW_PAIRS: AtomicU32 = AtomicU32::new(0);
 
 /// Write-once cal publication: thread fills CAL, then Release-stores
 /// CAL_READY = true; the ISR Acquire-loads the flag before touching CAL.
@@ -310,6 +328,29 @@ pub fn set_energy(mah: u32, mwh: u32) {
 #[inline(never)]
 pub fn ticks() -> u32 {
     TICKS.load(Ordering::Relaxed)
+}
+
+/// Seconds the sampler has completed (see `SECS`).
+#[inline(never)]
+pub fn seconds() -> u32 {
+    SECS.load(Ordering::Acquire)
+}
+
+/// The last full second's average V (1e-4 V) and |I| (1e-5 A) — every
+/// sample of that second, for energy integration.
+#[inline(never)]
+pub fn snapshot_avg_vi() -> (u32, u32) {
+    cortex_m::interrupt::free(|_| unsafe {
+        let m = &*PUBLISHED.0.get();
+        (m.avg_v_1e4, m.avg_i_1e5.unsigned_abs())
+    })
+}
+
+/// `window_ms` setting: published-window length, rounded to whole ticks
+/// (at least one). Takes effect from the window in progress.
+pub fn set_window_ms(ms: u32) {
+    let pairs = ((ms * 1000 + TICK_US / 2) / TICK_US).max(1);
+    WINDOW_PAIRS.store(pairs, Ordering::Relaxed);
 }
 
 /// Run `f` with the sampler IRQ masked (NVIC line only — dsb+isb ensure no
@@ -471,8 +512,8 @@ core::arch::global_asm!(
 );
 
 /// Sampler tick (body — entered via the profiling veneer above).
-/// Budget: one I2C read ~0.5 ms (~12% CPU); the window-publish tick adds a
-/// few us of integer math; worst case the 1 s drain coincides (+ ~2 us).
+/// Budget: two I2C reads ~0.26 ms (~12% CPU); the window-publish tick adds
+/// a few us of integer math; worst case the 1 s drain coincides (+ ~2 us).
 /// No ADC, no USB, no floats in here.
 extern "C" fn timer5_body() {
     let tim = unsafe { &*pac::Timer5::ptr() };
@@ -486,23 +527,37 @@ extern "C" fn timer5_body() {
     }
     let n = mk_get(MK_SMP_IRQS).wrapping_add(1);
     mk(MK_SMP_IRQS, n);
-    if !CAL_READY.load(Ordering::Acquire) {
-        mk(MK_SMP_STATE, (n << 8) | 0x03); /* idle: waiting for cal */
-        return;
+    let mut sec = SEC_US.load(Ordering::Relaxed) + TICK_US;
+    let new_second = sec >= 1_000_000;
+    if new_second {
+        sec -= 1_000_000;
     }
-    /* CAL is write-once-published (Acquire above) and never written again;
-     * SAMPLER is ISR-exclusive after start(). */
-    let cal = unsafe { &*CAL.0.get() };
-    let s = unsafe { &mut *SAMPLER.0.get() };
-    s.tick(cal, n);
-    mk(MK_SMP_STATE, (n << 8) | 0x02); /* exit */
+    SEC_US.store(sec, Ordering::Relaxed);
+    if CAL_READY.load(Ordering::Acquire) {
+        /* CAL is write-once-published (Acquire above) and never written
+         * again; SAMPLER is ISR-exclusive after start(). */
+        let cal = unsafe { &*CAL.0.get() };
+        let s = unsafe { &mut *SAMPLER.0.get() };
+        s.tick(cal, n);
+        if new_second {
+            mk(MK_SMP_STATE, (n << 8) | 0x50); /* 1 s drain */
+            s.drain_second(cal);
+            mk(MK_SMP_SECS, mk_get(MK_SMP_SECS) + 1);
+        }
+        mk(MK_SMP_STATE, (n << 8) | 0x02); /* exit */
+    } else {
+        mk(MK_SMP_STATE, (n << 8) | 0x03); /* idle: waiting for cal */
+    }
+    if new_second {
+        SECS.fetch_add(1, Ordering::Release);
+    }
 }
 
 /// Window + 1 s accumulators, advanced once per tick from the ISR.
 struct Sampler {
-    step: u8,    /* 0..WINDOW within the current window */
+    step: u32,   /* pairs summed in the current window */
     backoff: u8, /* ticks left to skip I2C after a bus-busy failure */
-    sec_us: u32, /* time into the current second */
+    adc_step: u8, /* ticks since the last ADC-burst request */
     bus_sum: u32,
     shunt_sum: u32,
     /* 1 s raw accumulators for the averaged powerz values */
@@ -517,7 +572,7 @@ impl Sampler {
         Sampler {
             step: 0,
             backoff: 0,
-            sec_us: 0,
+            adc_step: 0,
             bus_sum: 0,
             shunt_sum: 0,
             sec_bus_sum: 0,
@@ -533,20 +588,24 @@ impl Sampler {
         self.shunt_sum = 0;
     }
 
-    /// One tick: read shunt + bus; publish V/I + request the ADC burst at
-    /// window end; drain the 1 s averages once per second.
+    /// One tick: read shunt + bus; publish V/I at window end; request the
+    /// ADC burst every `ADC_TICKS`.
     /// I2C failure: count it, restart the window, keep ticking.
     fn tick(&mut self, cal: &Cal, n: u32) {
+        self.adc_step += 1;
+        if self.adc_step >= ADC_TICKS {
+            self.adc_step = 0;
+            ADC_REQ.store(true, Ordering::Release);
+        }
         if self.backoff > 0 {
             /* bus recently stuck busy: sit out — even the fast-fail busy
              * wait costs ~1.5 ms/tick, which must not become the ISR's
              * steady state (the build-65 freeze) */
             self.backoff -= 1;
             mk(MK_SMP_STATE, (n << 8) | 0x04);
-            self.count_second(cal, n);
             return;
         }
-        mk(MK_SMP_STATE, (n << 8) | (0x10 + self.step as u32));
+        mk(MK_SMP_STATE, (n << 8) | 0x10);
         let r = ina_read(REG_SHUNT)
             .map_err(|e| (e, 0))
             .and_then(|s| Ok((s, ina_read(REG_BUS).map_err(|e| (e, 0x80))?)));
@@ -554,7 +613,7 @@ impl Sampler {
             Err((e, which)) => {
                 mk(
                     MK_SMP_I2CE,
-                    (e.stage as u32) << 24 | (e.stat0 as u32) << 8 | which | self.step as u32,
+                    (e.stage as u32) << 24 | (e.stat0 as u32) << 8 | which | (self.step & 0x7F),
                 );
                 mk(MK_I2CERR, mk_get(MK_I2CERR) + 1);
                 if e.stage & 0x7F == 1 {
@@ -577,30 +636,22 @@ impl Sampler {
                 m.inst_v_1e4 = iv;
                 m.inst_i_1e5 = ii;
                 self.step += 1;
-                if self.step == WINDOW {
+                /* >= : a shortened window_ms ends the one in progress now */
+                let window = match WINDOW_PAIRS.load(Ordering::Relaxed) {
+                    0 => WINDOW_DEFAULT,
+                    w => w,
+                };
+                if self.step >= window {
                     mk(MK_SMP_STATE, (n << 8) | 0x40); /* window publish */
-                    let v = cal_v(cal, self.bus_sum as u64, WINDOW as u64);
-                    let i = cal_i(cal, self.shunt_sum as u64, WINDOW as u64);
+                    let v = cal_v(cal, self.bus_sum as u64, self.step as u64);
+                    let i = cal_i(cal, self.shunt_sum as u64, self.step as u64);
                     let m = unsafe { &mut *PUBLISHED.0.get() };
                     m.v_1e4 = v;
                     m.i_1e5 = i.unsigned_abs();
                     self.reset_window();
                     mk(MK_WINDOWS, mk_get(MK_WINDOWS) + 1);
-                    ADC_REQ.store(true, Ordering::Release);
                 }
             }
-        }
-        self.count_second(cal, n);
-    }
-    /// The 1 s cadence — kept ticking through I2C back-off so the second
-    /// boundary stays honest.
-    fn count_second(&mut self, cal: &Cal, n: u32) {
-        self.sec_us += TICK_US;
-        if self.sec_us >= 1_000_000 {
-            mk(MK_SMP_STATE, (n << 8) | 0x50); /* 1 s drain */
-            self.sec_us -= 1_000_000;
-            self.drain_second(cal);
-            mk(MK_SMP_SECS, mk_get(MK_SMP_SECS) + 1);
         }
     }
 

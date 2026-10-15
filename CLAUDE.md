@@ -63,7 +63,7 @@ rest Rejects; docs/HARDWARE.md "powerz vendor protocol",
 tools/dev/km003c_check.py) —
 **powerz comms are the priority path; getva/CDC exists for
 compatibility**. The sampler runs from the TIMER5 interrupt (2.24 ms, a shunt +
-bus read per tick = ~98% of the INA226's 2.2 ms conversion pairs; `ina::ticks()` stays a 4 ms time base — ina.rs; measured conversion timing + raw noise per
+bus read per tick = ~98% of the INA226's 2.2 ms conversion pairs; `ina::ticks()` stays a 4 ms time base; `window_ms` setting = averaging/publish window, energy integrates full-second averages, `ui_period_ms` = screen refresh — ina.rs; measured conversion timing + raw noise per
 CONFIG: tools/dev/inaexp.py / `inaxp`, docs/HARDWARE.md "Measurement front-end"), immune to main-loop blocking. The hot
 path is pinned below the GD32's 32 KB zero-wait flash boundary
 (`rust/fast.x` + `make fast-gate` — docs/FIRMWARE.md "Fast-flash placement";

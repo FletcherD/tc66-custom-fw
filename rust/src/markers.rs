@@ -71,8 +71,8 @@ pub const MK_SMP_BASE: usize = 0x2000_10a0;
 /// +0x00 (ISR) live state: (tick_count << 8) | code. A frozen value locates
 /// a wedge by its low byte:
 ///   0x03        idle tick — waiting for thread-mode cal load
-///   0x10+step   starting the shunt + bus reads for window step 0..=42
-///   0x40        window publish (calibrate + PUBLISHED write, step 43)
+///   0x10        starting the shunt + bus reads
+///   0x40        window publish (calibrate + PUBLISHED write)
 ///   0x50        1 s average drain
 ///   0x02        ISR exit (healthy resting value)
 pub const MK_SMP_STATE: usize = MK_SMP_BASE;
@@ -81,7 +81,7 @@ pub const MK_SMP_STATE: usize = MK_SMP_BASE;
 pub const MK_SMP_IRQS: usize = MK_SMP_BASE + 0x04;
 /// +0x08 (ISR) last in-window I2C failure:
 /// (i2c stage << 24) | (STAT0 << 8) | (0x80 if the bus read failed, else
-/// the shunt read) | window step
+/// the shunt read) | window step (low 7 bits)
 pub const MK_SMP_I2CE: usize = MK_SMP_BASE + 0x08;
 /// +0x0c (ISR) seconds drained into the powerz averages (expect +1/s)
 pub const MK_SMP_SECS: usize = MK_SMP_BASE + 0x0c;

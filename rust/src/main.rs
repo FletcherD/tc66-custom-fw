@@ -97,7 +97,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 175;
+const BUILD_ID: u32 = 178;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -301,8 +301,10 @@ fn run() -> ! {
     bt::set_dispatch();
 
     /* 1 Hz energy integration into the active group (persist.rs — saved to
-     * the EEPROM ring, restored at boot): every 250 ticks the published I
-     * and P are accumulated for one second. */
+     * the EEPROM ring, restored at boot): once per sampler second
+     * (ina::seconds) that second's full average I and P are accumulated.
+     * The idle-off / screen bookkeeping keeps its own 250-tick cadence. */
+    let mut energy_secs = ina::seconds();
     let mut sec_ticks: u32 = 0;
     /* K2 held >= 1 s resets the active group's energy + run clock; one
      * shot per hold. Released sooner = a short press (PD screen: next page,
@@ -320,9 +322,11 @@ fn run() -> ! {
     #[cfg(feature = "triggers")]
     let mut enumerated = false;
 
-    /* screen refresh every 125 ticks (0.5 s); only changed cells are drawn
-     * (ui.rs dirty tracking), so an idle refresh costs nothing */
+    /* screen refresh every ui_period_ms (setting, default 0.5 s; re-read
+     * once a second); only changed cells are drawn (ui.rs dirty tracking),
+     * so an idle refresh costs nothing */
     let mut ui_ticks: u32 = 0;
+    let mut ui_period_ticks = cfg::get(cfg::ID_UI_PERIOD) / 4;
 
     /* Screen idle timeout: after idle_off_s (setting, default 15 s; 0 =
      * never) without a *change* in the measured
@@ -401,16 +405,24 @@ fn run() -> ! {
                 }
                 enumerated = e;
             }
+            /* a loop blocked past a second integrates the latest average
+             * once per missed second */
+            let secs = ina::seconds();
+            while energy_secs != secs {
+                energy_secs = energy_secs.wrapping_add(1);
+                let (v, i) = ina::snapshot_avg_vi();
+                let (pw, _) = ina::derive(v, i);
+                persist::second(v, i, pw);
+            }
             sec_ticks += elapsed;
             while sec_ticks >= 250 {
                 sec_ticks -= 250;
                 /* v/i only, not a whole-Meas snapshot: those cost ~56 B of
                  * main-frame each at opt-1 (stack-gate budget) */
                 let (v, i) = ina::snapshot_vi();
-                let (pw, _) = ina::derive(v, i);
-                persist::second(v, i, pw);
                 /* the screen index persists like a setting (K1, b-verbs) */
                 cfg::note(cfg::ID_SCREEN, ui::screen() as u32);
+                ui_period_ticks = cfg::get(cfg::ID_UI_PERIOD) / 4;
                 if tft_alive {
                     let idle_off = cfg::get(cfg::ID_IDLE_OFF);
                     /* mV -> 1e-4 V, mA -> 1e-5 A */
@@ -442,7 +454,7 @@ fn run() -> ! {
                 mk(MK_UI_STATE, tft_alive as u32 | (tft::is_off() as u32) << 1);
             }
             ui_ticks += elapsed;
-            if ui_ticks >= 125 && tft_alive {
+            if ui_ticks >= ui_period_ticks && tft_alive {
                 ui_ticks = 0;
                 /* format-only: marks changed cells dirty; the per-pass
                  * ui::service() below streams the glyphs out via DMA */

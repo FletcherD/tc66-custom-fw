@@ -30,6 +30,8 @@ pub const ID_IDLE_DI: u8 = 29;
 pub const ID_PLOT_PERIOD: u8 = 30;
 pub const ID_PLOT_V_FULL: u8 = 31;
 pub const ID_PLOT_I_FULL: u8 = 32;
+pub const ID_WINDOW_MS: u8 = 33;
+pub const ID_UI_PERIOD: u8 = 34;
 
 const ID_MAGIC: u8 = 24; /* our block's validity word (0x2060) */
 const MAGIC: u32 = 0x5443_4657; /* "WFCT" LE */
@@ -61,7 +63,7 @@ struct Def {
 /* Stock defaults except rotation: stock's default 0 (MADCTL 0x68) is
  * upside-down on this unit's mounting; 2 is the bench-verified orientation
  * and what an unreadable EEPROM falls back to. */
-const DEFS: [Def; 16] = [
+const DEFS: [Def; 18] = [
     Def { id: ID_GROUP, min: 0, max: 1, def: 0, flags: 0 },
     Def { id: ID_ROTATION, min: 0, max: 2, def: 2, flags: 0 },
     Def { id: ID_BRIGHTNESS, min: 0, max: 9, def: 6, flags: 0 },
@@ -80,6 +82,10 @@ const DEFS: [Def; 16] = [
     Def { id: ID_PLOT_PERIOD, min: 20, max: 60_000, def: 500, flags: OURS },
     Def { id: ID_PLOT_V_FULL, min: 100, max: 30_000, def: 20_000, flags: OURS },
     Def { id: ID_PLOT_I_FULL, min: 1, max: 6_000, def: 4_000, flags: OURS },
+    /* sampler window: averaging + publish period of V/I (ina.rs) */
+    Def { id: ID_WINDOW_MS, min: 10, max: 5_000, def: 96, flags: OURS },
+    /* screen refresh period (main loop, re-read once a second) */
+    Def { id: ID_UI_PERIOD, min: 50, max: 5_000, def: 500, flags: OURS },
 ];
 const N: usize = DEFS.len();
 /* State::dirty has one bit per setting */
@@ -241,15 +247,16 @@ fn apply(id: u8, v: u32) {
         ID_LOG_CLEAR => crate::persist::log_clear(),
         /* history drawn at the old scale would be misleading: restart */
         ID_PLOT_V_FULL | ID_PLOT_I_FULL => crate::plot::rescale(),
+        ID_WINDOW_MS => crate::ina::set_window_ms(v),
         _ => {}
     }
 }
 
-/// Apply the display settings at boot (the first frame was drawn with the
-/// defaults; rotation repaints only if it differs). The energy group is
-/// read by persist::boot itself.
+/// Apply the display + sampler-window settings at boot (the first frame was
+/// drawn with the defaults; rotation repaints only if it differs). The
+/// energy group is read by persist::boot itself.
 pub fn apply_boot() {
-    for id in [ID_ROTATION, ID_BRIGHTNESS, ID_SCREEN] {
+    for id in [ID_ROTATION, ID_BRIGHTNESS, ID_SCREEN, ID_WINDOW_MS] {
         apply(id, get(id));
     }
 }
