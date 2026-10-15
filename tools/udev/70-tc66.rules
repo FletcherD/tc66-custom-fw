@@ -1,0 +1,5 @@
+# TC66 custom firmware: the meter enumerates as a POWER-Z KM003C (5fc9:0063).
+# Lets non-root users open its vendor interface (tools/pdcap.py, libusb).
+#   sudo cp tools/udev/70-tc66.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger
+SUBSYSTEM=="usb", ATTR{idVendor}=="5fc9", ATTR{idProduct}=="0063", MODE="0660", GROUP="plugdev", TAG+="uaccess"

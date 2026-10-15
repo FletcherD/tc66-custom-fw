@@ -32,7 +32,7 @@ charge triggers (pd.rs: FUSB302 PD 2.0/3.0 sink — `pdctl`/`pdsta`/`pdcap`/
 charger and device negotiating through the meter, either orientation, incl.
 SOP'/SOP'' cable e-marker traffic, attach/detach, bad-CRC and hard-reset
 events; `pdctl 2` while sniffing re-triggers the negotiation; read with
-tools/pdcap.py under sudo — decodes all PD message types incl. identities,
+tools/pdcap.py (no sudo with tools/udev/70-tc66.rules installed — it is, on the bench host) — decodes all PD message types incl. identities,
 extended caps/status, chunk reassembly via tools/lib/pd_decode.py (layouts are
 the named fields of tools/lib/pd_spec.py, from the USB PD R3.2 spec; the
 firmware's are rust/src/pdspec.rs + pdsta.rs — use them, not raw shifts; regression vectors in tools/dev/pd_decode_test.py;

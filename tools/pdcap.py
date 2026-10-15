@@ -15,10 +15,10 @@ Manufacturer_Info, ...; chunked extended messages are reassembled).
                                sink negotiating through the meter).
   pdcap.py 60 --save cap.hex   also write every raw PdPacket payload (hex, one
                                per line) for later re-decoding.
-  pdcap.py --replay cap.hex    decode a saved capture offline (no device, no root).
+  pdcap.py --replay cap.hex    decode a saved capture offline (no device).
 
-Needs root for the USB device node; run the uv environment's Python under sudo:
-  sudo $(uv run --script tools/pdcap.py --python-path) tools/pdcap.py 30
+Opening the USB device node needs the udev rule tools/udev/70-tc66.rules
+(install instructions in it); without it only root can.
 
 Talks the POWER-Z KM003C protocol directly over libusb (VID:PID 5FC9:0063,
 bulk 0x01 OUT / 0x81 IN), independent of the CDC verb channel. The firmware
@@ -46,7 +46,9 @@ def replay(path):
 
 
 def capture(secs, save):
+    import errno
     import usb.core
+    import usb.util
 
     dev = usb.core.find(idVendor=KM_VID, idProduct=KM_PID)
     if dev is None:
@@ -54,8 +56,14 @@ def capture(secs, save):
     try:
         if dev.is_kernel_driver_active(0):
             dev.detach_kernel_driver(0)
-    except (usb.core.USBError, NotImplementedError):
-        pass
+        usb.util.claim_interface(dev, 0)
+    except usb.core.USBError as e:
+        if e.errno == errno.EACCES:
+            sys.exit("No permission to open the meter's USB device (bus %03d device %03d).\n"
+                     "Install the udev rule (steps in the file): %s"
+                     % (dev.bus, dev.address,
+                        os.path.join(os.path.dirname(os.path.abspath(__file__)), "udev", "70-tc66.rules")))
+        raise
 
     tid = [0]
 
@@ -73,7 +81,7 @@ def capture(secs, save):
     while time.time() < end:
         try:
             r = getdata(KM_ATT_PD)
-        except usb.core.USBError:
+        except usb.core.USBTimeoutError:
             continue
         if len(r) < KM_HDR_LEN or r[0] != KM_PUT_DATA:
             time.sleep(0.05)
@@ -92,16 +100,11 @@ def capture(secs, save):
             time.sleep(0.02)  # else poll straight away — the 8-slot ring overflows in a burst
     if out:
         out.close()
-        if os.environ.get("SUDO_UID"):  # hand the file back to the invoking user
-            os.chown(save, int(os.environ["SUDO_UID"]), int(os.environ["SUDO_GID"]))
     if seen_vbus is not None:
         print("last: VBUS=%d mV" % seen_vbus)
 
 
 def main():
-    if sys.argv[1:] == ["--python-path"]:
-        print(sys.executable)
-        return
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("seconds", nargs="?", type=float, default=20,
                     help="capture duration (default: %(default)s)")

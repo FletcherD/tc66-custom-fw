@@ -160,7 +160,7 @@ image or stock.
 - **PD sniffing** (the meter's PD switch must be on):
   ```
   uv run tools/pd.py sniff
-  sudo $(uv run -q --script tools/pdcap.py --python-path) tools/pdcap.py 60
+  uv run tools/pdcap.py 60
   ```
   then plug in the device. `uv run tools/pd.py hardreset` makes the charger
   and device renegotiate from scratch, and `uv run tools/pd.py off` ends
@@ -169,8 +169,11 @@ image or stock.
     it only worked with `cc=1`: that unit's CC2 contact on one port is
     barely connected (probably a bad solder joint). Flipping one of the
     cables moves the PD line to CC1.
-  - **Sudo:** `pdcap.py` needs root to claim the meter's USB interface
-    from the Linux `powerz` driver.
+  - **Permissions:** `pdcap.py` opens the meter's USB device directly.
+    Install the udev rule once so it works without root:
+    `sudo cp tools/udev/70-tc66.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger`
+    (then replug the meter if needed). The rule gives access to the
+    `plugdev` group and the logged-in desktop user.
   - **Missed messages:** the meter's PD chip can miss a frame when several
     arrive within about a millisecond, typically around the Accept.
   - **After a reboot:** the chip keeps its sniff setup through a meter

@@ -265,9 +265,9 @@ sink attach).
   `req` / `info` (the PD screen's lines) / `ask` (dev-pd: send a request
   from the sink). `tools/pdseq.py` — a capture around a sequence of `pd.py`
   steps (`pdseq.py arm wait:6 ask:srccapext wait:1 status`).
-- `tools/pdcap.py` (sudo) — live KM003C capture with decoding; `--save
+- `tools/pdcap.py` (udev rule `tools/udev/70-tc66.rules`) — live KM003C capture with decoding; `--save
   FILE` keeps the raw packets, `--replay FILE` re-decodes them offline (no
-  sudo). `tools/lib/pd_spec.py` — the spec's field layouts as named constants
+  meter). `tools/lib/pd_spec.py` — the spec's field layouts as named constants
   (bit fields with units, byte offsets, enum values, per spec table);
   `tools/lib/pd_decode.py` — the decoders built on them (vendor names from the
   system `usb.ids`); `tools/dev/pd_decode_test.py` — regression vectors (bench

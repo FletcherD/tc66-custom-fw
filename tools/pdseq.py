@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a PD capture (tools/pdcap.py under sudo) while driving the engine
+"""Run a PD capture (tools/pdcap.py) while driving the engine
 through a sequence of tools/pd.py commands, then print the decoded capture.
 
     pdseq.py [--secs N] [--save cap.hex] STEP...
@@ -11,7 +11,7 @@ need `--yes` passed through as their own step word (`req:2:--yes`).
 
     pdseq.py --secs 12 arm wait:5 status info ask:srccapext wait:1 status off
 
-Needs passwordless sudo for pdcap.py (USB vendor interface).
+Needs the udev rule tools/udev/70-tc66.rules (see pdcap.py).
 """
 import argparse
 import os
@@ -28,9 +28,7 @@ def main():
     ap.add_argument("steps", nargs="+", help="pd.py commands (words joined by ':') or wait:<s>")
     a = ap.parse_args()
 
-    py = subprocess.run(["uv", "run", "-q", "--script", os.path.join(HERE, "pdcap.py"), "--python-path"],
-                        capture_output=True, text=True, check=True).stdout.strip()
-    cmd = ["sudo", py, os.path.join(HERE, "pdcap.py"), str(a.secs)] + (["--save", a.save] if a.save else [])
+    cmd = ["uv", "run", "-q", os.path.join(HERE, "pdcap.py"), str(a.secs)] + (["--save", a.save] if a.save else [])
     cap = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     t0 = time.time()
     time.sleep(1)

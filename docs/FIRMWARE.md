@@ -772,9 +772,9 @@ PD traffic.
   Chromium EC `include/usb_pd.h` and ST's stm32-mw-usbpd-core `usbpd_def.h`
   — use the spec when extending the decoder, and add a vector to
   `tools/dev/pd_decode_test.py`. `--save FILE` writes the raw PdPacket
-  payloads, `--replay FILE` re-decodes them without the meter. Needs root
-  for the vendor interface — `sudo $(uv run -q --script tools/pdcap.py
-  --python-path) tools/pdcap.py 30`). It polls back-to-back while events
+  payloads, `--replay FILE` re-decodes them without the meter. Opening
+  the device node as a user needs the udev rule `tools/udev/70-tc66.rules`
+  (plugdev group + uaccess); otherwise only root can. It polls back-to-back while events
   flow: one 64-B packet carries only one or two events and the ring has 8
   slots.
 - **Verified:** our sink's full negotiation with an Apple USB-C charger
