@@ -179,6 +179,10 @@ adcqueue.md`, `authentication.md`). Session as the host runs it:
   memory.x `__adcq_ring`) — 256 ms at 1000 SPS; a lagging host loses the
   oldest (visible as a seq gap). updat's flasher copy runs with interrupts
   masked so no record lands on it.
+- Robustness: `tools/dev/km003c_fuzz.py [minutes]` rotates every km003c-rs
+  CLI (random rates/durations, memory_scan --full-scan, ...), raw malformed
+  vendor packets, host USB resets and CDC read load, checking the vendor
+  ADC reply after every step and the boot run count (no reboot).
 - km003c-rs USB-resets the meter at start, which counts as an enumeration and
   starts the PD sniffer (sniff-on-enumeration) — with no PD sink downstream a
   charger on IN then cuts VBUS (and some only come back on a replug).

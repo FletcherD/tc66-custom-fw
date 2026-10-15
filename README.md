@@ -8,13 +8,47 @@ else, including the stock firmware.
 > Unofficial. Not affiliated with or endorsed by RuiDeng. Flashing
 > third-party firmware is at your own risk.
 
+## Why use it instead of the stock firmware
+
+- **It works with standard tools out of the box.** The meter presents
+  itself as a ChargerLAB POWER-Z KM003C. On Linux, `sensors` shows live
+  readings with no extra software. The open-source
+  [km003c-rs](https://github.com/okhsunrog/km003c-rs) CLI and GUI stream
+  measurements at up to **1000 samples per second**, with the USB-PD
+  traffic in the same window.
+- **It's a USB-PD sniffer.** Put the meter between a charger and a phone or
+  laptop to record their whole PD conversation, live on screen or on a
+  computer: offers, requests, vendor messages, the cable's e-marker. It
+  can also make the pair renegotiate without replugging.
+- **It identifies chargers.** One button press reports what a charger
+  supports (Apple/Samsung dividers, QC, AFC, Type-C current, every USB-PD
+  offer) without ever raising the voltage.
+- **The measurements are better.** A hardware timer reads nearly every
+  conversion the current-sense chip makes, so readings don't depend on how
+  fast a computer asks for them; the stock firmware only samples when
+  polled. Energy counters add up every sample. Averaging time and screen
+  refresh rate are settings you can change.
+- **It has more screens.** A scrolling V/I plot, a USB-PD info screen, and
+  a charger-detection screen, alongside the familiar V/A/W, energy, and
+  temperature/D± pages.
+- **It updates itself.** After the first install, new versions flash over
+  USB with no button-holding, and you can back up your meter's factory
+  calibration to a file.
+- **It stays compatible.** It uses your meter's own factory calibration and
+  the stock EEPROM layout, still speaks the stock USB/Bluetooth protocol
+  that RuiDeng's apps use, and you can go back to stock at any time. It's
+  open source (MIT).
+
 ## What it does
 
 - **Calibrated measurement.** Voltage, current, and power from the INA226,
   using your meter's own factory calibration. Sampling is paced by a
-  hardware timer that reads nearly every conversion the INA226 makes, so how fast a host polls has no effect on how
-  fresh the readings are. Also: NTC temperature, D+/D− voltages, and
-  mAh/mWh energy counters with run time.
+  hardware timer that reads nearly every conversion the INA226 makes, so
+  how fast a host polls has no effect on how fresh the readings are. The
+  averaging window (`window_ms`, default 96 ms) and the screen refresh
+  (`ui_period_ms`, default 0.5 s) are settings. Also: NTC temperature,
+  D+/D− voltages, and mAh/mWh energy counters (from every sample) with run
+  time.
 - **Screens.** Six screens, and K1 steps through them:
   1. V / A / W
   2. mAh, mWh, and run time
@@ -41,16 +75,20 @@ else, including the stock firmware.
   `sensors` then shows live V/I. It handles over 5000 reads/s.
 - **High-rate streaming.** The KM003C's graph mode (2/10/50/1000 samples
   per second) works with the open-source
-  [km003c-rs](https://github.com/okhsunrog/km003c-rs) tools, e.g.
-  `adc_queue_simple -r 1000`. ChargerLAB's own Windows software is not
-  supported.
+  [km003c-rs](https://github.com/okhsunrog/km003c-rs) tools: its GUI
+  (`km003c-egui`, live plots plus the PD timeline) and CLI
+  (`adc_queue_simple -r 1000`). ChargerLAB's own Windows software is not
+  supported. km003c-rs takes over the meter's USB interfaces while it
+  runs, so the serial port (`/dev/ttyACM*`) disappears until you replug
+  the meter or rebind `cdc_acm`.
 - **Works with existing tools.** The stock USB serial protocol is
   supported: the encrypted `getva` packet, `gtrec` datalog download, and
   `rotat`. There is also a faster plaintext `rawva` command for streaming.
 - **Bluetooth (TC66C).** The BLE module answers the stock app's
   measurement requests and our settings commands.
 - **Settings stored in the stock EEPROM layout.** Includes brightness,
-  rotation, screen timeout, plot scale, and datalog interval. Energy
+  rotation, screen timeout, plot scale, datalog interval, averaging window
+  and screen refresh rate. Energy
   counters survive power loss. Stock and custom firmware can read each
   other's data.
 - **Charge triggers.** USB-PD 2.0/3.0 sink with fixed PDOs and PPS,

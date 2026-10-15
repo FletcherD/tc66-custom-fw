@@ -25,7 +25,7 @@ Host-side Python for the TC66 custom firmware. Run any script with
   - flash size (`inline_report.py`: per-function bytes spent on inlined copies, from the
     DWARF — candidates for `#[inline(never)]`);
   - dev-verb front ends and bench diagnostics (`i2cread.py`, `adcread.py`, `tft.py`,
-    `tftgrab.py`, `fusb_intn.py`, `gpio_cc_sweep.py`, `snapshot.py` (GPIO/ADC/register snapshot + diff, dev-board), `inaexp.py` (INA226 conversion timing + raw noise per CONFIG, dev-ina), `samplercheck.py` (published window rate + V/I noise over `rawva`), `enumtrial.py` (enumeration reliability over repeated `updat` reboots, QUIRKS §6), `km003c_consts.py` (generates rust/src/km003c_consts.rs, the precomputed KM003C MemoryRead exchange), `km003c_check.py` (KM003C-protocol replies), `pdlog_check.py`,
+    `tftgrab.py`, `fusb_intn.py`, `gpio_cc_sweep.py`, `snapshot.py` (GPIO/ADC/register snapshot + diff, dev-board), `inaexp.py` (INA226 conversion timing + raw noise per CONFIG, dev-ina), `samplercheck.py` (published window rate + V/I noise over `rawva`), `enumtrial.py` (enumeration reliability over repeated `updat` reboots, QUIRKS §6), `km003c_consts.py` (generates rust/src/km003c_consts.rs, the precomputed KM003C MemoryRead exchange), `km003c_check.py` (KM003C-protocol replies), `km003c_fuzz.py` (long robustness fuzz: every km003c-rs CLI + raw malformed vendor packets + USB resets + CDC load, health-checked per step), `pdlog_check.py`,
     `accp_decode.py`, `scope_capture.py`).
 - **`tools/lib/` — modules imported by the scripts, not run directly:**
   - `tc66lib.py`: meter discovery, `open_meter`, bootloader helpers.
