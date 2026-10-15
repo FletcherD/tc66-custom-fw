@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.9"
-# dependencies = ["pyusb"]
+# dependencies = ["pyusb", "pyserial"]
 # ///
 """KM003C PD-capture reader: polls the vendor bulk endpoint for the PdPacket
 attribute (0x0010) and decodes captured USB-PD traffic (tools/lib/pd_decode.py:
@@ -9,10 +9,13 @@ every control/data/extended message type, PDOs + flags, RDOs, VDMs incl.
 identities, Source/Sink_Capabilities_Extended, Status, PPS_Status,
 Manufacturer_Info, ...; chunked extended messages are reassembled).
 
-  pdcap.py [seconds]           stream captured PD events for `seconds`. Start
-                               the engine first over CDC: `pd.py arm` (our own
-                               sink's traffic) or `pd.py sniff` (a source and a
-                               sink negotiating through the meter).
+  pdcap.py [seconds]           stream captured PD events for `seconds`. If the
+                               PD engine is off, first starts the sniffer over
+                               CDC (`pdctl 3`, as `pd.py sniff`: a source and a
+                               sink negotiating through the meter; `pd.py off`
+                               ends it). An armed sink (`pd.py arm`) is left as
+                               is and its own traffic captured.
+  pdcap.py --no-start          leave the engine as it is (tools/pdseq.py drives it).
   pdcap.py 60 --save cap.hex   also write every raw PdPacket payload (hex, one
                                per line) for later re-decoding.
   pdcap.py --replay cap.hex    decode a saved capture offline (no device).
@@ -33,6 +36,8 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 from km003c import *  # noqa: E402,F403 — KM003C framing + parse_pdpacket
 from pd_decode import Decoder  # noqa: E402
+from pd_engine import (PDSTA_STATE, ST_OFF, ST_SNIFF, STATES, ok_er, read_status,  # noqa: E402
+                       xfer)
 from pd_spec import get, pack, u32  # noqa: E402
 
 
@@ -45,7 +50,25 @@ def replay(path):
                 parse_pdpacket(bytes.fromhex(line), dec)
 
 
-def capture(secs, save):
+def check_engine(start):
+    """Report the PD engine state over CDC; start the sniffer if it is off and `start`."""
+    from tc66lib import open_meter
+
+    s = open_meter()
+    state = read_status(s)[PDSTA_STATE]
+    if state == ST_OFF and start:
+        if not ok_er(xfer(s, b"pdctl\x03", 3), "PD engine was off: start the sniffer (pdctl 3)"):
+            sys.exit(1)
+    elif state == ST_OFF:
+        print("PD engine is off: nothing will be captured until it is started")
+    elif state == ST_SNIFF:
+        print("PD engine: sniffing")
+    else:
+        print("PD engine: sink mode (%s), capturing our sink's traffic" % STATES.get(state, state))
+    s.close()
+
+
+def capture(secs, save, start):
     import errno
     import usb.core
     import usb.util
@@ -65,6 +88,8 @@ def capture(secs, save):
                         os.path.join(os.path.dirname(os.path.abspath(__file__)), "udev", "70-tc66.rules")))
         raise
 
+    check_engine(start)
+
     tid = [0]
 
     def getdata(attr):
@@ -75,7 +100,7 @@ def capture(secs, save):
 
     out = open(save, "w") if save else None
     dec = Decoder()
-    print("Polling PdPacket (0x0010) for %.0f s (start the engine with pd.py arm / sniff)" % secs)
+    print("Polling PdPacket (0x0010) for %.0f s" % secs)
     end = time.time() + secs
     seen_vbus = None
     while time.time() < end:
@@ -109,12 +134,14 @@ def main():
     ap.add_argument("seconds", nargs="?", type=float, default=20,
                     help="capture duration (default: %(default)s)")
     ap.add_argument("--save", metavar="FILE", help="write raw PdPacket payloads (hex) to FILE (default: none)")
+    ap.add_argument("--no-start", action="store_true",
+                    help="don't start the sniffer when the PD engine is off (default: start it)")
     ap.add_argument("--replay", metavar="FILE", help="decode a --save file instead of capturing (default: none)")
     a = ap.parse_args()
     if a.replay:
         replay(a.replay)
     else:
-        capture(a.seconds, a.save)
+        capture(a.seconds, a.save, not a.no_start)
 
 
 if __name__ == "__main__":

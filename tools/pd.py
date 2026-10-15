@@ -20,11 +20,13 @@
   pd.py info [next]    the meter's PD screen text (pdinf): parsed source caps,
                        contract, cable, counters; `next` first advances the
                        screen's page as K2 does
-  pd.py ask <what>     (dev-pd builds, sink in contract) send a request to the
-                       source and let tools/pdcap.py capture its answer:
-                       srccap, snkcap, srccapext, status, ppsstatus, countries,
-                       srcinfo, revision, mfrinfo, discid, or
-                       raw:<type>[:<hex object>...] (type | 0x80 = extended)
+  pd.py ask <what>     (sink in contract) ask the source and print its decoded
+                       answer: srccapext, mfrinfo, discid, status, ppsstatus,
+                       srcinfo, revision, countries, snkcap, snkcapext; with a
+                       dev-pd build also srccap or raw:<type>[:<hex object>...]
+                       (type | 0x80 = extended)
+  pd.py cable          the cable e-marker's Discover Identity answer (decoded),
+                       if the source asked for it since the engine was armed
 
 DANGER: a granted request RAISES THE OUT-PORT VOLTAGE (9/12/15/20 V).
 Nothing should be attached downstream of the meter when triggering. `req`
@@ -39,24 +41,6 @@ sys.path.insert(0, __file__.rsplit("/", 1)[0] + "/lib")
 from tc66lib import open_meter  # noqa: E402
 import trigger_guard  # noqa: E402
 from pd_engine import *  # noqa: E402,F403 — engine layouts, PD spec names, formatting
-
-
-def xfer(s, pkt, rlen):
-    s.reset_input_buffer()
-    s.write(pkt)
-    return s.read(rlen)
-
-
-def ok_er(r, what):
-    if r[:2] == b"OK":
-        print("%s: OK" % what)
-        return True
-    if r[:2] == b"ER":
-        e = r[2] if len(r) > 2 else -1
-        print("%s: ER 0x%02x (%s)" % (what, e, ERRS.get(e, "I2C stage %d%s" % (
-            get(e, I2C_STAGE), " NACK/buserr" if get(e, I2C_NACK) else ""))))
-        return False
-    sys.exit("garbled reply: %r" % r)
 
 
 def read_caps(s):
@@ -101,14 +85,6 @@ def show_status(s):
     return st
 
 
-def read_status(s):
-    """pdsta -> the PDSTA_LEN-byte engine state."""
-    r = xfer(s, b"pdsta", 2 + PDSTA_LEN)
-    if r[:2] != b"OK" or len(r) < 2 + PDSTA_LEN:
-        sys.exit("garbled pdsta reply: %r" % r)
-    return r[2:]
-
-
 COLS = 22  # pdinfo::COLS
 
 
@@ -128,47 +104,41 @@ def show_info(s, advance=False):
         print("%s %2d | %s" % (mark, i, body[i * COLS:(i + 1) * COLS].decode("ascii", "replace")))
 
 
-# pdsnd: type byte = message type, PDSND_EXTENDED set for an extended message
-PDSND_EXTENDED = 0x80
-
-
-def ext_first_object(size, data):
-    """First data object of a one-chunk extended message: Extended Message
-    Header (chunked, `size` data bytes) + up to 2 data bytes, LE."""
-    eh = pack((EXTHDR_CHUNKED, 1), (EXTHDR_DATA_SIZE, size))
-    return eh | int.from_bytes(bytes(data).ljust(2, b"\0"), "little") << 16
-
-
-# pdsnd presets: (type byte, data objects)
-ASK = {
-    "srccap": (CTRL_GET_SOURCE_CAP, []),
-    "snkcap": (CTRL_GET_SINK_CAP, []),        # dual-role sources only
-    "srccapext": (CTRL_GET_SOURCE_CAP_EXT, []),  # PD 3.x from here on
-    "status": (CTRL_GET_STATUS, []),
-    "ppsstatus": (CTRL_GET_PPS_STATUS, []),
-    "countries": (CTRL_GET_COUNTRY_CODES, []),
-    "srcinfo": (CTRL_GET_SOURCE_INFO, []),
-    "revision": (CTRL_GET_REVISION, []),
-    "mfrinfo": (PDSND_EXTENDED | EXT_GET_MANUFACTURER_INFO,  # Table 6.56: target port, ref 0
-                [ext_first_object(2, [MANUFACTURER_TARGET_PORT, 0])]),
-}
+def print_frame(wire, sop=0, indent="  "):
+    line, details = pd_decode.Decoder().frame(wire, sop)
+    print(indent + line)
+    for d in details:
+        print(indent + "    " + d)
 
 
 def ask(s, what):
-    if what.startswith("raw:"):
+    """Send a request from the contracted sink and print the source's answer:
+    an INFO_REQUESTS name (pdask, every build), or `srccap` / raw:<...>
+    (pdsnd, dev-pd builds)."""
+    rev3 = read_status(s)[PDSTA_REV] >= REV_3_X
+    if what in INFO_REQUESTS:
+        req, verb = what, b"pdask"
+    elif what == "srccap":
+        req, verb = (CTRL_GET_SOURCE_CAP, []), b"pdsnd"
+    elif what.startswith("raw:"):
         f = what.split(":")[1:]
-        t, objs = int(f[0], 0), [int(x, 16) for x in f[1:]]
-    elif what == "discid":  # SOP Discover Identity REQ, SVDM version per the negotiated rev
-        rev3 = read_status(s)[PDSTA_REV] >= REV_3_X
-        t, objs = DATA_VENDOR_DEFINED, [pack((VDM_SVID, SVID_PD), (VDM_STRUCTURED, 1),
-                                             (VDM_VERSION_MAJOR, 1 if rev3 else 0),
-                                             (VDM_COMMAND_TYPE, VDM_REQ), (VDM_COMMAND, CMD_DISCOVER_IDENTITY))]
-    elif what in ASK:
-        t, objs = ASK[what]
+        req, verb = (int(f[0], 0), [int(x, 16) for x in f[1:]]), b"pdsnd"
     else:
         sys.exit("unknown request %r (pd.py --help)" % what)
-    pkt = b"pdsnd" + bytes([t]) + b"".join(o.to_bytes(4, "little") for o in objs)
-    ok_er(xfer(s, pkt, 3), "ask %s (type 0x%02x, %d objects)" % (what, t, len(objs)))
+    ans = ask_info(s, req, rev3, verb=verb)
+    if isinstance(ans, str):
+        print("ask %s: %s" % (what, ans))
+    else:
+        print("ask %s ->" % what)
+        print_frame(ans)
+
+
+def cable(s):
+    wire = read_frame(s, b"pdcbl")
+    if not wire:
+        print("no cable e-marker answer seen (the source didn't ask, or the cable has none)")
+    else:
+        print_frame(wire, sop=1)
 
 
 def main():
@@ -208,6 +178,8 @@ def main():
         show_info(s, len(argv) > 1 and argv[1] == "next")
     elif cmd == "ask":
         ask(s, argv[1])
+    elif cmd == "cable":
+        cable(s)
     elif cmd == "watch":
         secs = float(argv[1]) if len(argv) > 1 else 20
         end = time.time() + secs

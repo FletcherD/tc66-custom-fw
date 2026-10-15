@@ -149,16 +149,21 @@ device on the other port).
   is the source's cable probe at attach (listen-only phase until the first
   caps — see the e-marker section), so no device is needed to read the
   cable.
-- **Asking the source** (sink in contract, `dev-pd` builds: `pd.py ask
-  <what>`, answer read with `pdcap.py` / `tools/pdseq.py`): Get_Source_Cap,
-  Get_Source_Cap_Extended, Get_Manufacturer_Info, Get_Status,
-  Get_PPS_Status, Get_Source_Info, Get_Revision, Get_Country_Codes,
-  Discover Identity, or any raw message. All but Get_Source_Cap and Discover
-  Identity are PD 3.x messages. Bench (Apple 96 W, PD 2.0): Reject to
-  Get_Source_Cap_Extended, Get_Manufacturer_Info, Get_Status,
-  Get_Country_Codes; no answer to Discover Identity; Get_Source_Info
-  answered with Source_Capabilities (the charger reads the type as 4 bits).
-  A PD 3.x charger is needed for its identity.
+- **Asking the source** (sink in contract, every build: `pdask`/`pdans`,
+  `pd.py ask <what>` prints the decoded answer; `detect.py` asks them all):
+  Get_Source_Cap_Extended, Get_Manufacturer_Info, Discover Identity,
+  Get_Status, Get_PPS_Status, Get_Source_Info, Get_Revision,
+  Get_Country_Codes, Get_Sink_Cap(_Extended). All but Get_Sink_Cap are PD
+  3.x messages, so `detect.py` sends only Get_Sink_Cap to a PD 2.0 source.
+  Bench:
+  - Apple 96 W (PD 2.0): Reject to all of them; Get_Source_Info answered
+    with Source_Capabilities (it reads the type as 4 bits).
+  - A PD 3.0 charger (5/9/12/15/20 V 3 A + PPS 3.3-11 V): Not_Supported to
+    all but Get_PPS_Status, whose PPS_Status reports no values (0xFFFF/0xFF)
+    even in a PPS contract.
+
+  Identity answers are optional in the spec; Get_PPS_Status is the one a
+  PPS source must answer.
 - **Meter as listen-only sniffer** (`pdctl 3`, `pd.py sniff`, or entering
   the PD info screen): no Rd, no GoodCRC, never transmits; the receiver
   locks onto the CC carrying the source's Rp; every SOP/SOP′/SOP″ frame from
@@ -234,8 +239,8 @@ sink, or the load exceeds 30 mA (re-checked after the first settle; the
 meter's own supply reads 10–13 mA when the charger is on OUT). Ends with
 the PD engine off and D± released. Host: `detct\x01` starts a run,
 `detct` returns busy + the screen lines; `uv run tools/detect.py --device`.
-Doesn't show the cable e-marker (the PD screen and `pd.py info` do after a
-sink attach).
+Doesn't show the cable e-marker (the PD screen, `pd.py info`/`cable` and
+`detect.py` do after a sink attach).
 
 ## What we can learn — summary
 
@@ -251,7 +256,7 @@ sink attach).
 | PD revision, roles | message headers | yes | `pdcap.py`, `pdinf` |
 | Cable rating / vendor / speed | SOP′ Discover Identity | yes, the charger asks at attach (sniff, and sink before its first caps) | `pdcap.py`, PD screen |
 | Device (sink) identity | SOP Discover Identity ACK from the device — the charger, as DFP, asks; Sink_Capabilities_Extended | sniff: yes when answered (phones often NAK) | `pdcap.py` |
-| Charger identity | Source_Capabilities_Extended, Manufacturer_Info, or the charger's Discover Identity ACK (PD 3.x) | sniff: when the device asks; sink: we ask (`pd.py ask`, dev-pd); a PD 2.0 charger Rejects | `pdcap.py` |
+| Charger identity | Source_Capabilities_Extended, Manufacturer_Info, or the charger's Discover Identity ACK (PD 3.x) | sniff: when the device asks; sink: we ask (`pdask`); a PD 2.0 charger Rejects | `detect.py`, `pd.py ask`, `pdcap.py` |
 | QC2 requested level (by a device) | D± levels | yes, not implemented | — |
 | AFC/FCP traffic (device ↔ charger) | D− serial | needs timer capture, not implemented | — |
 | VBUS / current under the contract | INA226 | yes | everywhere (current unsigned) |
@@ -259,7 +264,9 @@ sink attach).
 ## Tools and verbs
 
 - `tools/detect.py` — full detection at 5 V: dividers, `qcdet`, AFC probe,
-  `fcprd` (if built), Type-C Rp + PD caps; nothing on the other port.
+  `fcprd` (if built), Type-C Rp + PD caps, the source's answers to the
+  info requests its PD revision allows (`--no-pd-info` skips), and the cable
+  e-marker if the charger read one; nothing on the other port.
   `--device` runs the on-device detection instead and prints its lines.
 - `tools/pd.py` — `arm` / `off` / `sniff` / `hardreset` / `status` / `caps` /
   `req` / `info` (the PD screen's lines) / `ask` (dev-pd: send a request

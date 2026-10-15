@@ -7,7 +7,8 @@ Host-side Python for the TC66 custom firmware. Run any script with
   - `tc66flash.py`: flash a release, go back to stock, back up the EEPROM (standalone).
   - `detect.py`: charger protocol detection at 5 V.
   - `pd.py`: PD sink / sniffer control, voltage requests, status, the PD screen text.
-  - `pdcap.py`: live PD capture with decoding (needs `udev/70-tc66.rules`); `--save` / `--replay`.
+  - `pdcap.py`: live PD capture with decoding (needs `udev/70-tc66.rules`); starts the sniffer
+    if the PD engine is off; `--save` / `--replay`.
   - `pdseq.py`: a capture around a sequence of `pd.py` steps.
   - `qc.py`: Quick Charge triggers.
   - `rawva.py` / `getva.py`: measurements.
@@ -31,7 +32,8 @@ Host-side Python for the TC66 custom firmware. Run any script with
   - `trigger_guard.py`: voltage limit + confirmation for trigger tools.
   - `pd_spec.py`: USB PD field layouts as named constants.
   - `pd_decode.py`: PD message decoder.
-  - `pd_engine.py`: the meter's PD engine interface (`pdsta` / `pdcap` layouts).
+  - `pd_engine.py`: the meter's PD engine interface (`pdsta` / `pdcap` layouts, `xfer` /
+    `ok_er` / `read_status`).
   - `km003c.py`: KM003C capture framing.
   - `rawva_proto.py`: the `rawva` reply.
 

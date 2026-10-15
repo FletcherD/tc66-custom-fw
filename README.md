@@ -159,10 +159,10 @@ image or stock.
   first.
 - **PD sniffing** (the meter's PD switch must be on):
   ```
-  uv run tools/pd.py sniff
   uv run tools/pdcap.py 60
   ```
-  then plug in the device. `uv run tools/pd.py hardreset` makes the charger
+  then plug in the device. If the meter's PD engine is off, `pdcap.py`
+  starts the sniffer itself (as `uv run tools/pd.py sniff` does). `uv run tools/pd.py hardreset` makes the charger
   and device renegotiate from scratch, and `uv run tools/pd.py off` ends
   sniffing. Notes:
   - **If `hardreset` does nothing,** check `pd.py status`. On our test unit

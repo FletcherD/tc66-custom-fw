@@ -64,11 +64,22 @@ pub const CTRL_GET_SOURCE_CAP: u32 = 7;
 pub const CTRL_GET_SINK_CAP: u32 = 8;
 pub const CTRL_WAIT: u32 = 12;
 pub const CTRL_SOFT_RESET: u32 = 13;
-pub const CTRL_NOT_SUPPORTED: u32 = 16; /* PD 3.x */
+pub const CTRL_NOT_SUPPORTED: u32 = 16; /* PD 3.x from here */
+pub const CTRL_GET_SOURCE_CAP_EXT: u32 = 17;
+pub const CTRL_GET_STATUS: u32 = 18;
+pub const CTRL_GET_PPS_STATUS: u32 = 20;
+pub const CTRL_GET_COUNTRY_CODES: u32 = 21;
+pub const CTRL_GET_SINK_CAP_EXT: u32 = 22;
+pub const CTRL_GET_SOURCE_INFO: u32 = 23;
+pub const CTRL_GET_REVISION: u32 = 24;
 pub const DATA_SOURCE_CAP: u32 = 1;
 pub const DATA_REQUEST: u32 = 2;
 pub const DATA_SINK_CAP: u32 = 4;
 pub const DATA_VENDOR_DEFINED: u32 = 15;
+pub const EXT_GET_MANUFACTURER_INFO: u32 = 6; /* Table 6.47 */
+/* a message is at most the header + 7 data objects */
+pub const MAX_DATA_OBJECTS: usize = 7;
+pub const MAX_MSG_LEN: usize = 2 + 4 * MAX_DATA_OBJECTS;
 
 /* ---- Power Data Objects (Tables 6.6 - 6.16) ---- */
 pub const PDO_TYPE: F = f(30, 2);
@@ -103,8 +114,11 @@ pub const RDO_AVS_VOLTAGE: F = fu(9, 12, 25); /* mV */
 pub const RDO_APDO_CURRENT: F = fu(0, 7, 50); /* mA, PPS / AVS */
 
 /* ---- Structured VDM header (Table 6.33) ---- */
+pub const VDM_SVID: F = f(16, 16);
+pub const SVID_PD: u32 = 0xFF00;
 pub const VDM_STRUCTURED: F = f(15, 1);
 pub const VDM_COMMAND_TYPE: F = f(6, 2);
+pub const VDM_REQ: u32 = 0;
 pub const VDM_ACK: u32 = 1;
 pub const VDM_COMMAND: F = f(0, 5);
 pub const CMD_DISCOVER_IDENTITY: u32 = 1;

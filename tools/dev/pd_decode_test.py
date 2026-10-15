@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.join(TOOLS, "lib"))
 from pd_decode import Decoder  # noqa: E402
 from pd_spec import *  # noqa: E402,F403 — the spec's named fields and values
 import km003c  # noqa: E402
+from pd_engine import answer_kind  # noqa: E402
 
 
 def hdr(typ, nobj=0, src=True, dfp=True, rev=REV_2_0, mid=0, ext=False, cable=None):
@@ -275,6 +276,21 @@ def run(verbose):
     if miss:
         print("   MISSING: %s" % miss)
         fails += 1
+    # pd_engine.answer_kind: what detect.py makes of a source's answer
+    kinds = [
+        ("ppsstatus", ext(EXT_PPS_STATUS, PPSSDB), "answer"),  # the PD 3.0 charger's reply
+        ("srccapext", hdr(CTRL_NOT_SUPPORTED, rev=REV_3_X), "unsupported"),
+        ("snkcap", hdr(CTRL_REJECT), "unsupported"),
+        ("srcinfo", data(DATA_SOURCE_CAP, APPLE_CAPS), "unexpected"),  # Apple: type 23 read as 7
+        ("discid", data(DATA_VENDOR_DEFINED, [PHONE_NAK]), "unsupported"),
+        ("discid", data(DATA_VENDOR_DEFINED, APPLE_CABLE_ACK), "answer"),
+        ("srccapext", ext(EXT_SOURCE_CAP_EXT, SCEDB), "answer"),
+    ]
+    for name, wire, want in kinds:
+        got = answer_kind(name, wire)
+        if verbose or got != want:
+            print("== answer_kind %s: %s (want %s)" % (name, got, want))
+        fails += got != want
     # pdcap.py --replay round trip: one PdPacket with a connect event and the Apple Source_Cap frame
     wire = CASES[0][2]
     pkt = bytes(km003c.PRE_LEN) + bytes([km003c.EV_CONNECTION, 10, 0, 0, 0, km003c.EV_CONNECT]) + \
@@ -289,7 +305,7 @@ def run(verbose):
     if verbose or not ok:
         print("== replay\n%s%s" % (r.stdout, r.stderr))
     fails += not ok
-    print("%d/%d cases failed" % (fails, len(CASES) + 2))
+    print("%d/%d cases failed" % (fails, len(CASES) + 2 + len(kinds)))
     return fails
 
 

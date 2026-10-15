@@ -48,6 +48,10 @@ struct Info {
     pdo: u32,
     cable_vdo: u32, /* passive/active cable VDO from a SOP' Discover Identity ACK */
     cable_vid: u16,
+    /* that Discover Identity ACK as received (header + objects, LE), for
+     * `pdcbl`; cable_id_len 0 = none */
+    cable_id: [u8; MAX_MSG_LEN],
+    cable_id_len: u8,
     cable: u8, /* CABLE_NONE / CABLE_LAYOUT_PD2 / CABLE_LAYOUT_PD3 */
     msgs: u16,
     bad_crc: u16,
@@ -73,6 +77,8 @@ static INFO: Racy<Info> = Racy(core::cell::UnsafeCell::new(Info {
     pdo: 0,
     cable_vdo: 0,
     cable_vid: 0,
+    cable_id: [0; MAX_MSG_LEN],
+    cable_id_len: 0,
     cable: 0,
     msgs: 0,
     bad_crc: 0,
@@ -99,6 +105,8 @@ pub fn reset() {
         pdo: 0,
         cable_vdo: 0,
         cable_vid: 0,
+        cable_id: [0; MAX_MSG_LEN],
+        cable_id_len: 0,
         cable: 0,
         msgs: 0,
         bad_crc: 0,
@@ -121,6 +129,7 @@ pub fn source_gone() {
     let s = st();
     drop_caps(s);
     s.cable = CABLE_NONE;
+    s.cable_id_len = 0;
 }
 
 /// pd.rs capture event code (pdsta.rs CAP_*: disconnect, bad CRC and hard
@@ -199,11 +208,23 @@ pub fn on_msg(hdr: u16, objs: &[u8], sop: u8) {
             {
                 s.cable_vid = IDH_VID.get(idh) as u16;
                 s.cable_vdo = obj(objs, DISCID_PRODUCT_TYPE_VDO);
+                let n = (2 + objs.len()).min(MAX_MSG_LEN);
+                s.cable_id[..2].copy_from_slice(&hdr.to_le_bytes());
+                s.cable_id[2..n].copy_from_slice(&objs[..n - 2]);
+                s.cable_id_len = n as u8;
                 s.cable = if HDR_SPEC_REV.get(h) >= REV_3_X { CABLE_LAYOUT_PD3 } else { CABLE_LAYOUT_PD2 };
             }
         }
         _ => {}
     }
+}
+
+/// `pdcbl`: copy the cable's Discover Identity ACK frame; returns its length
+/// (0 = no e-marker seen since the engine was armed / the source left).
+pub fn cable_frame(out: &mut [u8; MAX_MSG_LEN]) -> u8 {
+    let s = st();
+    out.copy_from_slice(&s.cable_id);
+    s.cable_id_len
 }
 
 /* ---- text ---- */

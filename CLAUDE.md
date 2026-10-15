@@ -32,7 +32,7 @@ charge triggers (pd.rs: FUSB302 PD 2.0/3.0 sink — `pdctl`/`pdsta`/`pdcap`/
 charger and device negotiating through the meter, either orientation, incl.
 SOP'/SOP'' cable e-marker traffic, attach/detach, bad-CRC and hard-reset
 events; `pdctl 2` while sniffing re-triggers the negotiation; read with
-tools/pdcap.py (no sudo with tools/udev/70-tc66.rules installed — it is, on the bench host) — decodes all PD message types incl. identities,
+tools/pdcap.py (no sudo with tools/udev/70-tc66.rules installed — it is, on the bench host; starts the sniffer if the engine is off, `--no-start` not) — decodes all PD message types incl. identities,
 extended caps/status, chunk reassembly via tools/lib/pd_decode.py (layouts are
 the named fields of tools/lib/pd_spec.py, from the USB PD R3.2 spec; the
 firmware's are rust/src/pdspec.rs + pdsta.rs — use them, not raw shifts; regression vectors in tools/dev/pd_decode_test.py;
@@ -40,7 +40,8 @@ firmware's are rust/src/pdspec.rs + pdsta.rs — use them, not raw shifts; regre
 around a sequence of pd.py steps); tools/dev/pdlog_check.py scores a capture.
 The sink also captures the source's cable probe at attach (listen-only, no
 AUTO_CRC, until the first caps — FIRMWARE.md "Cable-listen phase"), and in
-`dev-pd` builds asks the source for PD 3.x info (`pdsnd` + `pd.py ask`; the
+every build can ask the source for PD 3.x info (`pdask`/`pdans` + `pd.py ask`, `detect.py`;
+`pdsnd` in `dev-pd` sends anything; the
 FUSB302 sends type 17 as a GoodCRC — TX completes on the FIFO GoodCRC);
 bench-verified
 with an Apple charger + Pixel/Moto; this unit's OUT-port CC2 contact is

@@ -1,11 +1,14 @@
 """Host side of the meter's PD engine interface (rust/src/pd.rs, pdsta.rs):
 engine states, the `pdsta` / `pdcap` reply layouts, the FUSB302 status bits
 and error codes it reports, and PDO / header formatting for the CLI tools
-(tools/pd.py, tools/detect.py).
+(tools/pd.py, tools/detect.py), and the serial helpers that read and drive it
+(tools/pd.py, tools/pdcap.py).
 """
+import sys
+
 import pd_decode
 from pd_spec import *  # noqa: F403 — the PD spec's named fields and values
-from pd_spec import F, bit, get, u16, u32, val  # noqa: F401
+from pd_spec import F, bit, get, pack, u16, u32, val  # noqa: F401
 
 # engine states (rust/src/pd.rs ST_*)
 ST_OFF, ST_WAIT_ATTACH, ST_LISTEN, ST_WAIT_ACCEPT, ST_WAIT_PSRDY = 0, 1, 2, 3, 4
@@ -99,3 +102,143 @@ def hdr_name(h):
     else:
         name = CTRL_MSGS.get(t, "type%d" % t)
     return "%s(0x%04x)" % (name, h)
+
+
+def xfer(s, pkt, rlen):
+    s.reset_input_buffer()
+    s.write(pkt)
+    return s.read(rlen)
+
+
+def ok_er(r, what):
+    if r[:2] == b"OK":
+        print("%s: OK" % what)
+        return True
+    if r[:2] == b"ER":
+        e = r[2] if len(r) > 2 else -1
+        print("%s: ER 0x%02x (%s)" % (what, e, ERRS.get(e, "I2C stage %d%s" % (
+            get(e, I2C_STAGE), " NACK/buserr" if get(e, I2C_NACK) else ""))))
+        return False
+    sys.exit("garbled reply: %r" % r)
+
+
+def read_status(s):
+    """pdsta -> the PDSTA_LEN-byte engine state."""
+    r = xfer(s, b"pdsta", 2 + PDSTA_LEN)
+    if r[:2] != b"OK" or len(r) < 2 + PDSTA_LEN:
+        sys.exit("garbled pdsta reply: %r" % r)
+    return r[2:]
+
+
+# ---- information requests from the sink (pdask / pdsnd, answers via pdans) ----
+
+PDSND_EXTENDED = 0x80  # pdask / pdsnd type byte: message type, this bit = extended
+FRAME_MAX = 2 + 4 * 7  # header + 7 data objects (pdans / pdcbl payload)
+
+
+def ext_first_object(size, data):
+    """First data object of a one-chunk extended message: Extended Message
+    Header (chunked, `size` data bytes) + up to 2 data bytes, LE."""
+    eh = pack((EXTHDR_CHUNKED, 1), (EXTHDR_DATA_SIZE, size))
+    return eh | int.from_bytes(bytes(data).ljust(2, b"\0"), "little") << 16
+
+
+def discover_identity_req(rev3):
+    """SOP Discover Identity REQ VDM header (SVDM 2.0 at PD 3.x, else 1.0)."""
+    return pack((VDM_SVID, SVID_PD), (VDM_STRUCTURED, 1), (VDM_VERSION_MAJOR, 1 if rev3 else 0),
+                (VDM_COMMAND_TYPE, VDM_REQ), (VDM_COMMAND, CMD_DISCOVER_IDENTITY))
+
+
+# read-only information requests the firmware's `pdask` accepts (pd.rs `ask`):
+# name -> (type byte, data objects); None = built per call (discid)
+INFO_PD2 = {"snkcap"}  # valid from a PD 2.0 sink; the rest are PD 3.x
+INFO_REQUESTS = {
+    "srccapext": (CTRL_GET_SOURCE_CAP_EXT, []),  # PD 3.x
+    "mfrinfo": (PDSND_EXTENDED | EXT_GET_MANUFACTURER_INFO,  # Table 6.56: target port, ref 0
+                [ext_first_object(2, [MANUFACTURER_TARGET_PORT, 0])]),
+    "discid": None,                                # Discover Identity (UFP-initiated: PD 3.x)
+    "status": (CTRL_GET_STATUS, []),
+    "ppsstatus": (CTRL_GET_PPS_STATUS, []),
+    "srcinfo": (CTRL_GET_SOURCE_INFO, []),
+    "revision": (CTRL_GET_REVISION, []),
+    "countries": (CTRL_GET_COUNTRY_CODES, []),
+    "snkcap": (CTRL_GET_SINK_CAP, []),            # dual-role sources only
+    "snkcapext": (CTRL_GET_SINK_CAP_EXT, []),
+}
+
+
+# the answer each request expects: (extended?, message type) — Tables 6.4-6.47
+INFO_ANSWERS = {
+    "srccapext": (True, EXT_SOURCE_CAP_EXT), "mfrinfo": (True, EXT_MANUFACTURER_INFO),
+    "discid": (False, DATA_VENDOR_DEFINED), "status": (True, EXT_STATUS),
+    "ppsstatus": (True, EXT_PPS_STATUS), "srcinfo": (False, DATA_SOURCE_INFO),
+    "revision": (False, DATA_REVISION), "countries": (True, EXT_COUNTRY_CODES),
+    "snkcap": (False, DATA_SINK_CAP), "snkcapext": (True, EXT_SINK_CAP_EXT),
+}
+
+
+def answer_kind(name, wire):
+    """'answer' (the expected response; a Discover Identity NAK/BUSY counts
+    as 'unsupported'), 'unsupported' (Not_Supported / Reject) or
+    'unexpected'."""
+    h = u16(wire, 0)
+    ext, typ, nobj = get(h, HDR_EXTENDED), get(h, HDR_MSG_TYPE), get(h, HDR_NUM_OBJECTS)
+    if not ext and not nobj and typ in (CTRL_NOT_SUPPORTED, CTRL_REJECT):
+        return "unsupported"
+    if (bool(ext), typ) != INFO_ANSWERS[name] or (not ext and not nobj):
+        return "unexpected"
+    if typ == DATA_VENDOR_DEFINED and not ext and get(u32(wire, 2), VDM_COMMAND_TYPE) != VDM_ACK:
+        return "unsupported"
+    return "answer"
+
+
+def request_bytes(name, rev3):
+    """(type byte, data objects) of an INFO_REQUESTS entry."""
+    if name == "discid":
+        return DATA_VENDOR_DEFINED, [discover_identity_req(rev3)]
+    return INFO_REQUESTS[name]
+
+
+def read_frame(s, verb):
+    """pdans / pdcbl -> the frame (header + objects) or None if none yet."""
+    r = xfer(s, verb, 3 + FRAME_MAX)
+    if r[:2] != b"OK" or len(r) < 3 or len(r) < 3 + r[2]:
+        return None
+    return r[3:3 + r[2]] or None
+
+
+def _unsolicited(wire):
+    """The source's own VDM request (e.g. its Discover Identity to us) that
+    arrived first instead of the answer."""
+    h = u16(wire, 0)
+    return (get(h, HDR_NUM_OBJECTS) and get(h, HDR_MSG_TYPE) == DATA_VENDOR_DEFINED
+            and not get(h, HDR_EXTENDED) and get(u32(wire, 2), VDM_COMMAND_TYPE) == VDM_REQ)
+
+
+def ask_info(s, name, rev3, verb=b"pdask", timeout=0.5, tries=3):
+    """Send an information request from the contracted sink and wait for the
+    source's answer -> its frame, or an error string."""
+    import time
+    t, objs = request_bytes(name, rev3) if name in INFO_REQUESTS else name
+    pkt = verb + bytes([t]) + b"".join(o.to_bytes(4, "little") for o in objs)
+    for _ in range(tries):
+        sent = False
+        for _ in range(10):  # the engine may be busy with its own TX
+            r = xfer(s, pkt, 3)
+            if r[:2] == b"OK":
+                sent = True
+                break
+            time.sleep(0.05)
+        if not sent:
+            return "refused (%r)" % r
+        end = time.time() + timeout
+        while time.time() < end:
+            wire = read_frame(s, b"pdans")
+            if wire:
+                if _unsolicited(wire) and t != DATA_VENDOR_DEFINED:
+                    break  # not our answer: ask again
+                return wire
+            time.sleep(0.02)
+        else:
+            return "no answer"
+    return "no answer"

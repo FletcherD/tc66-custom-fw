@@ -18,7 +18,12 @@ modes):
               voltages, 0x22 max power, 0x30+k voltages) — needs a firmware
               built with the `fcp` feature; untested against a real charger
   5. PD       pdctl 1: the sink takes the 5 V PDO; pdsta (Type-C Rp level),
-              pdcap (Source_Capabilities); then pdctl 0
+              pdcap (Source_Capabilities); then asks the source for its
+              extended info (pdask/pdans: Source_Capabilities_Extended,
+              Manufacturer_Info, Discover Identity, Status, PPS_Status,
+              Source_Info, Revision, Country_Codes, Sink caps — mostly PD 3.x;
+              --no-pd-info skips) and prints the cable e-marker if the
+              charger read one (pdcbl); then pdctl 0
 Between steps `qcoff` releases D+/D- and the charger gets time to fall back.
 
 --device runs the same detection ON the meter instead (the `detct` verb —
@@ -42,8 +47,10 @@ import serial  # noqa: E402
 from tc66lib import meter_candidates  # noqa: E402
 from pd_engine import (decode_pdo, PDSTA_LEN, PDSTA_STATE, PDSTA_CC, PDSTA_CAPS, PDSTA_STATUS0,  # noqa: E402
                 PDSTA_REV, ST_WAIT_ATTACH, ST_LISTEN, ST_CONTRACT, STATUS0_ACTIVITY, STATUS0_BC_LVL,
-                ENGINE_REVS, PDCAP_LEN, parse_caps)
-from pd_spec import get  # noqa: E402
+                ENGINE_REVS, PDCAP_LEN, parse_caps, INFO_REQUESTS, INFO_PD2, ask_info, answer_kind,
+                read_frame)
+from pd_decode import Decoder  # noqa: E402
+from pd_spec import REV_3_X, get  # noqa: E402
 from rawva_proto import rawva  # noqa: E402
 
 QC_CLASS = {0: "no D+/D- short (not a dedicated charger)",
@@ -131,6 +138,32 @@ def device_run(s, timeout):
         sys.exit("timed out while the run was still in progress")
 
 
+def pd_info(s, rev3):
+    """Ask the source (5 V contract) the read-only info requests its PD
+    revision allows and print what it answers; the rest on summary lines."""
+    names = [n for n in INFO_REQUESTS if rev3 or n in INFO_PD2]
+    print("[PD info] asked the source%s:" % ("" if rev3 else " (PD 2.0: the extended requests are PD 3.x only)"))
+    unsupported, silent, odd = [], [], []
+    for name in names:
+        ans = ask_info(s, name, rev3)
+        if isinstance(ans, str):
+            silent.append(name)
+            continue
+        kind = answer_kind(name, ans)
+        line, details = Decoder().frame(ans, 0)
+        if kind == "unsupported":
+            unsupported.append(name)
+        elif kind == "unexpected":
+            odd.append("%s (got %s)" % (name, line.split()[0]))
+        else:
+            print("  %s -> %s" % (name, line.split()[0]))
+            for d in details:
+                print("      " + d)
+    for label, items in (("not supported", unsupported), ("no answer", silent), ("unexpected answer", odd)):
+        if items:
+            print("  %s: %s" % (label, ", ".join(items)))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -140,6 +173,8 @@ def main():
                     help="seconds to wait for PD Source_Capabilities (default: %(default)s)")
     ap.add_argument("--no-fcp", action="store_true", help="skip the FCP step (default: off)")
     ap.add_argument("--no-pd", action="store_true", help="skip the PD step (default: off)")
+    ap.add_argument("--no-pd-info", action="store_true",
+                    help="don't ask a PD source for its extended info (default: off)")
     ap.add_argument("--device", action="store_true",
                     help="run the meter's own detection (detct) and print its result (default: off)")
     ap.add_argument("--timeout", type=float, default=30.0,
@@ -221,6 +256,14 @@ def main():
                 print(f"[PD] {rev}, {len(pd_caps)} PDO(s):" if pd_caps else "[PD] no Source_Capabilities")
                 for i, p in enumerate(pd_caps, 1):
                     print("  " + decode_pdo(i, p))
+                if st[PDSTA_STATE] == ST_CONTRACT and not a.no_pd_info:
+                    pd_info(s, st[PDSTA_REV] >= REV_3_X)
+                cable = read_frame(s, b"pdcbl")
+                if cable:
+                    line, details = Decoder().frame(cable, 1)
+                    print("[Cable] e-marker (the charger read it):")
+                    for d in details[1:] if details and details[0].startswith("VDM ") else details:
+                        print("  " + d)
         cmd(s, b"pdctl\x00", 2, 1.0)
 
     print("\nsummary:", ", ".join(x for x in [

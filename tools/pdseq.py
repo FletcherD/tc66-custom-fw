@@ -28,7 +28,8 @@ def main():
     ap.add_argument("steps", nargs="+", help="pd.py commands (words joined by ':') or wait:<s>")
     a = ap.parse_args()
 
-    cmd = ["uv", "run", "-q", os.path.join(HERE, "pdcap.py"), str(a.secs)] + (["--save", a.save] if a.save else [])
+    cmd = ["uv", "run", "-q", os.path.join(HERE, "pdcap.py"), str(a.secs), "--no-start"]
+    cmd += ["--save", a.save] if a.save else []
     cap = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     t0 = time.time()
     time.sleep(1)

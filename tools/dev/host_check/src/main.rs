@@ -18,6 +18,7 @@ mod ntc;
 mod aes256;
 #[path = "../../../../rust/src/text.rs"]
 mod text;
+#[allow(dead_code)] /* cable_frame: the pdcbl verb only */
 #[path = "../../../../rust/src/pdinfo.rs"]
 mod pdinfo;
 #[allow(dead_code)]

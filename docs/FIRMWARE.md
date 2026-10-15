@@ -596,12 +596,17 @@ past the ~10 s keepalive deadline).
   `tx_pend` stuck without the FIFO path. (The Apple 96 W, also PD 2.0,
   answers Get_Source_Info — type 23 — with its Source_Capabilities: 23 & 0xF
   = Get_Source_Cap.)
-- **`pdsnd`** (`dev-pd` group): sends one host-built SOP message from a
-  contracted sink (`pd.py ask srccapext|mfrinfo|status|discid|…|raw:…`);
-  the source's next message is its answer and is never Not_Supported'ed;
-  `pdsta` byte 20 shows tx_pend / cable-listen / asked. Read the answer
-  with `pdcap.py` (or `tools/pdseq.py`, which runs a capture around a
-  sequence of `pd.py` steps).
+- **Asking the source** (`pd::ask` / `send_raw`): `pdask` (`triggers`, every
+  build) sends one host-built read-only request from a contracted sink —
+  the whitelist is Get_Sink_Cap, the PD 3.x Get_* control messages,
+  Get_Manufacturer_Info and a Discover Identity REQ, so it can never change
+  the contract; `pdsnd` (`dev-pd`) sends anything. The source's next
+  non-GoodCRC message is the answer: never Not_Supported'ed, kept as a raw
+  frame (`ANSWER`, .bss) for `pdans`. `pdsta` byte 20 shows tx_pend /
+  cable-listen / asked. The cable's Discover Identity ACK is kept raw too
+  (pdinfo.rs `cable_id`, for `pdcbl`). Host: `pd.py ask <what>` / `pd.py
+  cable` print them decoded; `detect.py` asks everything the source's PD
+  revision allows (tools/lib/pd_engine.py `ask_info`, `answer_kind`).
 - **Open:** a rare sticky `pdsta` error 0x84 (I²C NACK/bus error while
   writing a byte) on the FUSB302 FIFO register 0x43 — about 1 in 10 sink
   sessions, often the first arm after boot; present before the cable-listen
@@ -772,7 +777,10 @@ PD traffic.
   Chromium EC `include/usb_pd.h` and ST's stm32-mw-usbpd-core `usbpd_def.h`
   — use the spec when extending the decoder, and add a vector to
   `tools/dev/pd_decode_test.py`. `--save FILE` writes the raw PdPacket
-  payloads, `--replay FILE` re-decodes them without the meter. Opening
+  payloads, `--replay FILE` re-decodes them without the meter. It reads
+  `pdsta` over CDC first and starts the sniffer (`pdctl 3`) if the engine
+  is off; an armed sink is left alone; `--no-start` (used by `pdseq.py`)
+  never touches the engine. Opening
   the device node as a user needs the udev rule `tools/udev/70-tc66.rules`
   (plugdev group + uaccess); otherwise only root can. It polls back-to-back while events
   flow: one 64-B packet carries only one or two events and the ring has 8

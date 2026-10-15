@@ -124,8 +124,7 @@ const RX_TOKEN_SOP2_DEBUG: u8 = 3;
 
 /* INT_N on PA15 */
 const INT_N_PIN: u32 = 15;
-/* pdsnd type byte: message type, this bit set for an extended message */
-#[cfg(feature = "dev-pd")]
+/* pdask / pdsnd type byte: message type, this bit set for an extended message */
 const PDSND_EXTENDED: u8 = 0x80;
 /* the Sink_Capabilities we answer Get_Sink_Cap with: fixed 5 V, 100 mA */
 const SINK_PDO_MV: u32 = 5000;
@@ -567,21 +566,85 @@ pub fn request(idx: u8, mv: u16, ma: u16) -> Result<(), u8> {
     }
 }
 
-/// `pdsnd`: send one host-built SOP message from a contracted sink. `t` =
-/// message type (bit 7: extended), `objs` = its data objects (LE, ≤ 7; an
-/// extended message's first object starts with its extended header); the
-/// header's rev, roles and message id are ours. The source's next message is
-/// taken as the answer (captured, never Not_Supported'ed).
+/// A raw PD message (header + data objects, LE) kept for the host.
+struct Frame {
+    len: u8,
+    b: [u8; MAX_MSG_LEN],
+}
+
+/// The source's answer to the last pdask / pdsnd request (`pdans`).
+/// Thread-exclusive like PD.
+static ANSWER: Racy<Frame> = Racy(core::cell::UnsafeCell::new(Frame { len: 0, b: [0; MAX_MSG_LEN] }));
+
+#[inline(always)]
+fn answer_buf() -> &'static mut Frame {
+    unsafe { &mut *ANSWER.0.get() }
+}
+
+/// `pdsnd` (dev-pd): send one host-built SOP message from a contracted sink.
+/// `t` = message type (bit 7: extended), `objs` = its data objects (LE, ≤ 7;
+/// an extended message's first object starts with its extended header);
+/// the header's rev, roles and message id are ours. The source's next
+/// message is its answer (kept for `pdans`, captured, never
+/// Not_Supported'ed).
 #[cfg(feature = "dev-pd")]
 #[inline(never)]
 pub fn send_raw(t: u8, objs: &[u8]) -> Result<(), u8> {
+    send_request(t, objs)
+}
+
+/// `pdask`: like `pdsnd`, limited to read-only information requests —
+/// Get_Sink_Cap and the PD 3.x Get_* control messages, Get_Manufacturer_Info,
+/// a Discover Identity REQ. Never a Request: it can't change the contract.
+#[inline(never)]
+pub fn ask(t: u8, objs: &[u8]) -> Result<(), u8> {
+    let ty = HDR_MSG_TYPE.get(t as u32);
+    let ok = if t & PDSND_EXTENDED != 0 {
+        ty == EXT_GET_MANUFACTURER_INFO && objs.len() == 4
+    } else if objs.is_empty() {
+        matches!(
+            ty,
+            CTRL_GET_SINK_CAP
+                | CTRL_GET_SOURCE_CAP_EXT
+                | CTRL_GET_STATUS
+                | CTRL_GET_PPS_STATUS
+                | CTRL_GET_COUNTRY_CODES
+                | CTRL_GET_SINK_CAP_EXT
+                | CTRL_GET_SOURCE_INFO
+                | CTRL_GET_REVISION
+        )
+    } else {
+        let h = objs.get(..4).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+        ty == DATA_VENDOR_DEFINED
+            && objs.len() == 4
+            && VDM_SVID.get(h) == SVID_PD
+            && VDM_STRUCTURED.get(h) != 0
+            && VDM_COMMAND_TYPE.get(h) == VDM_REQ
+            && VDM_COMMAND.get(h) == CMD_DISCOVER_IDENTITY
+    };
+    if !ok {
+        return Err(E_BAD_ARGS);
+    }
+    send_request(t, objs)
+}
+
+fn send_request(t: u8, objs: &[u8]) -> Result<(), u8> {
     let p = pd();
-    if p.state != ST_CONTRACT || p.tx_pend || objs.len() % 4 != 0 || objs.len() > 28 {
+    if p.state != ST_CONTRACT || p.tx_pend || objs.len() % 4 != 0 || objs.len() > 4 * MAX_DATA_OBJECTS {
         return Err(E_BAD_ARGS);
     }
     p.asked = true;
     p.events = 0; /* pdsta then shows what this exchange raised */
+    answer_buf().len = 0;
     send_frame(p, HDR_MSG_TYPE.get(t as u32), t & PDSND_EXTENDED != 0, objs)
+}
+
+/// `pdans`: copy the stored answer frame; returns its length (0 = none yet).
+#[inline(never)]
+pub fn answer_frame(out: &mut [u8; MAX_MSG_LEN]) -> u8 {
+    let a = answer_buf();
+    out.copy_from_slice(&a.b);
+    a.len
 }
 
 /// `pdctl 2`: send a PD Hard Reset (Control3 SEND_HARD_RESET); while
@@ -1120,6 +1183,11 @@ fn rx_frame(p: &mut Pd, now: u32) -> Result<(), u8> {
     let answer = p.asked && !(nobj == 0 && mtype == CTRL_GOODCRC);
     if answer {
         p.asked = false;
+        let a = answer_buf();
+        let n = 2 + 4 * nobj;
+        a.b[..2].copy_from_slice(&hdr.to_le_bytes());
+        a.b[2..n].copy_from_slice(&body[..4 * nobj]);
+        a.len = n as u8;
     }
 
     if nobj == 0 {

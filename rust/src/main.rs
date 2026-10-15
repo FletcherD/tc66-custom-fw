@@ -97,7 +97,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 164;
+const BUILD_ID: u32 = 165;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -586,10 +586,37 @@ fn on_packet(buf: &[u8]) {
             /* pdsnd <type> <objects…>: send one SOP message from the
              * contracted sink (type bit 7 = extended) — pd::send_raw */
             let r = match buf.get(5) {
-                Some(&t) => pd::send_raw(t, &buf[6..]),
+                Some(&t) => pd::send_raw(t, buf.get(6..).unwrap_or(&[])),
                 None => Err(0x0F),
             };
             reply_ok_er(r);
+        }
+    } else if match5(buf, b"pdask") {
+        #[cfg(feature = "triggers")]
+        {
+            /* pdask <type> <objects…>: a read-only info request from the
+             * contracted sink (whitelist: pd::ask); answer via pdans */
+            let r = match buf.get(5) {
+                Some(&t) => pd::ask(t, buf.get(6..).unwrap_or(&[])),
+                None => Err(0x0F),
+            };
+            reply_ok_er(r);
+        }
+    } else if match5(buf, b"pdans") {
+        #[cfg(feature = "triggers")]
+        {
+            /* pdans -> "OK" + len + the source's answer frame (len 0 = none yet) */
+            let mut f = [0u8; pdspec::MAX_MSG_LEN];
+            let n = pd::answer_frame(&mut f);
+            reply_frame(n, &f);
+        }
+    } else if match5(buf, b"pdcbl") {
+        #[cfg(feature = "triggers")]
+        {
+            /* pdcbl -> "OK" + len + the cable's Discover Identity ACK (0 = none) */
+            let mut f = [0u8; pdspec::MAX_MSG_LEN];
+            let n = pdinfo::cable_frame(&mut f);
+            reply_frame(n, &f);
         }
     } else if match5(buf, b"pdreq") {
         #[cfg(feature = "triggers")]
@@ -1632,6 +1659,18 @@ fn powerz_payload() -> [u8; powerz::ADC_PAYLOAD_LEN] {
     put16(28, c2 as u32 * 10);
     put16(34, m.vdd_mv * 10);
     p
+}
+
+/// "OK" + len + the first `len` bytes of a PD message frame.
+#[cfg(feature = "triggers")]
+#[inline(never)]
+fn reply_frame(len: u8, f: &[u8; pdspec::MAX_MSG_LEN]) {
+    let mut r = [0u8; 3 + pdspec::MAX_MSG_LEN];
+    r[..2].copy_from_slice(b"OK");
+    let n = (len as usize).min(pdspec::MAX_MSG_LEN);
+    r[2] = n as u8;
+    r[3..3 + n].copy_from_slice(&f[..n]);
+    write_all(&r[..3 + n]);
 }
 
 #[inline(never)]
