@@ -97,7 +97,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 167;
+const BUILD_ID: u32 = 168;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -528,6 +528,9 @@ fn on_packet(buf: &[u8]) {
     } else if match5(buf, b"i2crd") {
         #[cfg(feature = "dev-board")]
         do_i2crd(buf);
+    } else if match5(buf, b"inaxp") {
+        #[cfg(feature = "dev-ina")]
+        do_inaxp(buf);
     } else if match5(buf, b"adcrd") {
         #[cfg(feature = "dev-board")]
         do_adcrd(buf);
@@ -1150,6 +1153,26 @@ fn do_i2crd(buf: &[u8]) {
     let mut reply = [0u8; 34];
     let n = i2c_command(buf, &mut reply);
     write_all(&reply[..n]);
+}
+
+/// dev verb: inaxp <cfg_hi> <cfg_lo> <n 1..=32> -> "OK" + ina::experiment's
+/// record, or "ER" + stage
+#[cfg(feature = "dev-ina")]
+#[inline(never)]
+fn do_inaxp(buf: &[u8]) {
+    let (Some(&hi), Some(&lo), Some(&n)) = (buf.get(5), buf.get(6), buf.get(7)) else {
+        return write_all(b"ER\x0f");
+    };
+    let mut reply = [0u8; 2 + 8 + 32 * 8];
+    match ina::experiment(u16::from_be_bytes([hi, lo]), n as usize, &mut reply[2..]) {
+        Ok(len) => {
+            reply[..2].copy_from_slice(b"OK");
+            if let Some(r) = reply.get(..2 + len) {
+                write_all(r);
+            }
+        }
+        Err(stage) => write_all(&[b'E', b'R', stage]),
+    }
 }
 
 /// dev verb: adcrd <ch> -> "OK" + u32 LE sum-of-16, or "ER" + stage

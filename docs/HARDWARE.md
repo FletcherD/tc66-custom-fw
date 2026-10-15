@@ -163,6 +163,7 @@ Verbs:
 | `pcprf` | 516 B plaintext | our dev verb: PC-profiler ring dump (u32 counter + 128 u32 PCs; FIRMWARE.md "PC profiler", tools/dev/pcprofile.py) |
 | `i2crd` | `OK`+data / `ER`+diag | our dev verb: `i2crd <addr7> <wlen 0..=2> <w0> <w1> <rlen 0..=32>` raw I²C write-then-read; ER + stage + 3 status bytes (tools/dev/i2cread.py) |
 | `adcrd` | `OK`+u32 / `ER`+stage | our dev verb: `adcrd <ch>` ADC sum-of-16 (tools/dev/adcread.py) |
+| `inaxp` | `OK`+SYST CSR+RVR (u32 LE)+n×(dt u32, shunt i16, bus i16) / `ER`+stage | our dev verb (`dev-ina`): `inaxp <cfg u16 BE> <n 1..=32>` — INA226 CONFIG=cfg, then n conversion-ready events (CVRF polled in reg 6; triggered modes re-trigger per sample) with SysTick dt + raw registers; restores the sampler config; ER 0x20 = no CVRF in 100 ms (tools/dev/inaexp.py) |
 | `gpiot` | `OK`+old cfg / `ER`+code | our dev verb: `gpiot <port 0/1/2=A/B/F> <pin> <cfg>` sets one GPIO (cfg = CTL mode bits 1:0 \| PUD<<2 \| OCTL<<4; 0x80 = read only) and returns the previous cfg byte for restoring; refuses PA3/PA9/PA11/PA12/PB6/PB7 (ER 0x10) — tools/dev/gpio_cc_sweep.py |
 | `gpird` | `OK`+3×u16 LE | our dev verb: GPIOA/GPIOB/GPIOF input registers (configures PA15 as input + pull-up first — FUSB302 INT_N) |
 | `clkrd` | `OK`+RCU_CTL+RCU_CFG0 (u32 LE ×2) | our dev verb: clock-tree peek (verified: AHB/APB1/APB2 all /1 = 48 MHz) |
@@ -206,7 +207,7 @@ versn eeprd rawva`) are always served; the trigger verbs (`pdctl pdsta pdcap
 pdinf pdreq qctrg qc3ct qcdet afctr qcoff detct`) need `triggers` (in release builds);
 the dev verbs need their group — `dev-board` (`i2crd adcrd gpird gpiot
 clkrd keyrd rstrd wdtst idlrd`), `dev-tft` (`uiscr tftfl tftbl tftui tftrd`), `dev-bt`
-(`btini btcmd btget btrun btsta btspy`), `fcp` (the untested
+(`btini btcmd btget btrun btsta btspy`), `dev-ina` (`inaxp`), `fcp` (the untested
 `fcptr`/`fcprd`/`scptr`) — and `pcprf` its own feature; dev builds carry the
 Makefile's `DEV_FEATURES` subset.
 Disabled verbs match and silently do nothing.
@@ -287,15 +288,34 @@ ten LE u32 fields, CRC16/MODBUS tail); client + deduping stream generator in
   Decoded: **AVG=1** (no internal averaging), **VSHCT=1.1 ms** (shunt/current),
   **VBUSCT=4.156 ms** (bus/voltage), **MODE=111** (shunt+bus, continuous). So the
   part is used as a **raw dual ΔΣ ADC**: the firmware reads shunt (reg 1) + bus
-  (reg 2) and does all averaging + calibration in software.
+  (reg 2) and does all averaging + calibration in software. ALERT is not
+  wired to the MCU — conversion-ready is only visible as CVRF (reg 6 bit 3).
 - **Our firmware does the same — raw ADC + software cal, NOT the INA226
   current/power engine** (ina.rs). The per-unit factory calibration in EEPROM (below) is
   expressed for this software path (specific sum depths, a per-unit zero-current
   offset `ref`, separate forward/reverse gains). The INA226 engine's single `CAL`
   register can't reproduce the per-unit offset/gains, so using it would **discard
-  the factory calibration** and force a re-cal against lab references. We keep
-  config `0x41A7`, read raw, and pace the reads on the TIMER5 250 Hz tick —
-  poll-rate-independent sampling without the chip's hardware averaging.
+  the factory calibration** and force a re-cal against lab references. We write
+  config **`0x4127`** (shunt AND bus 1.1 ms — not stock's bus 4.156 ms), read raw,
+  and pace the reads on the TIMER5 250 Hz tick, unsynchronized to the
+  conversions — poll-rate-independent sampling without hardware averaging.
+- **Measured on this unit** (tools/dev/inaexp.py, 0 A / IN unfed, n=1024):
+  conversion cycles match the datasheet nominal (VSHCT+VBUSCT) within
+  +0.1% (oscillator slightly slow, e.g. 2200.6 µs for 1.1+1.1 ms); a triggered
+  conversion (MODE 3) takes ~0.22 ms longer than nominal, trigger write to
+  CVRF seen. Raw shunt noise at 0 A per conversion, in LSB (2.5 µV ≈
+  167 µA): 588 µs 0.96, 1.1 ms 0.67, 2.116 ms 0.46, 4.156 ms 0.29, 8.244 ms
+  0.34 — ∝ 1/√CT down to the quantization floor at ≥4 ms (2–3 distinct codes),
+  so long shunt CTs stop dithering and firmware sums lose sub-LSB resolution.
+  The 0 A shunt mean shifts with VSHCT: −1.2 LSB at ≤1.1 ms (matches `refz`'s
+  −1.25) vs −0.9 at 8.244 ms — a VSHCT change needs the zero re-checked
+  (add 16 × the measured 0 A mean difference to `refz`; no reference needed).
+  Under load (5.16 V, ~66 mA WiFi dongle, configs interleaved): offset-
+  corrected shunt means agree across VSHCT 588 µs–8.244 ms within ±0.02%
+  (gain is CT-independent, factory gains apply); the bus mean moves ≤0.3 mV
+  across VBUSCT 588 µs–8.244 ms (factory `offV` is fine at our 1.1 ms). The
+  real load's fluctuation (~2.8 LSB rms at 1.1 ms, plus ~35 ms dips to 29 mA
+  and 150 mA spikes) dwarfs the 0.67 LSB instrument noise.
 - Bench note: powering the meter via its PC-comms port does NOT power the
   measurement path — bus voltage/shunt read 0 until the IN port is fed.
 

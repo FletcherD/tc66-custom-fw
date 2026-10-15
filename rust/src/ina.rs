@@ -618,3 +618,65 @@ impl Sampler {
         m.ori_ua = oua;
     }
 }
+
+/// `inaxp` dev verb backend: INA226 conversion timing + raw noise under an
+/// arbitrary CONFIG. Writes `cfg`, waits out the first conversion-ready
+/// (Mask/Enable CVRF, polled over I2C — ALERT is not wired), then records `n`
+/// more: SysTick counts since the previous one + the raw shunt and bus
+/// registers. Triggered modes (MODE 1..3) rewrite CONFIG before each sample
+/// and time from that trigger. Restores the sampler's CONFIG afterwards.
+/// Holds `pause` throughout (sampler ticks skipped, ≤ n × 100 ms).
+/// `out`: SYST CSR u32, SYST RVR u32, then n × (dt u32, shunt u16, bus u16),
+/// LE. Err: I2C stage, or 0x20 = no CVRF within 100 ms.
+#[cfg(feature = "dev-ina")]
+pub fn experiment(cfg: u16, n: usize, out: &mut [u8]) -> Result<usize, u8> {
+    const REG_MASK: u8 = 0x06;
+    const CVRF: u16 = 1 << 3;
+    const TIMEOUT: u32 = 4_800_000; /* SysTick counts: 100 ms at 48 MHz */
+    let syst = unsafe { &*cortex_m::peripheral::SYST::PTR };
+    out[0..4].copy_from_slice(&syst.csr.read().to_le_bytes());
+    out[4..8].copy_from_slice(&syst.rvr.read().to_le_bytes());
+    let triggered = matches!(cfg & 7, 1..=3);
+    let write_cfg = || {
+        i2c::transact(INA_ADDR, &[REG_CONFIG, (cfg >> 8) as u8, cfg as u8], &mut [])
+            .map_err(|e| e.stage)
+    };
+    let wait_ready = |since: u32| -> Result<u32, u8> {
+        loop {
+            let m = ina_read(REG_MASK).map_err(|e| e.stage)?;
+            let t = cortex_m::peripheral::SYST::get_current();
+            if m & CVRF != 0 {
+                return Ok(t);
+            }
+            if since.wrapping_sub(t) & 0x00FF_FFFF > TIMEOUT {
+                return Err(0x20);
+            }
+        }
+    };
+    let r = pause(|| {
+        write_cfg()?;
+        let mut prev = wait_ready(cortex_m::peripheral::SYST::get_current())?;
+        let mut len = 8;
+        for _ in 0..n {
+            if triggered {
+                write_cfg()?;
+                prev = cortex_m::peripheral::SYST::get_current();
+            }
+            let t = wait_ready(prev)?;
+            let dt = prev.wrapping_sub(t) & 0x00FF_FFFF;
+            prev = t;
+            let shunt = ina_read(REG_SHUNT).map_err(|e| e.stage)?;
+            let bus = ina_read(REG_BUS).map_err(|e| e.stage)?;
+            let Some(rec) = out.get_mut(len..len + 8) else {
+                break;
+            };
+            rec[0..4].copy_from_slice(&dt.to_le_bytes());
+            rec[4..6].copy_from_slice(&shunt.to_le_bytes());
+            rec[6..8].copy_from_slice(&bus.to_le_bytes());
+            len += 8;
+        }
+        Ok(len)
+    });
+    pause(configure);
+    r
+}

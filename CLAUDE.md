@@ -63,7 +63,8 @@ rest Rejects; docs/HARDWARE.md "powerz vendor protocol",
 tools/dev/km003c_check.py) —
 **powerz comms are the priority path; getva/CDC exists for
 compatibility**. The sampler runs from the TIMER5 interrupt (250 Hz,
-interleaved INA226 reads — ina.rs), immune to main-loop blocking. The hot
+interleaved INA226 reads — ina.rs; measured conversion timing + raw noise per
+CONFIG: tools/dev/inaexp.py / `inaxp`, docs/HARDWARE.md "Measurement front-end"), immune to main-loop blocking. The hot
 path is pinned below the GD32's 32 KB zero-wait flash boundary
 (`rust/fast.x` + `make fast-gate` — docs/FIRMWARE.md "Fast-flash placement";
 query 0.28 / rawva 0.62 / getva 2.33 ms — tools/dev/verbtime.py, layout-sensitive by ~0.1-0.2 ms, see FIRMWARE.md; the TFT pixel engine too — full
@@ -104,7 +105,7 @@ server — never redistribute vendor binaries, `backup-eeprom` via `eeprd`,
 `version`). **Feature sets**: cargo default = release = `triggers` (PD/QC/
 AFC trigger + detection verbs); `make flash`/`make recover` add the
 Makefile's `DEV_FEATURES` — dev verb groups `fcp`/`dev-board`/`dev-bt`/
-`dev-tft`/`dev-pd` (`dev-verbs` = all; they no longer fit together, so carry only the
+`dev-tft`/`dev-pd`/`dev-ina` (`dev-verbs` = all; they no longer fit together, so carry only the
 groups in current use) + `pcprf`; `make release` / `RELEASE=1` builds the
 defaults only. New debug verbs go behind a dev group (or a new one).
 Charger protocol detection at 5 V: `tools/detect.py` (`qcdet`, `afctr 0x08`

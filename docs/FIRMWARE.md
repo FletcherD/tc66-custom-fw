@@ -35,7 +35,7 @@ the ina.rs module doc.
 | `detect.rs` | (`triggers`) on-device charger protocol detection (screen 5, `detct` verb): main-loop-stepped state machine over qc.rs/pd.rs + its result text; host-checked by tools/dev/host_check |
 | `text.rs` | (`triggers`) the screens' text: line writer `W` (22 columns, bounded) + `TEXT`, every pdinfo/detect screen string packed length-prefixed at compile time and written by u8 id (`w.t(VBUS)`) — see "Screen text" |
 | `qc.rs` | (`triggers` feature) D+/D− charge triggers (M4): PA13/PA14 + PB4/PB5 level synthesis — QC2.0 `qctrg`, QC3.0 `qc3ct`, Samsung AFC `afctr` (closed-loop D− serial), Huawei FCP/SCP `fcptr`/`fcprd`/`scptr` (dev-verbs only, untested), `qcoff` |
-| `ina.rs` | the measurement subsystem: TIMER5 250 Hz sampler ISR (interleaved INA226 reads), EEPROM calibration, D± conversion, published-measurement state (`Meas`/`snapshot()`), `pause()` bus rule |
+| `ina.rs` | the measurement subsystem: TIMER5 250 Hz sampler ISR (interleaved INA226 reads), EEPROM calibration, D± conversion, published-measurement state (`Meas`/`snapshot()`), `pause()` bus rule, `inaxp` dev verb backend (`experiment`) |
 | `ntc.rs` | NTC temperature from the ADC sum16: the stock beta model in fixed point (no float in the image); host-checked by tools/dev/host_check |
 | `adc.rs` | polled on-chip ADC (stock channel map: ch0 PA0 NTC, ch1 PA1 D+, ch9 PB1 D−, ch17 internal Vrefint; puts those three pins in analog mode), `adcrd` dev verb backend |
 | `getva.rs` | real `getva` packet builder (template + CRC16/MODBUS + AES-256-ECB) |
