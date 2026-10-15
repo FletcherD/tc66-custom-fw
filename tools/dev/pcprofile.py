@@ -2,7 +2,7 @@
 """Statistical PC profiler over CDC (no SWD, no wedge risk).
 
 The TIMER5_DAC entry veneer (ina.rs) samples the interrupted context's PC
-at 250 Hz into a SRAM ring; the `pcprf` verb dumps it (u32 LE counter +
+at every sampler tick (~446 Hz) into a SRAM ring; the `pcprf` verb dumps it (u32 LE counter +
 128 u32 LE PCs). This polls the ring, dedups by counter, symbolizes with
 nm, and histograms — split by fast (<0x08008000) vs slow flash.
 

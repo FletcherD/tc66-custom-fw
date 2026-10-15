@@ -114,7 +114,7 @@ ADC payload (built in `powerz_payload()`, main.rs):
 | 36 / 37 | KM003C `sample_rate_idx` / `flags` — meaning undocumented (36 is probably the graph rate), 0 |
 | 38 / 40 / 42 | KM003C "avg" CC2 / D+ / D− in mV (u16) — the same values as above (ours are window means already) |
 
-The reply is **pre-armed** on the IN endpoint (rebuilt at the 250 Hz tick,
+The reply is **pre-armed** on the IN endpoint (rebuilt on the 4 ms `ina::ticks()` cadence,
 re-armed unconditionally per ISR pass) so a host read completes without
 NAK-polling — the driver's 5 ms URB budget is the design constraint.
 `Connect`/`Disconnect` (0x02/0x03) and `Enable`/`DisablePdMonitor`
@@ -297,8 +297,9 @@ ten LE u32 fields, CRC16/MODBUS tail); client + deduping stream generator in
   register can't reproduce the per-unit offset/gains, so using it would **discard
   the factory calibration** and force a re-cal against lab references. We write
   config **`0x4127`** (shunt AND bus 1.1 ms — not stock's bus 4.156 ms), read raw,
-  and pace the reads on the TIMER5 250 Hz tick, unsynchronized to the
-  conversions — poll-rate-independent sampling without hardware averaging.
+  and read BOTH registers on every TIMER5 tick (2.24 ms — the measured 2.2 ms
+  shunt+bus cycle + 1.8%), so ~98% of the chip's conversions are summed and none
+  is read twice; unsynchronized (no ALERT), without hardware averaging.
 - **Measured on this unit** (tools/dev/inaexp.py, 0 A / IN unfed, n=1024):
   conversion cycles match the datasheet nominal (VSHCT+VBUSCT) within
   +0.1% (oscillator slightly slow, e.g. 2200.6 µs for 1.1+1.1 ms); a triggered

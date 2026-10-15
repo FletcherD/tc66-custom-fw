@@ -20,8 +20,8 @@ features.
   itself over USB via `updat` with a pure-Rust SRAM flasher — iterate with
   `make -C rust flash`, no button pressing.
 - **M1 — real measurement: done.** INA226 over hardware I²C0 with the per-unit
-  EEPROM calibration, TIMER5-interrupt sampling at 250 Hz with an
-  interleaved read schedule (~10 Hz publish, immune to main-loop blocking),
+  EEPROM calibration, TIMER5-interrupt sampling of nearly every
+  INA226 conversion (shunt + bus every 2.24 ms, ~10 Hz publish, immune to main-loop blocking),
   NTC temperature (recovered stock β-model) and D+/D− via the
   on-chip ADC (stock channel map), 1 Hz energy integration, all served in the
   stock encrypted+checksummed `getva` packet — plus our plaintext `rawva`
@@ -64,7 +64,7 @@ features.
   zero-wait flash boundary (`rust/fast.x` + `make fast-gate`): query 0.2 ms,
   rawva 0.55 ms, getva 2.2 ms round-trip (were 4.5/9/49; `tools/dev/verbtime.py`); powerz sustains
   >5000 reads/s. The TFT pixel engine is fast too (full redraw ~30 ms,
-  `tools/dev/uitime.py`). Profile-guided via the on-device 250 Hz PC sampler
+  `tools/dev/uitime.py`). Profile-guided via the on-device ~446 Hz PC sampler
   (`pcprf` verb + `tools/dev/pcprofile.py` — the chip's DWT is a stub).
 - **USB architecture: interrupt-serviced, bench-verified.** The device
   leads with its **POWER-Z KM003C emulation — the priority protocol**: the

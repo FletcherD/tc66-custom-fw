@@ -25,7 +25,7 @@ Host-side Python for the TC66 custom firmware. Run any script with
   - flash size (`inline_report.py`: per-function bytes spent on inlined copies, from the
     DWARF — candidates for `#[inline(never)]`);
   - dev-verb front ends and bench diagnostics (`i2cread.py`, `adcread.py`, `tft.py`,
-    `tftgrab.py`, `fusb_intn.py`, `gpio_cc_sweep.py`, `snapshot.py` (GPIO/ADC/register snapshot + diff, dev-board), `inaexp.py` (INA226 conversion timing + raw noise per CONFIG, dev-ina), `km003c_check.py` (KM003C-protocol replies), `pdlog_check.py`,
+    `tftgrab.py`, `fusb_intn.py`, `gpio_cc_sweep.py`, `snapshot.py` (GPIO/ADC/register snapshot + diff, dev-board), `inaexp.py` (INA226 conversion timing + raw noise per CONFIG, dev-ina), `samplercheck.py` (published window rate + V/I noise over `rawva`), `enumtrial.py` (enumeration reliability over repeated `updat` reboots, QUIRKS §6), `km003c_check.py` (KM003C-protocol replies), `pdlog_check.py`,
     `accp_decode.py`, `scope_capture.py`).
 - **`tools/lib/` — modules imported by the scripts, not run directly:**
   - `tc66lib.py`: meter discovery, `open_meter`, bootloader helpers.

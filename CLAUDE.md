@@ -62,12 +62,12 @@ PdPacket, ADC+PD chained, empty PD trace, Enable-/DisablePdMonitor — the
 rest Rejects; docs/HARDWARE.md "powerz vendor protocol",
 tools/dev/km003c_check.py) —
 **powerz comms are the priority path; getva/CDC exists for
-compatibility**. The sampler runs from the TIMER5 interrupt (250 Hz,
-interleaved INA226 reads — ina.rs; measured conversion timing + raw noise per
+compatibility**. The sampler runs from the TIMER5 interrupt (2.24 ms, a shunt +
+bus read per tick = ~98% of the INA226's 2.2 ms conversion pairs; `ina::ticks()` stays a 4 ms time base — ina.rs; measured conversion timing + raw noise per
 CONFIG: tools/dev/inaexp.py / `inaxp`, docs/HARDWARE.md "Measurement front-end"), immune to main-loop blocking. The hot
 path is pinned below the GD32's 32 KB zero-wait flash boundary
 (`rust/fast.x` + `make fast-gate` — docs/FIRMWARE.md "Fast-flash placement";
-query 0.28 / rawva 0.62 / getva 2.33 ms — tools/dev/verbtime.py, layout-sensitive by ~0.1-0.2 ms, see FIRMWARE.md; the TFT pixel engine too — full
+query 0.41 / rawva 0.73 / getva 2.69 ms (build 175) — tools/dev/verbtime.py, layout-sensitive by ~0.1-0.2 ms, see FIRMWARE.md; the TFT pixel engine too — full
 redraw ~30 ms, tools/dev/uitime.py). Slow-region cost is per cold fetch and
 layout-sensitive: anything with a polling loop belongs in fast flash
 (`#[link_section = ".fasttext.<name>"]` on our fns, fast.x patterns for
@@ -204,6 +204,9 @@ debugprobe (tools/dev/k1boot.py) when the probe is plugged in.
   voltage/current legitimately read 0 otherwise. **While IN is fed, the meter
   is powered from IN and cycling its port does NOT reset it** (check the run count
   via `tools/cfg.py`); reboot it with `make flash` (updat resets it) instead.
+- After an `updat` reboot, enumeration intermittently fails for 5–25 s (kernel
+  "can't read configurations"; docs/QUIRKS.md §6, open) — if the meter doesn't come
+  back, wait, or cycle its hub port when powered from IN; `tools/dev/enumtrial.py`.
 - SWD (for `make markers`) is a Pico debugprobe; config is `openocd.cfg` at
   the repo root. Wiring in docs/HARDWARE.md.
 - Update the docs (README, docs/*) after functional changes — they

@@ -232,8 +232,8 @@ pub fn qc3(down: bool, count: u8) -> Result<(), u8> {
  * 0.6 V with D− RELEASED for 2050 ms, then the request byte (0x46 = 9 V,
  * 0x08 = 5 V) ×3, 10 ms apart. AFC has NO sync pings (FCP/SCP only).
  *
- * The byte's bit timing runs with interrupts masked: the sampler (250 Hz, ~0.5
- * ms I2C reads) or USB ISR firing mid-bit stretches a cell and corrupts the
+ * The byte's bit timing runs with interrupts masked: the sampler (every 2.24 ms,
+ * ~0.3 ms of I2C reads) or USB ISR firing mid-bit stretches a cell and corrupts the
  * frame. The 2.5 ms marks and the read-based waits tolerate ISR jitter. */
 
 /// Microsecond delay off the free-running SysTick (24-bit, 48 MHz, set up in

@@ -12,7 +12,7 @@ else, including the stock firmware.
 
 - **Calibrated measurement.** Voltage, current, and power from the INA226,
   using your meter's own factory calibration. Sampling is paced by a
-  hardware timer at 250 Hz, so how fast a host polls has no effect on how
+  hardware timer that reads nearly every conversion the INA226 makes, so how fast a host polls has no effect on how
   fresh the readings are. Also: NTC temperature, D+/D− voltages, and
   mAh/mWh energy counters with run time.
 - **Screens.** Six screens, and K1 steps through them:

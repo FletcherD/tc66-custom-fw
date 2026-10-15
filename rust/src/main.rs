@@ -22,8 +22,8 @@
 //! blocking main-loop work (TFT draws, getva's AES) can never starve
 //! the bus. The main loop consumes CMD_RING, builds replies in thread mode,
 //! and pushes them into usbd-serial under short critical sections
-//! (with_usb). The sampler runs from the TIMER5 interrupt (250 Hz, one
-//! interleaved INA226 read per tick — ina.rs), immune to main-loop blocking.
+//! (with_usb). The sampler runs from the TIMER5 interrupt (every 2.24 ms,
+//! an INA226 shunt + bus read per tick — ina.rs), immune to main-loop blocking.
 //! Exactly TWO interrupts are ever unmasked (USBD_LP + TIMER5_DAC), both at
 //! one NVIC priority so they never nest (the stack-gate charges the max
 //! handler chain, not the sum). USBD_LP is enabled late in run(), after
@@ -97,7 +97,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 168;
+const BUILD_ID: u32 = 175;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -290,7 +290,7 @@ fn run() -> ! {
     cfg::commit_boot();
     persist::boot();
 
-    /* Sampler: reprogram TIMER5 as the 250 Hz tick ISR and unmask its NVIC
+    /* Sampler: reprogram TIMER5 as the sampler tick ISR and unmask its NVIC
      * line (ina.rs) — deliberately only now, after the grace window, so a
      * sampler/I2C fault stays escapable by power-cycle + `make flash`. */
     ina::start(&p.rcu, &p.timer5);

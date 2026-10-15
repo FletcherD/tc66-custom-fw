@@ -145,6 +145,26 @@ other crates — enforced by `make fast-gate`. Measured effect (build 53 vs 52, 
 factor also explains most of §1's "AES slowed by NAK storms" confound and
 all of §3's ~8 ms staircase.
 
+## 6. Enumeration after a reboot intermittently fails for 5–25 s — OPEN
+
+**Measured (2026-10-15, builds 170–174):** after an `updat` reboot with the
+meter powered from IN (POWER switch), the host reads the device descriptor
+and the 9-byte config header fine, but the full configuration-descriptor read
+(multi-packet control IN) times out (`can't read configurations, error -110`)
+— repeatedly, for ~5 to >25 s; then a retry succeeds. When it outlasts the
+kernel's retries (~4 attempts) the host gives up ("unable to enumerate");
+cycling the hub port (meter stays powered from IN, no reboot) makes it retry
+and it then enumerates. Rates over `updat` reboots: old sampler (build 172)
+7/10 boots with ≥1 failed read, 3/10 needing a hub kick; the 2.24 ms sampler
+(build 170) 2/6; the same sampler + a debug branch's extra main-loop code
+(174) 0/10 from IN power and 0/7 from USB power (cold boots + `updat`). A host
+USBDEVFS_RESET of a running meter re-enumerated cleanly every time, and the
+sampler ISR never exceeded 350 µs during enumeration — so it is something in
+the first seconds after boot, not ISR load or APB stalls. Likely
+layout-sensitive (§2's event loss on slow paths is the obvious suspect for a
+lost EP0 IN-complete). Tooling: `tools/dev/enumtrial.py N` (reboot loop,
+kernel failure count per boot, hub kick when the host gives up).
+
 ## 5. Not silicon, but adjacent (documented elsewhere, listed for map)
 
 - Bootloader hand-off faults if the flash header's initial SP is

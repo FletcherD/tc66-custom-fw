@@ -64,24 +64,24 @@ pub const MK_USB_RDMAX: usize = MK_USB_BASE + 0x1c; // drain loop hit its 4-pass
                                                     // for the re-fire)
 // +0x20..+0x2c reserved for the USB block
 
-/* Sampler interrupt block (ina.rs: TIMER5_DAC ISR @ 250 Hz + its main-loop
+/* Sampler interrupt block (ina.rs: TIMER5_DAC ISR every 2.24 ms + its main-loop
  * `service()` half). Writers noted per word; single-writer per word except
  * MK_I2CERR (see below). */
 pub const MK_SMP_BASE: usize = 0x2000_10a0;
 /// +0x00 (ISR) live state: (tick_count << 8) | code. A frozen value locates
 /// a wedge by its low byte:
 ///   0x03        idle tick — waiting for thread-mode cal load
-///   0x10+step   starting the I2C read for window step 0..=23
-///               (step % 3: 0,1 = shunt, 2 = bus)
-///   0x40        window publish (calibrate + PUBLISHED write, step 24)
-///   0x50        1 s average drain (every 250 ticks)
+///   0x10+step   starting the shunt + bus reads for window step 0..=42
+///   0x40        window publish (calibrate + PUBLISHED write, step 43)
+///   0x50        1 s average drain
 ///   0x02        ISR exit (healthy resting value)
 pub const MK_SMP_STATE: usize = MK_SMP_BASE;
-/// +0x04 (ISR) total TIMER5 ISR entries == 4 ms ticks (expect +250/s; also
-/// mirrored by the AtomicU32 the main loop derives its cadences from)
+/// +0x04 (ISR) total TIMER5 ISR entries (expect ~+446/s; the main loop's 4 ms
+/// `ina::ticks()` time base is derived separately)
 pub const MK_SMP_IRQS: usize = MK_SMP_BASE + 0x04;
 /// +0x08 (ISR) last in-window I2C failure:
-/// (i2c stage << 24) | (STAT0 << 8) | window step
+/// (i2c stage << 24) | (STAT0 << 8) | (0x80 if the bus read failed, else
+/// the shunt read) | window step
 pub const MK_SMP_I2CE: usize = MK_SMP_BASE + 0x08;
 /// +0x0c (ISR) seconds drained into the powerz averages (expect +1/s)
 pub const MK_SMP_SECS: usize = MK_SMP_BASE + 0x0c;
@@ -131,7 +131,7 @@ pub const MK_BT_LINES: usize = MK_BT_BASE + 12;
 
 /* PC-profiler ring (the TIMER5_DAC entry veneer in ina.rs — address is
  * hardcoded in its asm): +0 = total-samples counter, +4..+0x204 = 128-entry
- * ring of interrupted-context PCs, one per 4 ms tick. Read over CDC with
+ * ring of interrupted-context PCs, one per sampler tick. Read over CDC with
  * the `pcprf` verb (tools/dev/pcprofile.py); the chip's DWT PCSR is a stub. */
 pub const MK_PCPRF_BASE: usize = 0x2000_1100;
 pub const PCPRF_RING: usize = 128;

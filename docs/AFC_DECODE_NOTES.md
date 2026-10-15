@@ -12,8 +12,8 @@ handshake` mode 4 is replicated register-for-register (per our unpublished stock
    (D− high 24 µs / low 32 µs / high 32 µs), 8 data bits MSB-first at ~152 µs
    (1 = D− mark high [PB4 hi, PB5 lo], 0 = low), a 9th **odd-parity** bit, stop.
    D+ held 0.6 V (PA13=1) throughout. Verified byte-perfect vs the stock capture.
-2. **Interrupt masking of the bit timing.** The 250 Hz sampler ISR (does ~0.5 ms
-   I2C reads) firing mid-byte stretches a bit cell and corrupts the frame. The
+2. **Interrupt masking of the bit timing.** The sampler ISR (every 2.24 ms, ~0.3 ms
+   of I2C reads) firing mid-byte stretches a bit cell and corrupts the frame. The
    byte runs inside `cortex_m::interrupt::free`; the 2.5 ms marks and the reads
    tolerate jitter.
 3. **The entry** (`accp_entry`, register-exact from a 200 kS/s stock capture —

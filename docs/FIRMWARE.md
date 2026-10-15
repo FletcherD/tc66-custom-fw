@@ -6,7 +6,7 @@ build/flash/debug workflow. Read `HARDWARE.md` first for the board facts
 
 Exactly two interrupts run, both at one NVIC priority (so they never nest):
 **USBD_LP (IRQ 37)** services the USB peripheral (host traffic never waits
-on blocking main-loop work) and **TIMER5_DAC** runs the 250 Hz measurement
+on blocking main-loop work) and **TIMER5_DAC** runs the ~446 Hz measurement
 sampler (ina.rs — immune to main-loop blocking). Everything else — command
 dispatch and reply building, the display, energy integration, the deferred
 ADC burst — runs polled off the main loop with all other NVIC lines masked
@@ -35,7 +35,7 @@ the ina.rs module doc.
 | `detect.rs` | (`triggers`) on-device charger protocol detection (screen 5, `detct` verb): main-loop-stepped state machine over qc.rs/pd.rs + its result text; host-checked by tools/dev/host_check |
 | `text.rs` | (`triggers`) the screens' text: line writer `W` (22 columns, bounded) + `TEXT`, every pdinfo/detect screen string packed length-prefixed at compile time and written by u8 id (`w.t(VBUS)`) — see "Screen text" |
 | `qc.rs` | (`triggers` feature) D+/D− charge triggers (M4): PA13/PA14 + PB4/PB5 level synthesis — QC2.0 `qctrg`, QC3.0 `qc3ct`, Samsung AFC `afctr` (closed-loop D− serial), Huawei FCP/SCP `fcptr`/`fcprd`/`scptr` (dev-verbs only, untested), `qcoff` |
-| `ina.rs` | the measurement subsystem: TIMER5 250 Hz sampler ISR (interleaved INA226 reads), EEPROM calibration, D± conversion, published-measurement state (`Meas`/`snapshot()`), `pause()` bus rule, `inaxp` dev verb backend (`experiment`) |
+| `ina.rs` | the measurement subsystem: TIMER5 2.24 ms sampler ISR (shunt + bus INA226 read per tick; `ticks()` 4 ms time base), EEPROM calibration, D± conversion, published-measurement state (`Meas`/`snapshot()`), `pause()` bus rule, `inaxp` dev verb backend (`experiment`) |
 | `ntc.rs` | NTC temperature from the ADC sum16: the stock beta model in fixed point (no float in the image); host-checked by tools/dev/host_check |
 | `adc.rs` | polled on-chip ADC (stock channel map: ch0 PA0 NTC, ch1 PA1 D+, ch9 PB1 D−, ch17 internal Vrefint; puts those three pins in analog mode), `adcrd` dev verb backend |
 | `getva.rs` | real `getva` packet builder (template + CRC16/MODBUS + AES-256-ECB) |
@@ -317,22 +317,27 @@ Related subtleties, all load-bearing:
 - `ina.rs`: the whole measurement subsystem. INA226 register reads
   (big-endian), EEPROM calibration constants (LE u32 at 0x2004/44/08/0c/58),
   the calibration formulas from HARDWARE.md, and the **TIMER5-interrupt
-  sampler**: TIMER5 is programmed for a 4 ms update IRQ (PSC 4799, CAR 39;
-  250 Hz) and `TIMER5_DAC` (one of the two enabled interrupts, alongside
-  USBD_LP) is unmasked in `ina::start()`, called after the persistence boot
-  (and after the grace window, when built). Each tick the ISR does
-  ONE I2C read in the interleaved repeating pattern **shunt, shunt, bus**
-  (×8 → 24 ticks = 16 shunt + 8 bus — the exact sum depths the EEPROM cal
-  bakes in), so instantaneous values stay evenly fresh (newest shunt ≤ 8 ms,
-  newest bus ≤ 12 ms old). At tick 24 it calibrates + publishes V/I
-  (~10.4 Hz windows, MK_WINDOWS++) and every 250 ticks drains the 1 s
-  powerz averages. I2C failures bump MK_I2CERR, snapshot into MK_SMP_I2CE
+  sampler**: the INA226 converts continuously at 1.1 ms shunt + 1.1 ms bus
+  (a new pair every 2.2 ms), and TIMER5 is programmed for a `TICK_US` =
+  2240 µs update IRQ (PSC 47 → 1 MHz, CAR 2239; ~446 Hz — 1.8% slower than
+  the chip so no conversion is read twice) and `TIMER5_DAC` (one of the two
+  enabled interrupts, alongside USBD_LP) is unmasked in `ina::start()`,
+  called after the persistence boot (and after the grace window, when
+  built). Each tick the ISR reads **shunt then bus** — ~98% of all
+  conversions. After `WINDOW` = 43 ticks (96.3 ms) it calibrates +
+  publishes V/I (~10.4 Hz windows, MK_WINDOWS++; `cal_v`/`cal_i` rescale
+  the n=43 sums to the EEPROM's 8/16 depths) and once per second (µs
+  accumulator) drains the 1 s powerz averages. **`ina::ticks()` stays a
+  4 ms time base** (the ISR advances it from a µs remainder) — every
+  timeout/cadence in pd.rs, detect.rs, cfg.rs, plot.rs, keys and the energy
+  integration counts in 4 ms units. I2C failures bump MK_I2CERR, snapshot into MK_SMP_I2CE
   and restart the window; cal loading runs from the main loop (first try in
   `start()`, retries every ~0.25 s via `ina::service()`) — the ISR idles
   until `CAL_READY`. **The INA226 config write (0x4127) before cal load is
   load-bearing** — the chip returns 0 for bus voltage until (re)configured.
-  **ISR budget:** one I2C read ≈ 0.5 ms of the 4 ms tick (~12% CPU); the
-  publish/drain ticks add a few µs of integer math. No ADC, no USB, no
+  **ISR budget:** two I2C reads (~0.13 ms each at 400 kHz) per 2.24 ms
+  tick (~12% CPU; build 169 vs 168: getva median 2.48 → 2.78 ms, query
+  0.40 → 0.47); the publish/drain ticks add a few µs of integer math. No ADC, no USB, no
   floats in the ISR.
 - **Deferred ADC burst:** the window-end on-chip-ADC reads (NTC + D+ + D− +
   Vrefint for the powerz Vdd, ~1 ms) do NOT run in the ISR — the ISR sets `ADC_REQ` and the main loop
@@ -1078,7 +1083,7 @@ per-pass `service()` should follow the same split.
 The chip's DWT is a stub (PCSR reads 0xFFFFFFFF, CYCCNT never counts), so
 hardware PC sampling is unavailable. Instead the TIMER5_DAC entry veneer
 (ina.rs, cargo feature `pcprf`, in dev builds only) records the interrupted context's PC from the exception frame into a
-128-entry SRAM ring at 0x2000_1100 (markers.rs) at 250 Hz; the `pcprf`
+128-entry SRAM ring at 0x2000_1100 (markers.rs) at ~446 Hz (one per sampler tick); the `pcprf`
 verb dumps counter+ring over CDC and `tools/dev/pcprofile.py <elf> [secs]
 [--load getva:192]` polls, dedups, symbolizes, and histograms — no SWD, no
 wedge risk. Biases: thread-mode PCs only (USBD_LP time lands on the
