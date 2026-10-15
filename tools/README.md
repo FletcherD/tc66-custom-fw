@@ -21,6 +21,8 @@ Host-side Python for the TC66 custom firmware. Run any script with
   - fonts (`mkfont.py` + `font/`), host-side tests (`host_check/`, `pd_decode_test.py`);
   - recovery (`recovery/`, `k1boot.py`);
   - profiling and timing (`pcprofile.py`, `verbtime.py`, `uitime.py`, `wdgtest.py`);
+  - flash size (`inline_report.py`: per-function bytes spent on inlined copies, from the
+    DWARF — candidates for `#[inline(never)]`);
   - dev-verb front ends and bench diagnostics (`i2cread.py`, `adcread.py`, `tft.py`,
     `tftgrab.py`, `fusb_intn.py`, `gpio_cc_sweep.py`, `pdlog_check.py`,
     `accp_decode.py`, `scope_capture.py`).

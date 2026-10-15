@@ -171,6 +171,7 @@ pub fn start() -> Result<(), u8> {
     Ok(())
 }
 
+#[inline(never)]
 fn next(s: &mut Det, step: u8, ticks: u32) {
     s.step = step;
     s.due = ina::ticks().wrapping_add(ticks);

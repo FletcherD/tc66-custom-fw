@@ -95,25 +95,33 @@ fn st() -> &'static mut State {
     unsafe { &mut *ST.0.get() }
 }
 
+#[inline(never)]
+#[link_section = ".fasttext.persist_mah"]
 fn mah(g: &Group) -> u32 {
     (g.acc_i / I_PER_MAH).min(MAH_MAX) as u32
 }
+#[inline(never)]
+#[link_section = ".fasttext.persist_mwh"]
 fn mwh(g: &Group) -> u32 {
     (g.acc_p / P_PER_MWH).min(MWH_MAX) as u32
 }
 
 /// (mAh, mWh) of group `n` — getva bytes 72..88.
+#[inline(never)]
+#[link_section = ".fasttext.persist_group_energy"]
 pub fn group_energy(n: usize) -> (u32, u32) {
     let g = &st().g[n & 1];
     (mah(g), mwh(g))
 }
 
 /// Active group's run clock (energy screen).
+#[inline(never)]
 pub fn run_secs() -> u32 {
     let s = st();
     s.g[s.active & 1].secs
 }
 
+#[inline(never)]
 fn publish() {
     let s = st();
     let g = &s.g[s.active & 1];

@@ -981,12 +981,11 @@ The GD32F150 fetches zero-wait only below **0x0800_8000**; above it every
 fetch takes "a long delay" (~10x, bench-measured — QUIRKS.md §4). The app
 image spans the boundary, so placement decides performance: moving the hot
 path fast took getva 48.6 → 2.3 ms, rawva 9.2 → 0.6 ms, query 4.5 → 0.2 ms
-and erased the ~8 ms latency staircase. Current round-trips (build 148,
-`tools/dev/verbtime.py`): query 0.37, rawva 0.76, getva 2.5 ms (build 146:
-0.24 / 0.55 / 2.2 — and build 146 with only a 432-B pad added to
-`.fasttext`, i.e. everything after it shifted, measured 0.33 / 0.71 / 2.35:
-the CDC verb path's slow-region accesses are layout-sensitive; cause not
-yet pinned down). powerz hwmon reads are unaffected (~0.13 ms either way). `getva::build`
+and erased the ~8 ms latency staircase. Current round-trips (build 164,
+`tools/dev/verbtime.py`): query 0.28, rawva 0.62, getva 2.33 ms. The CDC
+verb path is layout-sensitive by ~0.1-0.2 ms (build 146 with only a 432-B
+pad added to `.fasttext` went 0.24 / 0.55 / 2.2 → 0.33 / 0.71 / 2.35;
+cause not pinned down). powerz hwmon reads are unaffected (~0.13 ms either way). `getva::build`
 (template patch + CRC, not the cipher or `build_raw`) is deliberately
 `.slowtext`.
 
@@ -999,6 +998,13 @@ command dispatch, do_getva/do_rawva, the TFT pixel engine, `ui::service`,
 code (USB stack, builtins), whole modules (`ina`, `ntc`, `aes256`, `i2c`, `powerz`,
 `usb_bus`, `getva`) and generic `with_usb` with its closures. A callee
 the compiler doesn't inline stays slow unless it is annotated too.
+That includes helpers given `#[inline(never)]` to save flash
+(`tools/dev/inline_report.py` ranks the candidates): check every caller
+of the new out-of-line body — a fast caller needs the callee pinned too
+(`persist::group_energy`/`mah`/`mwh` are, for `live_fields`) — then
+re-time with verbtime/pcprofile. A generic out-of-line helper can also
+lose to its inlined copy: `getva::crc16_modbus` outlined cost rawva
++0.1 ms, so it stays inlinable.
 `.slowtext` force-demotes cold enum-time/one-shot machinery the globs
 would otherwise drag in (mangled generic names contain type-parameter
 crates, so crate globs over-match). Mechanics that are load-bearing:

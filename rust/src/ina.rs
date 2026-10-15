@@ -134,12 +134,14 @@ fn configure() -> bool {
 /// Calibrated V from a sum of `n` bus raws. The EEPROM constants bake in the
 /// stock sum depth of 8, so the sum is rescaled to that domain (multiply
 /// before divide: exact for n = 1/2/4/8, <1 LSB/16 truncation otherwise).
+#[inline(never)]
 pub fn cal_v(cal: &Cal, bus_sum: u64, n: u64) -> u32 {
     ((bus_sum * 8 * cal.gain_v as u64 / n + cal.off_v as u64) / 20000) as u32
 }
 
 /// Calibrated signed I (1e-5 A) from a sum of `n` biased shunt raws
 /// (constants bake in sum depth 16; same rescaling as cal_v).
+#[inline(never)]
 pub fn cal_i(cal: &Cal, shunt_sum: u64, n: u64) -> i32 {
     let scaled = shunt_sum * 16 / n;
     let refz = cal.refz as u64;
@@ -273,6 +275,7 @@ pub fn set_energy(mah: u32, mwh: u32) {
     });
 }
 
+#[inline(never)]
 pub fn ticks() -> u32 {
     TICKS.load(Ordering::Relaxed)
 }

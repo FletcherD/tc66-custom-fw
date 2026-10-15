@@ -62,7 +62,7 @@ compatibility**. The sampler runs from the TIMER5 interrupt (250 Hz,
 interleaved INA226 reads — ina.rs), immune to main-loop blocking. The hot
 path is pinned below the GD32's 32 KB zero-wait flash boundary
 (`rust/fast.x` + `make fast-gate` — docs/FIRMWARE.md "Fast-flash placement";
-query 0.37 / rawva 0.76 / getva 2.5 ms — tools/dev/verbtime.py, up from 0.24/0.55/2.2 by a pure layout shift, see FIRMWARE.md; the TFT pixel engine too — full
+query 0.28 / rawva 0.62 / getva 2.33 ms — tools/dev/verbtime.py, layout-sensitive by ~0.1-0.2 ms, see FIRMWARE.md; the TFT pixel engine too — full
 redraw ~30 ms, tools/dev/uitime.py). Slow-region cost is per cold fetch and
 layout-sensitive: anything with a polling loop belongs in fast flash
 (`#[link_section = ".fasttext.<name>"]` on our fns, fast.x patterns for
@@ -105,7 +105,9 @@ groups in current use) + `pcprf`; `make release` / `RELEASE=1` builds the
 defaults only. New debug verbs go behind a dev group (or a new one).
 Charger protocol detection at 5 V: `tools/detect.py` (`qcdet`, `afctr 0x08`
 probe, `fcprd`, PD caps) or on-device (screen 5 / `detct`). Flash is nearly
-full (build 161: release ~1.7 KB spare, dev ~1.5 KB): `DEV_FEATURES` =
+full (build 164: release ~3.7 KB spare, dev ~3.5 KB;
+`tools/dev/inline_report.py` lists inlined-copy candidates for
+`#[inline(never)]` — FIRMWARE.md "Fast-flash placement"): `DEV_FEATURES` =
 `pcprf dev-pd`. **Version**: just BUILD_ID (no semver),
 shown on the ~2 s boot splash (ui.rs `SPLASH`) and by the `versn` verb.
 Host trigger tools (pd.py/qc.py) go through tools/lib/trigger_guard.py

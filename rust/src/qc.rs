@@ -51,6 +51,7 @@ static IN_QC3: Racy<bool> = Racy(core::cell::UnsafeCell::new(false));
 
 /// PA13/PA14/PB4/PB5 as push-pull outputs (the drive the resistor network
 /// expects — mirrors the stock config).
+#[inline(never)]
 fn config_pins() {
     let rcu = unsafe { &*pac::Rcu::ptr() };
     let gpioa = unsafe { &*pac::Gpioa::ptr() };
@@ -66,6 +67,7 @@ fn config_pins() {
         .modify(|_, w| w.om4().push_pull().om5().push_pull());
 }
 
+#[inline(never)]
 fn drive(levels: (bool, bool, bool, bool)) {
     let gpioa = unsafe { &*pac::Gpioa::ptr() };
     let gpiob = unsafe { &*pac::Gpiob::ptr() };
@@ -240,6 +242,7 @@ pub fn qc3(down: bool, count: u8) -> Result<(), u8> {
 /// (above the 0x0800_8000 zero-wait boundary), so its loop fetches stretch
 /// ~7-10x and the bit period is unpredictable. SysTick counts real time
 /// regardless of fetch speed. Max ~349 ms (24-bit wrap) — fine for µs.
+#[inline(never)]
 fn us(n: u32) {
     let cyc = n * 48; /* 48 cycles/µs */
     let start = cortex_m::peripheral::SYST::get_current();
@@ -257,6 +260,7 @@ fn hold_50ms(n: u32) {
 }
 
 /// D− to the mark / "1" level = PB4 high, PB5 low (~3.3 V); D+ stays 0.6 V.
+#[inline(never)]
 fn dm_mark() {
     drive((true, false, true, false));
 }
@@ -268,6 +272,7 @@ fn dm_space() {
 /// PB4/PB5 (D−) as push-pull outputs (drive) or floating inputs (release, hi-Z).
 /// Releasing lets the charger drive D− for its Sping AND lets us read PB4.
 /// D+ (PA13/PA14) is untouched.
+#[inline(never)]
 fn dm_drive(drive: bool) {
     let gpiob = unsafe { &*pac::Gpiob::ptr() };
     if drive {
@@ -330,6 +335,7 @@ fn proto_measure_response() {
 
 /// Stock `proto_line_idle`: drive D− to the mark push-pull for 2.5 ms (the
 /// master "Mping"), then release D− (hi-Z) so the charger can Sping.
+#[inline(never)]
 fn proto_line_idle() {
     dm_drive(true);
     dm_mark();
@@ -795,6 +801,7 @@ pub fn scp() -> Result<(), u8> {
 
 /// `qcoff`: release D+/D− (pins back to floating input) and forget entry.
 /// The charger reverts to 5 V on its own timeout; our D± ADC read works again.
+#[inline(never)]
 pub fn off() -> Result<(), u8> {
     let rcu = unsafe { &*pac::Rcu::ptr() };
     let gpioa = unsafe { &*pac::Gpioa::ptr() };

@@ -108,6 +108,7 @@ pub fn next_screen() {
 }
 
 /// right-aligned decimal digits of `v` into `buf`, zero-padded
+#[inline(never)]
 fn digits(buf: &mut [u8], mut v: u32) {
     for b in buf.iter_mut().rev() {
         *b = b'0' + (v % 10) as u8;
@@ -116,6 +117,7 @@ fn digits(buf: &mut [u8], mut v: u32) {
 }
 
 /// right-aligned decimal digits with leading zeros blanked (last kept)
+#[inline(never)]
 fn digits_sp(buf: &mut [u8], v: u32) {
     digits(buf, v);
     let n = buf.len() - 1;
