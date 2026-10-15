@@ -10,8 +10,10 @@ const LN2_Q30: i64 = 744_261_118; /* ln 2 * 2^30 */
 const LN_1_15_Q24: i64 = 2_344_816; /* ln(11500/10000) * 2^24 */
 const B0_Q24: i64 = 194_135_151; /* 3450/298.15 * 2^24 */
 
-/// Whole °C (truncated toward zero) from a sum of 16 12-bit ADC samples.
-pub fn temp_c(sum16: u32) -> i32 {
+/// 1/128 °C (truncated toward zero) from a sum of 16 12-bit ADC samples —
+/// the powerz unit; `/ 128` gives the whole °C stock shows (truncation
+/// toward zero is preserved).
+pub fn temp_c128(sum16: u32) -> i32 {
     if !(16..=65504).contains(&sum16) {
         return 0; /* open/shorted divider — don't feed ln() garbage */
     }
@@ -21,7 +23,7 @@ pub fn temp_c(sum16: u32) -> i32 {
     /* T[µK] = 3450 / (3450/298.15 + ln R); the divisor is >= 3.3 over the
      * guarded range — max(1) only lets the compiler drop the /0 check */
     let t_uk = (3_450_000_000u64 << 24) / (B0_Q24 + ln_r).max(1) as u64;
-    ((t_uk as i64 - 273_150_000) / 1_000_000) as i32
+    ((t_uk as i64 - 273_150_000) * 128 / 1_000_000) as i32
 }
 
 /// log2(n) in Q24, n >= 1: integer part from the MSB, fraction by repeated

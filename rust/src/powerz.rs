@@ -23,15 +23,27 @@ const CMD_DISCONNECT: u8 = 0x03;
 const RSP_ACCEPT: u8 = 0x05;
 const RSP_REJECT: u8 = 0x06;
 const CMD_GET_DATA: u8 = 0x0C;
+const CMD_ENABLE_PD_MONITOR: u8 = 0x10;
+const CMD_DISABLE_PD_MONITOR: u8 = 0x11;
 const RSP_PUT_DATA: u8 = 0x41;
 const ATT_ADC: u16 = 0x0001;
 const ATT_PD: u16 = 0x0010; /* KM003C PdPacket (PD capture) */
+const ATT_PD_TRACE: u16 = 0x0020; /* KM003C PD state trace */
+const EXT_NEXT: u32 = 1 << 15; /* extended header: another logical packet follows */
+
+/// Set by EnablePdMonitor (USB ISR); the main loop starts the sniffer if
+/// the PD engine is off.
+pub static PD_MONITOR_REQ: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 pub const ADC_PAYLOAD_LEN: usize = 44;
 const ADC_REPLY_LEN: usize = 8 + ADC_PAYLOAD_LEN;
 /* one PD reply per poll fits a single 64-B bulk packet: 8 header + up to 56
  * payload (12-B preamble + one or two events); the host polls to drain more */
 const PD_REPLY_MAX: usize = 64;
+/* ADC + PD (GetData 0x0011): 8 + 44 ADC + 4 + PD payload, sent as two bulk
+ * packets; capped at 127 so the transfer always ends on a short packet
+ * (no zero-length packet needed) */
+const COMBINED_MAX: usize = 127;
 
 pub struct PowerZ<'a, B: UsbBus> {
     iface: InterfaceNumber,
@@ -41,8 +53,10 @@ pub struct PowerZ<'a, B: UsbBus> {
      * the IN endpoint takes it */
     pending: [u8; 4],
     pending_len: usize,
-    /* pending PD-capture reply length (bytes in PD_REPLY static); 0 = none */
+    /* pending PD_REPLY length (PD capture / trace / ADC+PD); 0 = none —
+     * sent in 64-B packets, pd_sent bytes of it so far */
     pd_pending: usize,
+    pd_sent: usize,
 }
 
 /* The pre-built PutData(ADC) reply lives in a static, NOT in the struct:
@@ -79,8 +93,12 @@ static REPLY: RacyCell<[u8; ADC_REPLY_LEN]> =
 /* PD-capture PutData reply, built on demand in poll_cmd (same exclusive
  * powerz context as REPLY). A static, not a struct field, for the same
  * stack-budget reason. */
-static PD_REPLY: RacyCell<[u8; PD_REPLY_MAX]> =
-    RacyCell(core::cell::UnsafeCell::new([0; PD_REPLY_MAX]));
+static PD_REPLY: RacyCell<[u8; COMBINED_MAX]> =
+    RacyCell(core::cell::UnsafeCell::new([0; COMBINED_MAX]));
+
+fn ext_header(att: u16, next: bool, size: usize) -> [u8; 4] {
+    (att as u32 | if next { EXT_NEXT } else { 0 } | (size as u32) << 22).to_le_bytes()
+}
 
 impl<'a, B: UsbBus> PowerZ<'a, B> {
     pub fn new(alloc: &'a UsbBusAllocator<B>) -> PowerZ<'a, B> {
@@ -105,6 +123,7 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
             pending: [0; 4],
             pending_len: 0,
             pd_pending: 0,
+            pd_sent: 0,
         }
     }
 
@@ -112,13 +131,16 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
     /// true once nothing is pending. PD replies take priority over the
     /// re-armed ADC packet so a GetData(ATT_PD) is answered with PD data.
     fn flush(&mut self) -> bool {
-        if self.pd_pending > 0 {
+        while self.pd_sent < self.pd_pending {
             let r = unsafe { &*PD_REPLY.0.get() };
-            match self.ep_in.write(&r[..self.pd_pending]) {
-                Ok(_) => self.pd_pending = 0,
+            let end = (self.pd_sent + 64).min(self.pd_pending);
+            match self.ep_in.write(&r[self.pd_sent..end]) {
+                Ok(_) => self.pd_sent = end,
                 Err(_) => return false,
             }
         }
+        self.pd_pending = 0;
+        self.pd_sent = 0;
         if self.pending_len == 0 {
             return true;
         }
@@ -174,10 +196,12 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
         let _ = self.ep_in.write(reply); /* WouldBlock while armed = cheap no-op */
     }
 
-    /// Service the OUT endpoint. GetData needs no action (the pre-armed
-    /// reply serves it); Connect/Disconnect get Accept, the rest Reject —
-    /// those queue behind the armed ADC packet, which only matters for
-    /// hosts beyond the kernel driver (Tier 2 work).
+    /// Service the OUT endpoint. GetData(ADC) needs no action (the pre-armed
+    /// reply serves it); PD, ADC+PD and PD-trace GetData build a reply;
+    /// Connect/Disconnect/Enable-/DisablePdMonitor get Accept (Enable also
+    /// requests the sniffer), the rest Reject — those queue behind the
+    /// armed ADC packet, which only matters for hosts beyond the kernel
+    /// driver.
     pub fn poll_cmd(&mut self) {
         let mut buf = [0u8; 64];
         match self.ep_out.read(&mut buf) {
@@ -188,9 +212,15 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
         let tid = buf[1];
         let attr = (buf[2] as u16 | (buf[3] as u16) << 8) >> 1;
         match cmd {
-            CMD_GET_DATA if attr == ATT_PD => self.build_pd(tid),
+            CMD_GET_DATA if attr == ATT_PD => self.build_pd(tid, false),
+            CMD_GET_DATA if attr == ATT_ADC | ATT_PD => self.build_pd(tid, true),
+            CMD_GET_DATA if attr == ATT_PD_TRACE => self.build_trace(tid),
             CMD_GET_DATA if attr & ATT_ADC != 0 => {} /* pre-armed reply serves it */
-            CMD_CONNECT | CMD_DISCONNECT => {
+            CMD_CONNECT | CMD_DISCONNECT | CMD_DISABLE_PD_MONITOR => {
+                self.queue(&[RSP_ACCEPT, tid, 0, 0]);
+            }
+            CMD_ENABLE_PD_MONITOR => {
+                PD_MONITOR_REQ.store(true, core::sync::atomic::Ordering::Relaxed);
                 self.queue(&[RSP_ACCEPT, tid, 0, 0]);
             }
             _ => {
@@ -199,28 +229,62 @@ impl<'a, B: UsbBus> PowerZ<'a, B> {
         }
     }
 
-    /// Build a PutData(ATT_PD) reply from the pd.rs capture ring into the
-    /// PD_REPLY static and queue it. The host may read the pre-armed ADC
+    /// Queue the `len`-byte PutData reply built in PD_REPLY (main header
+    /// filled here). A reply still being sent is never overwritten — its
+    /// events are already drained from the ring; the host gets it instead.
+    fn send_built(&mut self, tid: u8, len: usize) {
+        let reply = unsafe { &mut *PD_REPLY.0.get() };
+        let words = ((len - 4 + 3) / 4) as u16; /* everything after the main header */
+        reply[0] = RSP_PUT_DATA;
+        reply[1] = tid;
+        reply[2] = words as u8;
+        reply[3] = (words >> 8) as u8;
+        self.pd_pending = len;
+        self.pd_sent = 0;
+        self.flush();
+    }
+
+    /// Build a PutData(ATT_PD) reply from the pd.rs capture ring — after the
+    /// current ADC payload as a chained logical packet when `with_adc`
+    /// (GetData 0x0011) — and queue it. The host may read the pre-armed ADC
     /// packet first, then this on its next IN (filter by the ext-header
     /// attribute) — so the ADC fast-path is untouched. Empty ring still
     /// returns the 12-byte measurement preamble.
-    fn build_pd(&mut self, tid: u8) {
+    fn build_pd(&mut self, tid: u8, with_adc: bool) {
         #[cfg(feature = "triggers")]
         {
+            if self.pd_pending > 0 {
+                return;
+            }
             let reply = unsafe { &mut *PD_REPLY.0.get() };
-            let payload = crate::pd::drain_pd_packet(&mut reply[8..PD_REPLY_MAX]);
-            let words = ((4 + payload + 3) / 4) as u16; /* ext header + payload, in words */
-            reply[0] = RSP_PUT_DATA;
-            reply[1] = tid;
-            reply[2] = words as u8;
-            reply[3] = (words >> 8) as u8;
-            let ext: u32 = ATT_PD as u32 | (payload as u32) << 22;
-            reply[4..8].copy_from_slice(&ext.to_le_bytes());
-            self.pd_pending = 8 + payload;
-            self.flush();
+            let mut off = 4;
+            let mut cap = PD_REPLY_MAX;
+            if with_adc {
+                let adc = unsafe { &*REPLY.0.get() };
+                reply[4..8].copy_from_slice(&ext_header(ATT_ADC, true, ADC_PAYLOAD_LEN));
+                reply[8..ADC_REPLY_LEN].copy_from_slice(&adc[8..]);
+                off = ADC_REPLY_LEN;
+                cap = COMBINED_MAX;
+            }
+            let payload = crate::pd::drain_pd_packet(&mut reply[off + 4..cap]);
+            reply[off..off + 4].copy_from_slice(&ext_header(ATT_PD, false, payload));
+            self.send_built(tid, off + 4 + payload);
         }
         #[cfg(not(feature = "triggers"))]
         self.queue(&[RSP_REJECT, tid, 0, 0]); /* no PD engine without triggers */
+    }
+
+    /// PD state trace: both queues empty (count bytes 0). The KM003C's
+    /// state/protocol codes are firmware-specific and undocumented.
+    fn build_trace(&mut self, tid: u8) {
+        if self.pd_pending > 0 {
+            return;
+        }
+        let reply = unsafe { &mut *PD_REPLY.0.get() };
+        reply[4..8].copy_from_slice(&ext_header(ATT_PD_TRACE, false, 2));
+        reply[8] = 0;
+        reply[9] = 0;
+        self.send_built(tid, 10);
     }
 }
 
@@ -238,6 +302,7 @@ impl<B: UsbBus> UsbClass<B> for PowerZ<'_, B> {
          * response is gone from the hardware — forget it */
         self.pending_len = 0;
         self.pd_pending = 0;
+        self.pd_sent = 0;
     }
 
     fn endpoint_out(&mut self, addr: EndpointAddress) {

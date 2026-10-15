@@ -101,6 +101,11 @@ fn d_line_1e2(sum16: u32) -> u32 {
     sum16 * 330 / 65520
 }
 
+/// D± line voltage in 0.1 mV from a sum of 16 12-bit samples (3.3 V ref).
+fn d_line_tmv(sum16: u32) -> u16 {
+    (sum16 * 33000 / 65520) as u16
+}
+
 fn eeprom_u32(off: u16) -> Option<u32> {
     let mut b = [0u8; 4];
     i2c::transact(EEPROM_ADDR, &[(off >> 8) as u8, off as u8], &mut b).ok()?;
@@ -203,6 +208,10 @@ pub struct Meas {
     pub ori_ua: i32,
     /// logic-rail voltage from the Vrefint ratio (thread-written, powerz Vdd)
     pub vdd_mv: u32,
+    /* powerz resolution: 1/128 °C, D± in 0.1 mV (thread-written) */
+    pub temp_c128: i32,
+    pub dp_tmv: u16,
+    pub dm_tmv: u16,
 }
 
 static PUBLISHED: Racy<Meas> = Racy(core::cell::UnsafeCell::new(Meas {
@@ -220,6 +229,9 @@ static PUBLISHED: Racy<Meas> = Racy(core::cell::UnsafeCell::new(Meas {
     ori_uv: 0,
     ori_ua: 0,
     vdd_mv: 0,
+    temp_c128: 0,
+    dp_tmv: 0,
+    dm_tmv: 0,
 }));
 
 /// 4 ms ticks since `start()` (ISR increments; thread derives every cadence
@@ -379,11 +391,15 @@ fn adc_burst() {
         Ok(s) if s > 0 => (16u64 * 4095 * 1200 / s as u64) as u32,
         _ => 0,
     };
+    let t128 = ntc.map(crate::ntc::temp_c128).unwrap_or(0);
     cortex_m::interrupt::free(|_| unsafe {
         let m = &mut *PUBLISHED.0.get();
         m.dp_1e2 = dp.map(d_line_1e2).unwrap_or(0);
         m.dm_1e2 = dm.map(d_line_1e2).unwrap_or(0);
-        m.temp_c = ntc.map(crate::ntc::temp_c).unwrap_or(0);
+        m.dp_tmv = dp.map(d_line_tmv).unwrap_or(0);
+        m.dm_tmv = dm.map(d_line_tmv).unwrap_or(0);
+        m.temp_c128 = t128;
+        m.temp_c = t128 / 128;
         m.vdd_mv = vdd;
     });
     mk(MK_SMP_ADCB, mk_get(MK_SMP_ADCB) + 1);

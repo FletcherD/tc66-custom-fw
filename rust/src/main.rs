@@ -97,7 +97,7 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
 /// Bumped to prove a self-hosted reflash actually took (read at MK_BUILD).
-const BUILD_ID: u32 = 165;
+const BUILD_ID: u32 = 167;
 
 type Dev<'a> = UsbDevice<'a, usb_bus::UsbBus>;
 /// 64-B read store (one full USB packet — commands are <=10 B) and 96-B
@@ -312,6 +312,13 @@ fn run() -> ! {
      * screen restored at boot (cfg::apply_boot, above) does not count */
     #[cfg(feature = "triggers")]
     let mut last_screen = ui::screen();
+    /* a host enumerating us starts the sniffer if the engine is off: with a
+     * PC on the USB port the meter's power doesn't depend on the Rd that
+     * sniffing drops (FIRMWARE.md "Sniffer"). Edge-triggered, so `pdctl 0`
+     * holds until the next enumeration. Suspend counts only after Configured:
+     * with no host the idle bus reads as a suspend too. */
+    #[cfg(feature = "triggers")]
+    let mut enumerated = false;
 
     /* screen refresh every 125 ticks (0.5 s); only changed cells are drawn
      * (ui.rs dirty tracking), so an idle refresh costs nothing */
@@ -381,6 +388,18 @@ fn run() -> ! {
                 if last_screen == ui::PD && pd::is_off() && !detect::busy() {
                     let _ = pd::sniff(); /* failure shows as "PD off" */
                 }
+            }
+            #[cfg(feature = "triggers")]
+            {
+                let st = with_usb(|dev, _, _| dev.state());
+                let e = st == Some(UsbDeviceState::Configured)
+                    || (enumerated && st == Some(UsbDeviceState::Suspend));
+                /* a KM003C host's EnablePdMonitor does the same */
+                let req = powerz::PD_MONITOR_REQ.swap(false, core::sync::atomic::Ordering::Relaxed);
+                if ((e && !enumerated) || req) && pd::is_off() && !detect::busy() {
+                    let _ = pd::sniff(); /* failure shows as "PD off" */
+                }
+                enumerated = e;
             }
             sec_ticks += elapsed;
             while sec_ticks >= 250 {
@@ -1639,15 +1658,14 @@ fn powerz_payload() -> [u8; powerz::ADC_PAYLOAD_LEN] {
     put(12, m.avg_i_1e5 * 10);
     put(16, m.ori_uv as i32);
     put(20, m.ori_ua);
-    let t = if m.temp_c < 0 { 0 } else { m.temp_c as u32 };
-    p[24] = ((t % 2) * 128) as u8; /* 1/128 degC units */
-    p[25] = (t / 2) as u8; /* 2 degC units */
+    let t = m.temp_c128.clamp(i16::MIN as i32, i16::MAX as i32) as i16; /* 1/128 degC */
+    p[24..26].copy_from_slice(&t.to_le_bytes());
     let mut put16 = |off: usize, v: u32| {
         let c = if v > 0xFFFF { 0xFFFF } else { v as u16 };
         p[off..off + 2].copy_from_slice(&c.to_le_bytes());
     };
-    put16(30, m.dp_1e2 * 100); /* 1e-2 V -> 0.1 mV units */
-    put16(32, m.dm_1e2 * 100);
+    put16(30, m.dp_tmv as u32); /* 0.1 mV units */
+    put16(32, m.dm_tmv as u32);
     /* Vcc1/Vcc2: CC-pin voltages from the PD engine's MDAC sweep — live
      * while the engine is armed (`pdctl 1`), 0 otherwise. Vdd: logic rail
      * via the Vrefint ratio (each window's ADC burst). */
@@ -1658,6 +1676,11 @@ fn powerz_payload() -> [u8; powerz::ADC_PAYLOAD_LEN] {
     put16(26, c1 as u32 * 10); /* mV -> 0.1 mV units */
     put16(28, c2 as u32 * 10);
     put16(34, m.vdd_mv * 10);
+    /* 36 sample-rate index, 37 flags: meaning unknown, left 0. The "avg"
+     * fields (mV) carry the same values: ours are already window means. */
+    put16(38, c2 as u32);
+    put16(40, m.dp_tmv as u32 / 10);
+    put16(42, m.dm_tmv as u32 / 10);
     p
 }
 

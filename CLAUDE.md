@@ -10,7 +10,7 @@ tft.rs + six screens in ui.rs — V/I/P, energy + run clock, temp/D±,
 plot.rs's full-screen V/I plot on the panel's hardware rolling scroll, and
 pdscr.rs's paged PD info screen (pdinfo.rs parser fed at pd.rs's capture
 points, 7×13 font_small.rs, scroll bar; entering it starts the sniffer if
-PD is off — never at boot; `pdinf` verb + `pd.py info`), and detect.rs's
+PD is off; a host enumerating the meter starts it too — `pdctl 0` holds until the next enumeration, never without a PC (FIRMWARE.md "Sniffer"); `pdinf` verb + `pd.py info`), and detect.rs's
 charger detection screen on the same grid (K2 runs tools/detect.py's
 sequence on the device as a main-loop-stepped state machine, ≤5 V,
 refuses with a load/sink on the other port, ends PD off; `detct` verb +
@@ -57,7 +57,10 @@ voltage — nothing downstream when triggering**) are done. Pixel streaming is D
 on DMA ch2, pumped by ui::service from the main loop — no display
 interrupt); the first frame draws pre-enumeration, so the screen is live
 from power-on. USB is ISR-serviced and the device is a composite that
-emulates a POWER-Z KM003C (mainline Linux `powerz` hwmon binds it) —
+emulates a POWER-Z KM003C (mainline Linux `powerz` hwmon binds it; ADC,
+PdPacket, ADC+PD chained, empty PD trace, Enable-/DisablePdMonitor — the
+rest Rejects; docs/HARDWARE.md "powerz vendor protocol",
+tools/dev/km003c_check.py) —
 **powerz comms are the priority path; getva/CDC exists for
 compatibility**. The sampler runs from the TIMER5 interrupt (250 Hz,
 interleaved INA226 reads — ina.rs), immune to main-loop blocking. The hot

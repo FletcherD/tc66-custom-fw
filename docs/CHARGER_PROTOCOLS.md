@@ -164,7 +164,7 @@ device on the other port).
 
   Identity answers are optional in the spec; Get_PPS_Status is the one a
   PPS source must answer.
-- **Meter as listen-only sniffer** (`pdctl 3`, `pd.py sniff`, or entering
+- **Meter as listen-only sniffer** (`pdctl 3`, `pd.py sniff`, a host enumerating the meter, or entering
   the PD info screen): no Rd, no GoodCRC, never transmits; the receiver
   locks onto the CC carrying the source's Rp; every SOP/SOP′/SOP″ frame from
   both sides goes into the KM003C capture ring (`tools/pdcap.py`), and the

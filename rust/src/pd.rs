@@ -1,4 +1,4 @@
-//! FUSB302 USB-PD sink engine (M4 bring-up). Host-armed, nothing at boot.
+//! FUSB302 USB-PD sink engine (M4 bring-up). Host-armed; main.rs starts the sniffer on USB enumeration.
 //!
 //! The FUSB302 (I²C 0x22, shared bus with the INA226/EEPROM) is the Type-C
 //! CC PHY: it handles BMC signaling, CRC and GoodCRC replies (AUTO_CRC) in

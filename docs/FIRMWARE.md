@@ -483,9 +483,10 @@ Related subtleties, all load-bearing:
   the screen index *changing* to 4 (K1, `bnextp`/`blastp`, `cfgwr screen`,
   `uiscr`) and runs `pd::sniff()` if the engine is off — never over a
   host-armed sink session; it keeps running until `pdctl 0`. The screen
-  restored at boot does NOT start it (nothing PD at boot; and a charger
-  feeding the meter through IN with nothing on OUT would drop VBUS once the
-  meter's Rd goes away — a reboot loop if boot sniffed); K2 does then.
+  restored at boot does NOT start it (a charger feeding the meter through
+  IN with nothing on OUT would drop VBUS once the meter's Rd goes away — a
+  reboot loop without a PC on the USB port); K2 does then. **Sniff on
+  enumeration** (below) covers the PC-attached case.
 - **Charger detection screen** (screen 5, `detect.rs` on pdscr.rs's grid —
   `pdscr::enter(det)` picks the line source; `triggers`): tools/detect.py
   on the device, never above 5 V. K2 short press starts a run when there
@@ -541,7 +542,8 @@ Related subtleties, all load-bearing:
 ## USB-PD sink / voltage trigger (M4, `pd.rs`)
 
 Host-armed FUSB302 PD 2.0/3.0 sink (`triggers` feature — in release builds)
-— **nothing runs at boot**; `pdctl 1` arms
+— the sink is never armed by itself (the sniffer starts on enumeration,
+below); `pdctl 1` arms
 it, `pdctl 0` shuts it off, `pdctl 2` sends a Hard Reset, `pdctl 3` starts
 the listen-only sniffer (below). Bench-verified
 against two chargers: an Apple 96 W (fixed PDOs at PD 2.0, 5/9/15/20 V) and a
@@ -636,6 +638,19 @@ past the ~10 s keepalive deadline).
   against a **fresh** `ina::ticks()` read, not the poll-entry snapshot — a
   request is stamped mid-poll after ms of I2C, so `entry_now - req_tick`
   wraps negative and fires instantly.
+- **Sniff on enumeration** (main loop, `triggers`): each transition of the
+  USB device into Configured starts the sniffer if the engine is off and no
+  detection run is busy. With a PC on the meter's USB port the meter stays
+  powered whatever the POWER switch says (the PC port has priority and
+  rides out the metered VBUS dropping), so dropping the Rd is safe; without
+  a PC the meter never enumerates and keeps the FUSB302's default Rd, so a
+  Type-C source on IN keeps powering it. Edge-triggered: `pdctl 0` holds
+  until the next enumeration (unplug/replug = bus reset). Suspend counts as
+  still enumerated only after Configured — with no host the idle bus reads
+  as a suspend too. The POWER switch itself is not readable: no GPIO, ADC
+  channel or FUSB302/INA226 register follows it, and the meter's own supply
+  is taken ahead of the shunt (`tools/dev/snapshot.py` save/diff). With
+  nothing on OUT the source turns VBUS off while sniffing.
 - **Sniffer** (`pdctl 3`, state `ST_SNIFF`): listen-only — Switches0 with no
   Rd (the ~500 ms MDAC sweep also runs without Rd), Switches1 without
   AUTO_CRC or TXCC, never transmits. `sniff_poll` locks the receiver onto the
@@ -760,7 +775,10 @@ PD traffic.
   `flush()` — so the **ADC fast-path is untouched**. The host may read the
   armed ADC first, then the PD reply on its next IN; it filters by the
   ext-header attribute. One 64-B packet per poll (preamble + one/two events);
-  the host polls to drain more.
+  the host polls to drain more. `GetData 0x0011` puts the current ADC
+  payload in front as a chained logical packet (≤127 B, sent as two bulk
+  packets by `flush()`; never 128, so no ZLP). A reply still being sent is
+  never rebuilt — its events are already drained from the ring.
 - Host tool: `tools/pdcap.py` (uv script, libusb; decodes every control /
   data / extended message type — PDOs + 5 V PDO flags, RDOs, Discover
   Identity incl. UFP/DFP/cable/VPD VDOs, SVIDs, Source/Sink_Capabilities_

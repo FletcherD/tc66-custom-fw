@@ -58,10 +58,15 @@ fn exact(sum16: u32) -> f64 {
     1.0 / (1.0 / 298.15 + (r / 10_000.0).ln() / 3450.0) - 273.15
 }
 
+/// whole °C as the firmware derives it (temp_c128 / 128)
+fn temp_c(sum16: u32) -> i32 {
+    ntc::temp_c128(sum16) / 128
+}
+
 fn check_ntc() -> bool {
     let (mut vs_stock, mut vs_exact) = (0u32, 0u32);
     for s in 0..=65535u32 {
-        let v = ntc::temp_c(s);
+        let v = temp_c(s);
         if v != stock_f32(s) {
             vs_stock += 1;
             println!("  sum16={s}: fixed={v} stock_f32={} exact={:.6}", stock_f32(s), exact(s));
@@ -71,8 +76,16 @@ fn check_ntc() -> bool {
         }
     }
     println!("ntc: sum16 0..=65535 ({}..={} C): {vs_stock} differ from stock f32, {vs_exact} from trunc(exact)",
-             ntc::temp_c(65504), ntc::temp_c(16));
-    vs_stock == 0
+             temp_c(65504), temp_c(16));
+    /* the 1/128 °C powerz value: within one LSB of the exact model */
+    let mut off128 = 0u32;
+    for s in 16..=65504u32 {
+        if (ntc::temp_c128(s) as f64 - exact(s) * 128.0).abs() > 1.0 {
+            off128 += 1;
+        }
+    }
+    println!("ntc: temp_c128 off by > 1/128 C from exact: {off128}");
+    vs_stock == 0 && off128 == 0
 }
 
 fn gmul(mut a: u8, mut b: u8) -> u8 {

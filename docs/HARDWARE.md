@@ -105,18 +105,28 @@ ADC payload (built in `powerz_payload()`, main.rs):
 
 | Offset | Field (LE) |
 |---|---|
-| 0 / 4 | instantaneous Vbus µV (i32) / Ibus µA (i32) |
+| 0 / 4 | instantaneous Vbus µV (i32) / Ibus µA (i32, signed: + = IN → OUT) |
 | 8 / 12 | 1 s average µV / µA |
 | 16 / 20 | 1 s nominal-scale ("original") µV / µA |
-| 24, 25 | temp: 1/128 °C units, 2 °C units (clamped ≥ 0) |
-| 26, 28, 34 | Vcc1/Vcc2 (CC pins, FUSB302 MDAC sweep — live while the PD engine is armed, else 0) / Vdd (logic rail via Vrefint) — u16, 0.1 mV |
+| 24 | temp, i16, 1/128 °C (NTC, `ntc::temp_c128`) |
+| 26, 28, 34 | Vcc1/Vcc2 (CC pins, FUSB302 MDAC sweep, 42 mV steps — live while the PD engine is armed or sniffing, else 0) / Vdd (logic rail via Vrefint) — u16, 0.1 mV |
 | 30 / 32 | D+ / D− in 0.1 mV units (u16) |
-| 36..44 | reserved, 0 |
+| 36 / 37 | KM003C `sample_rate_idx` / `flags` — meaning undocumented (36 is probably the graph rate), 0 |
+| 38 / 40 / 42 | KM003C "avg" CC2 / D+ / D− in mV (u16) — the same values as above (ours are window means already) |
 
 The reply is **pre-armed** on the IN endpoint (rebuilt at the 250 Hz tick,
 re-armed unconditionally per ISR pass) so a host read completes without
 NAK-polling — the driver's 5 ms URB budget is the design constraint.
-`Connect`/`Disconnect` (0x02/0x03) get Accept; other commands Reject.
+`Connect`/`Disconnect` (0x02/0x03) and `Enable`/`DisablePdMonitor`
+(0x10/0x11) get Accept — Enable also starts the sniffer if the PD engine
+is off (main loop, `powerz::PD_MONITOR_REQ`); Disable changes nothing (the
+real KM003C buffers PD events regardless). `GetData` 0x0011 (ADC + PD)
+answers with both as chained logical packets (ext-header `next` bit 15) in
+one ≤127-B transfer (two bulk packets); 0x0020 (PD state trace) answers
+with both queues empty (count bytes 0 — the KM003C's state codes are
+undocumented). Everything else (StartGraph/AdcQueue, StreamingAuth,
+MemoryRead, Settings, LogMetadata) gets Reject. `tools/dev/km003c_check.py`
+exercises every reply.
 Bench: >5000 reads/s sustained with zero timeouts.
 
 The vendor protocol also serves **`GetData(ATT_PD=0x0010)`** — the KM003C
@@ -442,7 +452,7 @@ Chromium EC `fusb302`, various USB-PD stacks; `FUSB302B Datasheet.pdf` in the
 repo root — this unit reads Device ID **0x81** = FUSB302, silicon rev B).
 
 **Our firmware's sink engine (rust/src/pd.rs, M4) is live and bench-verified**
-(host-armed with `pdctl 1`, nothing at boot; needs `triggers`):
+(host-armed with `pdctl 1`; the sniffer starts when a host enumerates the meter; needs `triggers`):
 attach/orientation, Source_Capabilities collection, PD 2.0/3.0 fixed-PDO
 requests (5–20 V), PPS APDO setpoints (bench 3.3–11 V), hard reset, and the
 PD capture ring behind the powerz `ATT_PD` attribute. **The FUSB302 sits on
