@@ -167,6 +167,17 @@ serial port in the middle of a flash and abort it. If a flash fails, run
 `sudo systemctl stop ModemManager` and retry. Close any other program
 that has the meter's port open.
 
+**macOS notes:** `flash` and `stock` ask for your password. They reach the
+bootloader over libusb instead of the serial port, and only root may detach
+macOS's serial driver from the meter. The serial port cannot be used for
+flashing on macOS: the driver sends an empty USB packet after every 64-byte
+chunk, the bootloader takes it as data, and the image never boots, although
+the meter shows `UPDATE SUCCESS!`. If an older flasher left your meter dark
+like that, flash again with the current one. The bootloader itself is never
+affected. libusb comes with the flasher's dependencies, so you need nothing
+besides uv. `backup-eeprom` and `version` use the serial port as usual and
+need no password.
+
 ## Going back to stock
 
 The stock firmware is not redistributed here. The flasher downloads the
