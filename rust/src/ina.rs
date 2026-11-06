@@ -154,14 +154,30 @@ fn ina_read(reg: u8) -> Result<u16, i2c::I2cErr> {
     Ok(u16::from_be_bytes(b))
 }
 
+/// Stock V1.18 picks its current model by serial number (0x0800bbbe):
+/// serial >= 0x7000 is the Σ16 offset-binary model above; older units use
+/// I = Σ8 |raw + off| * gainC / 10000 with ref as a small zero offset
+/// (`off`; stock zeroes ref > 6 at boot and skips it below serial 0x2a8).
+/// That is the same as the Σ16 model with refz = 16 * (0x8000 - off) and
+/// doubled gains, so convert here and leave cal_i alone.
+const SERIAL_SIGMA16: u32 = 0x7000;
+
 fn load_cal() -> Option<Cal> {
-    Some(Cal {
+    let mut c = Cal {
         gain_v: eeprom_u32(0x2004)?,
         off_v: eeprom_u32(0x2044)?,
         gain_cp: eeprom_u32(0x2008)?,
         gain_cn: eeprom_u32(0x200c)?,
         refz: eeprom_u32(0x2058)?,
-    })
+    };
+    let serial = crate::persist::serial();
+    if serial < SERIAL_SIGMA16 {
+        let off = if serial >= 0x2a8 && c.refz <= 6 { c.refz } else { 0 };
+        c.refz = 16 * (0x8000 - off);
+        c.gain_cp *= 2;
+        c.gain_cn *= 2;
+    }
+    Some(c)
 }
 
 /// Put the INA226 in a known state: the power-on default 0x4127 (continuous
