@@ -87,6 +87,12 @@ def meter_candidates():
         rp = os.path.realpath(p)
         if rp not in skip and rp not in cands:
             cands.append(rp)
+    # Non-Linux hosts have no by-id/ttyACM paths, so match the meter's USB ids.
+    if not cands:
+        from serial.tools import list_ports
+        for p in list_ports.comports():
+            if p.vid is not None and f"{p.vid:04x}:{p.pid:04x}" in METER_VIDPIDS:
+                cands.append(p.device)
     return cands
 
 
