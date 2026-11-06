@@ -458,6 +458,20 @@ The gains bake in those exact sum depths (**8** for V, **16** for I) — change 
 samples you sum, or enable INA226 hardware averaging, and the constants no longer apply
 without rescaling. Power = V·I computed in software for the `getva` reply (offset 56).
 
+**Older units (serial < `0x7000`) use a different current model.** Stock V1.18
+picks the model by the factory serial (main loop at `0x0800bbbe`): the Σ16 formula
+above (`0x08005938`) is for serial ≥ `0x7000`. Older serials go through `0x08005774`:
+```
+CURRENT:  I[1e-5 A] = floor( (Σ8 |raw + off|) · gainC / 10000 )
+```
+Here `off` is `ref` used as a small zero offset. It is applied only if
+serial ≥ `0x2A8`, and stock's boot code zeroes `ref` > 6 on these units (`0x0800b93c`),
+so `ref` is ~0 on them, not ~524268. Gain selection and sign are the same as above. This is
+equivalent to the Σ16 form with `ref' = 16·(0x8000 − off)` and both gains doubled, so
+`ina.rs` `load_cal()` converts once at boot and the sampler uses one formula.
+Applying the Σ16 model unconverted to such a unit (e.g. serial 20776, `ref` 0) reads
+a phantom ~+2.7 A at idle with half the real slope.
+
 ### Temperature (NTC) & D±
 Both come from the **GD32 on-chip 12-bit ADC** (DMA'd, 16-sample sums).
 
